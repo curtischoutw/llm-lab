@@ -1,0 +1,5 @@
+# 鎖定 RAG-Anything 1.4.3；其底層 LightRAG 目前解析到 1.4.16，限制 <1.5。
+# 在 Python 3.12.12 的 venv 以 `pip install -r requirements.txt` 安裝。
+# python-dotenv、openai 等其餘套件由 raganything 帶入，不另列。
+raganything==1.4.3
+lightrag-hku<1.5

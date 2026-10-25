@@ -1,0 +1,13 @@
+# 環境與機密
+.venv/
+.env
+
+# Python 產物
+__pycache__/
+*.pyc
+
+# 資料（路徑對應 .env.example 的預設值與 spec 的資料夾）
+/papers/
+/rag_storage/
+/output/
+/eval_results/

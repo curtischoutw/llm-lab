@@ -25,13 +25,21 @@ from dotenv import load_dotenv
 
 
 class ConfigError(ValueError):
-    """設定缺漏或格式錯誤。"""
+    """設定缺漏或格式錯誤。訊息只含欄位名稱與原因，不含欄位值（可能是金鑰）。
+
+    Attributes:
+        field: 出問題的環境變數名稱。
+    """
+
+    def __init__(self, field: str, reason: str):
+        super().__init__(f"{field} {reason}")
+        self.field = field
 
 
 def _required(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
-        raise ConfigError(f"缺少必要環境變數 {name}（參考 .env.example）")
+        raise ConfigError(name, "缺少必要環境變數（參考 .env.example）")
     return value
 
 
@@ -39,7 +47,7 @@ def _url(name: str) -> str:
     value = _required(name)
     parsed = urlparse(value)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise ConfigError(f"{name} 不是合法的 http(s) URL：{value!r}")
+        raise ConfigError(name, "不是合法的 http(s) URL")
     return value.rstrip("/")
 
 
@@ -48,9 +56,9 @@ def _positive_int(name: str) -> int:
     try:
         value = int(raw)
     except ValueError as exc:
-        raise ConfigError(f"{name} 必須是整數：{raw!r}") from exc
+        raise ConfigError(name, "必須是整數") from exc
     if value <= 0:
-        raise ConfigError(f"{name} 必須大於 0：{value}")
+        raise ConfigError(name, "必須大於 0")
     return value
 
 
