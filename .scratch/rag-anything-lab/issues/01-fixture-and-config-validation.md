@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] CLI 在設定缺漏、URL 格式不合法、`EMBED_DIM` 等整數欄位非正整數時，以非零碼結束，錯誤訊息指出是哪個欄位，不印出任何金鑰值。
 - [x] 有 `.env.example`，列出全部欄位並附用途說明，欄位名稱與現有冒煙測試使用的環境變數一致。

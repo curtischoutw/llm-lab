@@ -7,7 +7,10 @@ __pycache__/
 *.pyc
 
 # 資料（路徑對應 .env.example 的預設值與 spec 的資料夾）
-/papers/
+/data/
 /rag_storage/
 /output/
 /eval_results/
+
+# subagent worktrees
+/.claude/worktrees/
