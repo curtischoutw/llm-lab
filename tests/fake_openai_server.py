@@ -21,6 +21,9 @@ ticket 的 CLI 測試都共用它。涵蓋 chat、vision、embeddings 三種能�
 - 記錄收到的請求（requests）與 chat、embeddings 各自同時處理數的最大值
   （max_inflight_chat、max_inflight_embed），並可注入故障（fail_chat、fail_vision）與延遲
   （chat_delay、embed_delay），讓測試從 HTTP 邊界觀察 CLI 的外部行為。
+- fail_chat_containing 只讓訊息文字含指定字串的 chat 請求失敗（模擬單一題目失敗）；
+  fail_keywords 只讓關鍵字抽取請求（帶 response_format）失敗，naive 模式不做關鍵字抽取，
+  所以只有其餘四種檢索模式的查詢會失敗（模擬單一模式失敗）。
 - die_after_chat 模擬 mlx_lm.server 生成執行緒死掉（GPU 記憶體不足時實測）：正在生成的那個
   請求永遠不回應，之後的請求回 404 generation thread died。不回應的請求在 stop() 時才放開。
 
@@ -211,6 +214,12 @@ class _Handler(BaseHTTPRequestHandler):
         if self.server.fail_chat:
             self._send_error(500, "injected chat failure")
             return
+        if self.server.fail_chat_containing and self.server.fail_chat_containing in _message_text(messages):
+            self._send_error(500, "injected chat failure")
+            return
+        if payload.get("response_format") and self.server.fail_keywords:
+            self._send_error(500, "injected keyword failure")
+            return
         if images and self.server.fail_vision:
             self._send_error(500, "injected vision failure")
             return
@@ -285,6 +294,8 @@ class _Server(ThreadingHTTPServer):
         self.embed_dim = embed_dim
         self.fail_chat = False
         self.fail_vision = False
+        self.fail_chat_containing: str | None = None
+        self.fail_keywords = False
         self.chat_delay = 0.0
         self.embed_delay = 0.0
         self.die_after_chat: int | None = None
@@ -376,6 +387,24 @@ class FakeOpenAIServer:
     @fail_vision.setter
     def fail_vision(self, value: bool) -> None:
         self._server.fail_vision = value
+
+    @property
+    def fail_chat_containing(self) -> str | None:
+        """設為字串時，訊息文字含該字串的 chat 請求回 500，其他請求正常。"""
+        return self._server.fail_chat_containing
+
+    @fail_chat_containing.setter
+    def fail_chat_containing(self, value: str | None) -> None:
+        self._server.fail_chat_containing = value
+
+    @property
+    def fail_keywords(self) -> bool:
+        """為 True 時，關鍵字抽取請求（帶 response_format）回 500，其他 chat 請求正常。"""
+        return self._server.fail_keywords
+
+    @fail_keywords.setter
+    def fail_keywords(self, value: bool) -> None:
+        self._server.fail_keywords = value
 
     @property
     def chat_delay(self) -> float:

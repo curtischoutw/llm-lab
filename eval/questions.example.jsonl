@@ -1,0 +1,2 @@
+{"id": "text-01", "question": "LightRAG 的雙層檢索（dual-level retrieval）分成哪兩個層級？各自處理什麼類型的查詢？", "reference": "分成 low-level 與 high-level。low-level 檢索針對具體實體及其屬性與關係，處理指名特定實體的細節型查詢；high-level 檢索針對較廣的主題與整體概念，彙整多個相關實體與關係，處理抽象型查詢。", "type": "text", "source": "2410.05779"}
+{"id": "cross-01", "question": "RAG-Anything 的知識圖譜建構方式與 LightRAG 有什麼不同？", "reference": "LightRAG 對文字切塊做實體與關係抽取，經 LLM 摘要與去重後建成一張圖。RAG-Anything 建兩張圖：以圖片、表格、公式等非文字單元為錨點、由多模態模型描述後抽取的跨模態知識圖譜，以及用文字抽取流程建的文字知識圖譜，再透過實體對齊合併。", "type": "cross-paper", "source": "2410.05779, 2510.12323"}

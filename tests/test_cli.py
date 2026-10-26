@@ -117,8 +117,9 @@ def run_cli(
 # ==============================
 # 子命令註冊
 # ==============================
-# ingest／query 的行為見 tests/test_pipeline.py；這裡的設定驗證測試用 eval 當探針：
-# eval 通過設定驗證後只會印「尚未實作」，不會去連端點或建立索引資料夾。
+# ingest／query 的行為見 tests/test_pipeline.py，eval 見 tests/test_eval.py；這裡的設定驗證測試
+# 用 eval 搭配一個不存在的題目檔當探針：eval 通過設定驗證後會先讀題目檔並以「輸入錯誤」結束，
+# 不會去連端點或建立索引資料夾。
 
 
 class SubcommandsTest(unittest.TestCase):
@@ -128,10 +129,11 @@ class SubcommandsTest(unittest.TestCase):
         cls.server.start()
         cls.addClassCleanup(cls.server.stop)
 
-    def test_valid_config_unimplemented_eval_exits_nonzero_with_message(self):
+    def test_valid_config_eval_reaches_the_command_and_rejects_a_missing_question_file(self):
         result = run_cli(["eval", "questions.jsonl"], valid_env(self.server.base_url))
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("尚未實作", result.stderr)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("輸入錯誤", result.stderr)
+        self.assertIn("questions.jsonl", result.stderr)
         self.assertNotIn("設定錯誤", result.stderr)
 
 
@@ -142,10 +144,11 @@ class SubcommandsTest(unittest.TestCase):
 
 class ConfigValidationTest(unittest.TestCase):
     def assert_config_rejected(self, result: subprocess.CompletedProcess, field: str) -> None:
-        """斷言 CLI 以非零碼中止、錯誤訊息指出欄位，且不是走到「尚未實作」。"""
-        self.assertNotEqual(result.returncode, 0)
+        """斷言 CLI 以設定錯誤的結束碼中止，錯誤訊息指出欄位，且沒有走到子命令本身的輸入檢查。"""
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("設定錯誤", result.stderr)
         self.assertIn(field, result.stderr)
-        self.assertNotIn("尚未實作", result.stderr)
+        self.assertNotIn("輸入錯誤", result.stderr)
 
     def test_missing_required_field_names_the_field(self):
         for field in REQUIRED_FIELDS:
@@ -218,7 +221,7 @@ class EnvExampleTest(unittest.TestCase):
         template = parse_env_example()
         self.assertEqual(set(template), set(REQUIRED_FIELDS + OPTIONAL_FIELDS))
         result = run_cli(["eval", "q.jsonl"], template)
-        self.assertIn("尚未實作", result.stderr)
+        self.assertIn("輸入錯誤", result.stderr)
         self.assertNotIn("設定錯誤", result.stderr)
 
 
