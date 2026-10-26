@@ -1,11 +1,12 @@
-"""命令列入口：`python -m rag_lab {ingest,query,eval}`。
+"""命令列入口：`python -m rag_lab {ingest,query,graph,eval}`。
 
-為什麼存在：spec 的唯一測試縫與使用者介面都是 CLI。本檔註冊三個子命令，保證任何
-子命令啟動時都先驗證設定，並把 ingest／query 接到 rag_lab.pipeline 後格式化輸出。
+為什麼存在：spec 的唯一測試縫與使用者介面都是 CLI。本檔註冊四個子命令，保證任何
+子命令啟動時都先驗證設定，並把 ingest／query 接到 rag_lab.pipeline、graph 接到
+rag_lab.graph_report 後格式化輸出。
 
 關鍵設計決策：
-- 結束碼：0 成功、1 執行失敗（含 eval 尚未實作）、2 命令列用法或輸入路徑錯誤、
-  3 設定錯誤。
+- 結束碼：0 成功、1 執行失敗（含 eval 尚未實作、graph 的圖譜不存在或為空）、2 命令列用法或
+  輸入路徑錯誤、3 設定錯誤。
 - 設定錯誤只輸出欄位名稱與原因類型，絕不輸出欄位值（可能是金鑰）。
 - 設定驗證與輸入路徑檢查都在 import 重量級模組（lightrag、torch）之前完成，錯誤能立即回報。
 - 執行期失敗（端點錯誤、MinerU 失敗、查詢失敗）在這裡統一轉成「型別：原例外文字」
@@ -16,7 +17,8 @@
 
 已知極限：eval 目前只是佔位，通過設定驗證後以 1 結束並印出「尚未實作」。
 
-Dependencies: 標準函式庫、rag_lab.config；ingest／query 執行時才載入 rag_lab.pipeline。
+Dependencies: 標準函式庫、rag_lab.config；ingest／query 執行時才載入 rag_lab.pipeline，
+graph 才載入 rag_lab.graph_report（不連任何模型端點）。
 """
 
 import argparse
@@ -31,6 +33,8 @@ from rag_lab.config import ConfigError, get_settings
 # ==============================
 
 QUERY_MODES = ("naive", "local", "global", "hybrid", "mix")
+DEFAULT_GRAPH_SAMPLE = 10
+DEFAULT_GRAPH_SEED = 0
 
 EXIT_FAILURE = 1
 EXIT_USAGE = 2
@@ -42,11 +46,32 @@ EXIT_CONFIG_ERROR = 3
 # ==============================
 
 
+def _positive_int(raw: str) -> int:
+    """argparse 的型別：正整數。
+
+    Args:
+        raw: 命令列字串。
+
+    Returns:
+        解析出的正整數。
+
+    Raises:
+        argparse.ArgumentTypeError: 不是整數或不大於 0。
+    """
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"必須是整數：{raw!r}") from exc
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"必須大於 0：{raw!r}")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     """建立 CLI 的 argparse 解析器。
 
     Returns:
-        註冊好 ingest、query、eval 三個子命令的 ArgumentParser。
+        註冊好 ingest、query、graph、eval 四個子命令的 ArgumentParser。
     """
     parser = argparse.ArgumentParser(prog="rag_lab", description="RAG-Anything 本地實驗 CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -62,6 +87,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="把檢索到的圖片交給 VLM 產生答案（預設關閉；需要 VLM 端點可連）",
     )
+
+    graph = sub.add_parser("graph", help="抽樣檢視知識圖譜的實體與關係")
+    graph.add_argument("--sample", type=_positive_int, default=DEFAULT_GRAPH_SAMPLE, help="抽樣實體數（預設 10）")
+    graph.add_argument("--seed", type=int, default=DEFAULT_GRAPH_SEED, help="抽樣種子（預設 0；同種子輸出相同）")
 
     evaluate = sub.add_parser("eval", help="對題目檔批次比較五種檢索模式")
     evaluate.add_argument("questions", help="JSONL 題目檔路徑")
@@ -149,6 +178,15 @@ def _run_query(question: str, mode: str, vlm_enhanced: bool) -> int:
     return 0
 
 
+def _run_graph(sample: int, seed: int) -> int:
+    """抽樣印出知識圖譜的實體與關係。"""
+    from rag_lab import graph_report
+
+    graph = graph_report.load_graph(get_settings().working_dir)
+    print(graph_report.format_report(graph, sample, seed))
+    return 0
+
+
 # ==============================
 # 主程式
 # ==============================
@@ -176,6 +214,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "ingest":
             return _run_ingest(args.path)
+        if args.command == "graph":
+            return _run_graph(args.sample, args.seed)
         return _run_query(args.question, args.mode, args.vlm_enhanced)
     except Exception as exc:
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
