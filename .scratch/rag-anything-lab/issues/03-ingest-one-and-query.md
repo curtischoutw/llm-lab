@@ -4,7 +4,7 @@
 
 **Blocked by:** 01, 02
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] 第一次真實執行前，先重跑現有冒煙測試，三個端點全過；任一項失敗就停下來回報錯誤輸出與可行選項，不換框架、不寫 workaround。
 - [x] 啟動 LLM server 時帶 `--max-tokens 4096` 與 `--prompt-cache-bytes 4GB`；VLM 與 embedding 在同一個 server 啟動，且透過 `scripts/vlm_server.py` 啟動（把 MLX buffer cache 上限設為 1 GB）。
@@ -82,3 +82,7 @@ mlx_lm.server --host 127.0.0.1 --port 8080 \
 - 端點不可達（server 關閉時）：`EndpointError: LLM 端點 http://127.0.0.1:8080/v1 失敗：無法連線（[Errno 61] Connection refused）`，rc=1。
 - 未啟用 venv 時 query 也需要 mineru 在 PATH 上：RAG-Anything 初始化時會跑 `mineru --version`，所以 PATH 處理改在初始化時進行。
 - 快速測試：`Ran 36 tests ... OK`。
+
+## Comments
+
+- 2026-10-27：使用者決定照現狀結案。MinerU 模型下載時間一項未量測（模型在 2026-10-25 已下載），維持未勾。
