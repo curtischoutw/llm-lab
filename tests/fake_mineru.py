@@ -9,7 +9,7 @@
   圖片放在同層 `images/`，content list 內用相對路徑，由 RAG-Anything 轉成絕對路徑。
 - `--version` 要成功：RAG-Anything 的安裝檢查就是跑它。
 - 依參數寫入 `argv.json` 旁證，測試可確認 RAG-Anything 實際傳了哪些參數。
-- 內容只依 PDF 檔名（主檔名）決定，同一個檔案每次輸出相同。主檔名以 `multichunk` 開頭時
+- 內容只依 PDF 檔名（主檔名）決定，同一個檔案每次輸出相同。主檔名以 `broken` 開頭時以非零碼結束，模擬解析失敗。主檔名以 `multichunk` 開頭時
   多輸出 8 段長文字，讓 LightRAG 切出多個 chunk，測試能觀察多個 LLM 請求同時進行的情境。
 
 已知極限：不讀 PDF 內容，也不驗證它是不是真的 PDF。
@@ -50,6 +50,9 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     stem = Path(args.path).stem
+    if stem.startswith("broken"):
+        print(f"fake mineru: cannot parse {stem}", file=sys.stderr)
+        return 1
     method_dir = Path(args.output) / stem / ("auto" if args.method == "auto" else args.method)
     (method_dir / "images").mkdir(parents=True, exist_ok=True)
     (method_dir / "images" / "fig1.png").write_bytes(_PNG_1X1)

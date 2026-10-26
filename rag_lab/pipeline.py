@@ -18,8 +18,11 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   models.vision_stats 判斷，有失敗就以 PipelineError 回報（含端點與位址）。
 - 查詢走 LightRAG 的 aquery_llm（回 status 與 message），不用 aquery：後者在 LLM 失敗
   時回 None、非法模式也回 None。status 不是 success 或沒有答案內容一律當失敗。
-- 查詢固定 vlm_enhanced=False（只走 LLM、不讓 VLM 改寫答案）與 enable_rerank=False
-  （spec 不用 reranker，預設值會讓每次查詢都警告）。
+- 查詢預設 vlm_enhanced=False（只走 LLM、不讓 VLM 改寫答案；與 spec 一致，五種模式的答案才由
+  同一個模型產生、可比較），並固定 enable_rerank=False（spec 不用 reranker，預設值會讓每次
+  查詢都警告）。vlm_enhanced=True 時改走 RAGAnything.aquery_vlm_enhanced，並多檢查 VLM 端點。
+- 多篇匯入時單篇失敗不中斷整批：失敗記在該篇的 IngestReport.error，其餘照常處理並保留，
+  由 CLI 印出是哪一篇並以非零碼結束。重新執行時已完整處理的篇略過、失敗的篇重試。
 - 查詢 context 的 token 上限由 QUERY_MAX_TOTAL_TOKENS 決定：LightRAG 預設 30000，在 32 GB
   的機器上 mlx_lm.server 處理 29.7k token 的 prompt 會 GPU 記憶體不足。LightRAG 的總上限不是
   硬上限：chunk 預算＝總上限 − KG context，而 KG context 另受 entity／relation 上限（預設
@@ -43,6 +46,8 @@ CLI 只負責參數與輸出格式，這裡負責行為。
 已知極限：
 - 使用 RAGAnything 的私有方法 _ensure_lightrag_initialized：官方沒有公開的等價 API，
   但不先初始化就查詢會直接拋 ValueError。
+- VLM 增強查詢（aquery_vlm_enhanced）沒有 aquery_llm 的 status／message：LLM 失敗時只回 None，
+  這裡只能報「沒有回傳答案內容」，看不到原例外文字（VLM 失敗則有端點與位址）。
 - VLM 失敗不會讓 RAG-Anything 匯入失敗（描述會退成原始 dict 文字）；這裡只能事後依
   models.vision_stats 計數判斷並回報，已寫入索引的退化描述不會自動修復。
 
@@ -184,6 +189,8 @@ class IngestReport:
         graph_seconds: 文字建圖耗時（含 LLM 實體抽取）。
         multimodal_seconds: 圖／表／公式描述耗時。
         multimodal_items: 處理的圖／表／公式數。
+        total_seconds: 這一篇從開始到結束的總耗時。
+        error: 失敗時的「型別：訊息」；None 表示成功。
     """
 
     pdf: Path
@@ -192,6 +199,8 @@ class IngestReport:
     graph_seconds: float = 0.0
     multimodal_seconds: float = 0.0
     multimodal_items: int = 0
+    total_seconds: float = 0.0
+    error: str | None = None
 
 
 @dataclass
@@ -265,7 +274,14 @@ async def _ingest(pdfs: list[Path], settings: Settings) -> IngestSummary:
     try:
         await _initialize(rag)
         for pdf in pdfs:
-            summary.reports.append(await _ingest_one(rag, pdf))
+            started = time.perf_counter()
+            try:
+                report = await _ingest_one(rag, pdf)
+            except Exception as exc:
+                # 單篇失敗不中斷整批：記下是哪一篇、為什麼，CLI 據此印出並以非零碼結束
+                report = IngestReport(pdf, skipped=False, parse_seconds=0.0, error=f"{type(exc).__name__}: {exc}")
+            report.total_seconds = time.perf_counter() - started
+            summary.reports.append(report)
         summary.entities, summary.relations, summary.belongs_to = await _graph_stats(rag)
         counts = await rag.lightrag.doc_status.get_status_counts()
         summary.status_counts = {str(getattr(key, "value", key)): value for key, value in counts.items()}
@@ -302,8 +318,25 @@ def ingest(pdfs: list[Path]) -> IngestSummary:
 # ==============================
 
 
+def query_kwargs(max_total_tokens: int) -> dict[str, object]:
+    """組出 QueryParam 的共用參數，entity／relation 的 token 上限依 LightRAG 預設比例隨總上限縮放。
+
+    Args:
+        max_total_tokens: 查詢 context 的總 token 上限（QUERY_MAX_TOTAL_TOKENS）。
+
+    Returns:
+        可展開給 QueryParam（或 RAGAnything.aquery_vlm_enhanced）的參數 dict，不含 mode。
+    """
+    return {
+        "enable_rerank": False,
+        "max_total_tokens": max_total_tokens,
+        "max_entity_tokens": max_total_tokens * DEFAULT_MAX_ENTITY_TOKENS // DEFAULT_MAX_TOTAL_TOKENS,
+        "max_relation_tokens": max_total_tokens * DEFAULT_MAX_RELATION_TOKENS // DEFAULT_MAX_TOTAL_TOKENS,
+    }
+
+
 def query_param(mode: str, max_total_tokens: int) -> QueryParam:
-    """組出查詢參數，entity／relation 的 token 上限依 LightRAG 預設比例隨總上限縮放。
+    """組出查詢參數（見 query_kwargs）。
 
     Args:
         mode: 檢索模式。
@@ -312,42 +345,46 @@ def query_param(mode: str, max_total_tokens: int) -> QueryParam:
     Returns:
         QueryParam。
     """
-    return QueryParam(
-        mode=mode,
-        enable_rerank=False,
-        max_total_tokens=max_total_tokens,
-        max_entity_tokens=max_total_tokens * DEFAULT_MAX_ENTITY_TOKENS // DEFAULT_MAX_TOTAL_TOKENS,
-        max_relation_tokens=max_total_tokens * DEFAULT_MAX_RELATION_TOKENS // DEFAULT_MAX_TOTAL_TOKENS,
-    )
+    return QueryParam(mode=mode, **query_kwargs(max_total_tokens))
 
 
-async def _query(question: str, mode: str, settings: Settings) -> str:
-    models.check_reachable("LLM", "Embedding")
+async def _query(question: str, mode: str, vlm_enhanced: bool, settings: Settings) -> str:
+    models.check_reachable("LLM", "Embedding", *(["VLM"] if vlm_enhanced else []))
     rag = build_rag(settings)
     try:
         await _initialize(rag)
-        result = await rag.lightrag.aquery_llm(question, query_param(mode, settings.query_max_total_tokens))
+        if vlm_enhanced:
+            # RAG-Anything 的 VLM 增強路徑：先取回檢索 prompt、把圖片路徑換成 base64 圖片再交給 VLM。
+            # 它沒有 aquery_llm 的 status 欄位；失敗時回 None（LLM 失敗的訊息 LightRAG 已吞掉），
+            # VLM 失敗則拋 EndpointError（含端點與位址）。
+            answer = await rag.aquery_vlm_enhanced(
+                question, mode=mode, **query_kwargs(settings.query_max_total_tokens)
+            )
+        else:
+            result = await rag.lightrag.aquery_llm(question, query_param(mode, settings.query_max_total_tokens))
+            if result.get("status") != "success":
+                raise PipelineError(f"查詢失敗（mode={mode}）：{result.get('message')}")
+            answer = (result.get("llm_response") or {}).get("content")
     finally:
         await _close(rag)
-    if result.get("status") != "success":
-        raise PipelineError(f"查詢失敗（mode={mode}）：{result.get('message')}")
-    answer = (result.get("llm_response") or {}).get("content")
-    if not answer:
-        raise PipelineError(f"查詢沒有回傳答案內容（mode={mode}）")
+    if not answer or not isinstance(answer, str):
+        raise PipelineError(f"查詢沒有回傳答案內容（mode={mode}，vlm_enhanced={vlm_enhanced}）")
     return answer
 
 
-def query(question: str, mode: str) -> str:
+def query(question: str, mode: str, vlm_enhanced: bool = False) -> str:
     """以指定檢索模式回答問題。
 
     Args:
         question: 問題文字。
         mode: naive、local、global、hybrid、mix 之一（由 CLI 驗證）。
+        vlm_enhanced: True 時檢索到的圖片會交給 VLM 產生答案，並要求 VLM 端點可連。
 
     Returns:
         答案文字。
 
     Raises:
         PipelineError: 查詢失敗，或沒有答案內容。
+        EndpointError: 端點不可達或呼叫失敗。
     """
-    return asyncio.run(_query(question, mode, get_settings()))
+    return asyncio.run(_query(question, mode, vlm_enhanced, get_settings()))

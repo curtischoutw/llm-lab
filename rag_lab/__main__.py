@@ -10,6 +10,8 @@
 - 設定驗證與輸入路徑檢查都在 import 重量級模組（lightrag、torch）之前完成，錯誤能立即回報。
 - 執行期失敗（端點錯誤、MinerU 失敗、查詢失敗）在這裡統一轉成「型別：原例外文字」
   印到 stderr 並以 1 結束；這是 CLI 邊界的回報，不是吞掉錯誤。
+- ingest 資料夾時只處理 PDF（不遞迴），其他檔案在 stdout 說明「略過非 PDF」，不算錯誤；
+  某一篇失敗時其餘照常匯入，失敗的篇名與原因印到 stderr，整體以 1 結束。
 - 結果（耗時、答案）印 stdout；進度與 LightRAG／RAG-Anything 的 log 在 stderr。
 
 已知極限：eval 目前只是佔位，通過設定驗證後以 1 結束並印出「尚未實作」。
@@ -49,12 +51,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="rag_lab", description="RAG-Anything 本地實驗 CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    ingest = sub.add_parser("ingest", help="匯入單一 PDF 或整個資料夾")
+    ingest = sub.add_parser("ingest", help="匯入單一 PDF 或整個資料夾（資料夾內非 PDF 會略過）")
     ingest.add_argument("path", help="PDF 檔或資料夾路徑")
 
     query = sub.add_parser("query", help="以指定檢索模式提問")
     query.add_argument("question", help="問題文字")
     query.add_argument("--mode", choices=QUERY_MODES, default="mix", help="檢索模式（預設 mix）")
+    query.add_argument(
+        "--vlm-enhanced",
+        action="store_true",
+        help="把檢索到的圖片交給 VLM 產生答案（預設關閉；需要 VLM 端點可連）",
+    )
 
     evaluate = sub.add_parser("eval", help="對題目檔批次比較五種檢索模式")
     evaluate.add_argument("questions", help="JSONL 題目檔路徑")
@@ -67,50 +74,57 @@ def build_parser() -> argparse.ArgumentParser:
 # ==============================
 
 
-def _collect_pdfs(raw: str) -> list[Path]:
-    """把 ingest 的路徑參數展開成 PDF 清單。
+def _collect_pdfs(raw: str) -> tuple[list[Path], list[Path]]:
+    """把 ingest 的路徑參數展開成 PDF 清單，並列出資料夾內被略過的非 PDF 檔。
 
     Args:
         raw: 單一 PDF 檔，或含 PDF 的資料夾（不遞迴；ASSUMPTION：第一批語料是平的資料夾）。
 
     Returns:
-        依檔名排序的 PDF 絕對路徑。
+        (依檔名排序的 PDF 絕對路徑, 依檔名排序的非 PDF 檔路徑)；單一檔案時後者為空。
 
     Raises:
         ValueError: 路徑不存在、不是 PDF、或資料夾內沒有 PDF。
     """
     path = Path(raw).expanduser().resolve()
     if path.is_dir():
-        pdfs = sorted(p for p in path.iterdir() if p.is_file() and p.suffix.lower() == ".pdf")
+        files = sorted(p for p in path.iterdir() if p.is_file())
+        pdfs = [p for p in files if p.suffix.lower() == ".pdf"]
         if not pdfs:
             raise ValueError(f"資料夾內沒有 PDF：{path}")
-        return pdfs
+        return pdfs, [p for p in files if p not in pdfs]
     if not path.is_file():
         raise ValueError(f"路徑不存在：{path}")
     if path.suffix.lower() != ".pdf":
         raise ValueError(f"不是 PDF 檔：{path}")
-    return [path]
+    return [path], []
 
 
 def _run_ingest(raw_path: str) -> int:
     """執行 ingest 並印出各階段耗時、圖譜與 VLM 統計。"""
     try:
-        pdfs = _collect_pdfs(raw_path)
+        pdfs, non_pdfs = _collect_pdfs(raw_path)
     except ValueError as exc:
         print(f"輸入錯誤：{exc}", file=sys.stderr)
         return EXIT_USAGE
+    for other in non_pdfs:
+        print(f"略過非 PDF：{other.name}")
 
     from rag_lab import pipeline
 
     summary = pipeline.ingest(pdfs)
     for index, report in enumerate(summary.reports, start=1):
-        print(f"[{index}/{len(summary.reports)}] {report.pdf.name}")
+        print(f"[{index}/{len(summary.reports)}] {report.pdf.name}：耗時 {report.total_seconds:.1f} s")
+        if report.error:
+            print("  失敗（詳見 stderr）")
+            continue
         if report.skipped:
             print(f"  已完整處理過，略過（查快取 {report.parse_seconds:.1f} s）")
             continue
         print(f"  MinerU 解析：{report.parse_seconds:.1f} s（backend={pipeline.MINERU_BACKEND}）")
         print(f"  建圖（文字切塊、實體抽取、向量）：{report.graph_seconds:.1f} s")
         print(f"  多模態（圖／表／公式描述）：{report.multimodal_seconds:.1f} s，{report.multimodal_items} 項")
+    failures = [report for report in summary.reports if report.error]
     print(f"VLM 呼叫：成功 {summary.vlm_ok}，失敗 {summary.vlm_failed}")
     if summary.vlm_sample:
         print(f"VLM 圖片描述範例：{summary.vlm_sample}")
@@ -119,14 +133,19 @@ def _run_ingest(raw_path: str) -> int:
         f"（其中 RAG-Anything 加的 belongs_to 邊 {summary.belongs_to}，其餘 {summary.relations - summary.belongs_to}）"
     )
     print("文件狀態：" + "，".join(f"{status}={count}" for status, count in sorted(summary.status_counts.items())))
+    for report in failures:
+        print(f"匯入失敗：{report.pdf.name}：{report.error}", file=sys.stderr)
+    if failures:
+        print(f"{len(failures)}/{len(summary.reports)} 篇匯入失敗；其餘已匯入的資料保留，重新執行會重試失敗的篇", file=sys.stderr)
+        return EXIT_FAILURE
     return 0
 
 
-def _run_query(question: str, mode: str) -> int:
+def _run_query(question: str, mode: str, vlm_enhanced: bool) -> int:
     """執行 query 並印出答案。"""
     from rag_lab import pipeline
 
-    print(pipeline.query(question, mode))
+    print(pipeline.query(question, mode, vlm_enhanced))
     return 0
 
 
@@ -157,7 +176,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "ingest":
             return _run_ingest(args.path)
-        return _run_query(args.question, args.mode)
+        return _run_query(args.question, args.mode, args.vlm_enhanced)
     except Exception as exc:
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return EXIT_FAILURE

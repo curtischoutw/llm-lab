@@ -25,7 +25,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.fake_openai_server import CHAT_REPLY, FakeOpenAIServer
+from tests.fake_openai_server import CHAT_REPLY, VISION_REPLY, FakeOpenAIServer
 from tests.test_cli import REPO_ROOT, SECRET, run_cli, valid_env
 
 INGEST_TIMEOUT = 180
@@ -180,8 +180,46 @@ class IngestTest(PipelineCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("a.pdf", result.stdout)
         self.assertIn("b.pdf", result.stdout)
-        self.assertNotIn("notes.txt", result.stdout)
         self.assertIn("processed=2", result.stdout)
+
+    def test_non_pdf_files_in_a_folder_are_skipped_and_reported_without_failing(self):
+        folder = self.tmp / "papers"
+        folder.mkdir()
+        (folder / "a.pdf").write_bytes(b"%PDF-1.4 a")
+        (folder / "notes.txt").write_text("not a pdf")
+        (folder / "figure.png").write_bytes(b"png")
+        result = self.ingest(folder)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for name in ("notes.txt", "figure.png"):
+            self.assertRegex(result.stdout, rf"略過非 PDF.*{name}")
+        self.assertNotIn("notes.txt", result.stderr)
+        self.assertIn("processed=1", result.stdout)
+
+    def test_each_pdf_in_a_folder_reports_its_own_total_elapsed_time(self):
+        folder = self.tmp / "papers"
+        folder.mkdir()
+        for name in ("a.pdf", "b.pdf"):
+            (folder / name).write_bytes(b"%PDF-1.4 " + name.encode())
+        result = self.ingest(folder)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r"\[1/2\] a\.pdf.*耗時 \d+\.\d s")
+        self.assertRegex(result.stdout, r"\[2/2\] b\.pdf.*耗時 \d+\.\d s")
+
+    def test_one_failing_pdf_is_named_others_are_kept_and_exit_code_is_nonzero(self):
+        folder = self.tmp / "papers"
+        folder.mkdir()
+        for name in ("a.pdf", "broken.pdf", "c.pdf"):
+            (folder / name).write_bytes(b"%PDF-1.4 " + name.encode())
+        result = self.ingest(folder)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertRegex(result.stderr, r"匯入失敗：broken\.pdf：.*Mineru")
+        self.assertNotRegex(result.stderr, r"匯入失敗：[ac]\.pdf")
+        self.assertIn("[2/3] broken.pdf", result.stdout)
+        self.assertIn("processed=2", result.stdout)
+        self.assertIn("failed=0", result.stdout)
+        self.assertTrue((self.working_dir / "graph_chunk_entity_relation.graphml").is_file())
+        statuses = json.loads((self.working_dir / "kv_store_doc_status.json").read_text())
+        self.assertEqual(sorted(v["status"] for v in statuses.values()), ["processed", "processed"])
 
     def test_rejects_missing_or_non_pdf_paths(self):
         text_file = self.tmp / "notes.txt"
@@ -283,6 +321,34 @@ class QueryTest(PipelineCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), CHAT_REPLY)
 
+    def query_image_requests(self) -> list[dict]:
+        """匯入完成後送出、帶圖片的聊天請求。"""
+        return [
+            r
+            for r in self.query_requests()
+            if r["path"] == "/v1/chat/completions"
+            and any(isinstance(m["content"], list) for m in r["payload"]["messages"])
+        ]
+
+    def test_vlm_enhancement_is_off_by_default(self):
+        result = self.query()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), CHAT_REPLY)
+        self.assertEqual(self.query_image_requests(), [])
+
+    def test_vlm_enhanced_flag_sends_retrieved_images_to_the_vlm_and_prints_its_answer(self):
+        result = self.query("What is Fake Entity Alpha?", "--vlm-enhanced")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), VISION_REPLY)
+        self.assertEqual(len(self.query_image_requests()), 1)
+
+    def test_vlm_enhanced_works_in_every_mode(self):
+        for mode in ("naive", "local", "global", "hybrid", "mix"):
+            with self.subTest(mode=mode):
+                result = self.query("What is Fake Entity Alpha?", "--mode", mode, "--vlm-enhanced")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stdout.strip(), VISION_REPLY)
+
     def test_rejects_unknown_mode(self):
         result = self.query("q", "--mode", "bogus")
         self.assertEqual(result.returncode, 2)
@@ -313,6 +379,18 @@ class QueryTest(PipelineCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("injected chat failure", result.stderr)
         self.assertEqual(result.stdout.strip(), "")
+
+
+class QueryModeValidationTest(PipelineCase):
+    def test_unknown_mode_is_rejected_before_any_work_and_lists_the_valid_modes(self):
+        for bad in ("bogus", "Mix", ""):
+            with self.subTest(mode=bad):
+                result = self.query("q", "--mode", bad)
+                self.assertEqual(result.returncode, 2)
+                for valid in ("naive", "local", "global", "hybrid", "mix"):
+                    self.assertIn(valid, result.stderr)
+                self.assertEqual(self.server.requests, [])
+                self.assertFalse(self.working_dir.exists())
 
 
 class QueryBudgetTest(PipelineCase):
@@ -380,6 +458,34 @@ class UnreachableEndpointTest(PipelineCase):
                 dead = closed_port_url()
                 result = self.query(**{field: dead})
                 self.assert_names_endpoint(result, label, dead)
+
+    def test_query_does_not_need_the_vlm_endpoint_unless_vlm_enhanced_is_requested(self):
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+        result = self.query(VLM_BASE_URL=closed_port_url())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_vlm_enhanced_query_names_the_unreachable_vlm_endpoint(self):
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+        dead = closed_port_url()
+        result = self.query("What is Fake Entity Alpha?", "--vlm-enhanced", VLM_BASE_URL=dead)
+        self.assert_names_endpoint(result, "VLM", dead)
+
+    def test_vlm_enhanced_query_failures_exit_nonzero_without_an_answer(self):
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+        self.server.fail_vision = True
+        vlm_down = self.query("What is Fake Entity Alpha?", "--vlm-enhanced")
+        self.assert_names_endpoint(vlm_down, "VLM", self.server.base_url)
+        self.assertIn("injected vision failure", vlm_down.stderr)
+        self.assertEqual(vlm_down.stdout.strip(), "")
+
+        self.server.fail_vision = False
+        self.server.fail_chat = True
+        llm_down = self.query("Which entity is related to Fake Entity Beta?", "--vlm-enhanced")
+        self.assertNotEqual(llm_down.returncode, 0, llm_down.stdout)
+        self.assertEqual(llm_down.stdout.strip(), "")
 
     def test_endpoint_failing_midway_is_still_attributed_to_the_endpoint(self):
         ingested = self.ingest()
