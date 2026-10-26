@@ -21,6 +21,10 @@ CLI 只負責參數與輸出格式，這裡負責行為。
 - 查詢預設 vlm_enhanced=False（只走 LLM、不讓 VLM 改寫答案；與 spec 一致，五種模式的答案才由
   同一個模型產生、可比較），並固定 enable_rerank=False（spec 不用 reranker，預設值會讓每次
   查詢都警告）。vlm_enhanced=True 時改走 RAGAnything.aquery_vlm_enhanced，並多檢查 VLM 端點。
+- eval（evaluate）在同一個 RAGAnything 實例上，依題目順序、五種模式順序依序查詢，不是每格重新
+  初始化。每格沿用 query 的 _answer（aquery_llm、QUERY_MAX_TOTAL_TOKENS、vlm_enhanced=False、
+  enable_rerank=False）；單格失敗（含沒有答案內容）記在該格的 Cell.error，不中斷其餘格。
+  開始前只檢查 LLM 與 Embedding 端點可達（eval 不走 VLM）。
 - 多篇匯入時單篇失敗不中斷整批：失敗記在該篇的 IngestReport.error，其餘照常處理並保留，
   由 CLI 印出是哪一篇並以非零碼結束。重新執行時已完整處理的篇略過、失敗的篇重試。
 - 查詢 context 的 token 上限由 QUERY_MAX_TOTAL_TOKENS 決定：LightRAG 預設 30000，在 32 GB
@@ -69,6 +73,7 @@ from raganything.callbacks import ProcessingCallback
 
 from rag_lab import models
 from rag_lab.config import Settings, get_settings
+from rag_lab.evaluation import RETRIEVAL_MODES, Cell, Question
 
 # ==============================
 # 常數與例外
@@ -348,6 +353,27 @@ def query_param(mode: str, max_total_tokens: int) -> QueryParam:
     return QueryParam(mode=mode, **query_kwargs(max_total_tokens))
 
 
+async def _answer(rag: RAGAnything, question: str, mode: str, settings: Settings) -> str | None:
+    """在已初始化的 RAGAnything 上以 aquery_llm 查詢（不啟用 VLM 增強）。
+
+    Args:
+        rag: 已完成 _initialize 的實例。
+        question: 問題文字。
+        mode: 檢索模式。
+        settings: 已驗證的設定（取 QUERY_MAX_TOTAL_TOKENS）。
+
+    Returns:
+        答案文字；LightRAG 回成功但沒有內容時為 None 或空字串，由呼叫端判斷。
+
+    Raises:
+        PipelineError: LightRAG 回報查詢失敗（訊息含原例外文字）。
+    """
+    result = await rag.lightrag.aquery_llm(question, query_param(mode, settings.query_max_total_tokens))
+    if result.get("status") != "success":
+        raise PipelineError(f"查詢失敗（mode={mode}）：{result.get('message')}")
+    return (result.get("llm_response") or {}).get("content")
+
+
 async def _query(question: str, mode: str, vlm_enhanced: bool, settings: Settings) -> str:
     models.check_reachable("LLM", "Embedding", *(["VLM"] if vlm_enhanced else []))
     rag = build_rag(settings)
@@ -361,10 +387,7 @@ async def _query(question: str, mode: str, vlm_enhanced: bool, settings: Setting
                 question, mode=mode, **query_kwargs(settings.query_max_total_tokens)
             )
         else:
-            result = await rag.lightrag.aquery_llm(question, query_param(mode, settings.query_max_total_tokens))
-            if result.get("status") != "success":
-                raise PipelineError(f"查詢失敗（mode={mode}）：{result.get('message')}")
-            answer = (result.get("llm_response") or {}).get("content")
+            answer = await _answer(rag, question, mode, settings)
     finally:
         await _close(rag)
     if not answer or not isinstance(answer, str):
@@ -388,3 +411,50 @@ def query(question: str, mode: str, vlm_enhanced: bool = False) -> str:
         EndpointError: 端點不可達或呼叫失敗。
     """
     return asyncio.run(_query(question, mode, vlm_enhanced, get_settings()))
+
+
+# ==============================
+# 批次比較（eval）
+# ==============================
+
+
+async def _evaluate(questions: list[Question], settings: Settings) -> list[list[Cell]]:
+    models.check_reachable("LLM", "Embedding")
+    rag = build_rag(settings)
+    cells: list[list[Cell]] = []
+    try:
+        await _initialize(rag)
+        for question in questions:
+            row: list[Cell] = []
+            for mode in RETRIEVAL_MODES:
+                try:
+                    answer = await _answer(rag, question.question, mode, settings)
+                    if not answer or not isinstance(answer, str):
+                        raise PipelineError(f"查詢沒有回傳答案內容（mode={mode}）")
+                    row.append(Cell(answer=answer))
+                except Exception as exc:
+                    # 單格失敗不中斷整批：把原因記在這一格，CLI 據此標示並以非零碼結束
+                    row.append(Cell(error=f"{type(exc).__name__}: {exc}"))
+            cells.append(row)
+    finally:
+        await _close(rag)
+    return cells
+
+
+def evaluate(questions: list[Question]) -> list[list[Cell]]:
+    """對每一題以五種檢索模式各查詢一次。
+
+    五個模式與所有題目共用同一個 RAGAnything 實例，依題目順序、模式順序依序執行。
+    查詢固定 vlm_enhanced=False、enable_rerank=False，並沿用 query 的 QUERY_MAX_TOTAL_TOKENS。
+
+    Args:
+        questions: 已驗證的題目。
+
+    Returns:
+        cells[i][j] 是第 i 題在 RETRIEVAL_MODES[j] 的結果；單格失敗記在該格的 error。
+
+    Raises:
+        EndpointError: LLM 或 embedding 端點在開始前就不可達。
+        PipelineError: 初始化失敗。
+    """
+    return asyncio.run(_evaluate(questions, get_settings()))
