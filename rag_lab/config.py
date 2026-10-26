@@ -82,12 +82,14 @@ class Settings:
     embed_api_key: str
     embed_dim: int
     embed_max_token_size: int
+    embed_max_async: int
     embed_query_prefix: str
     working_dir: str
     parser_output_dir: str
     llm_max_async: int
     llm_max_tokens: int
     vlm_max_tokens: int
+    query_max_total_tokens: int
 
 
 @lru_cache(maxsize=1)
@@ -113,6 +115,7 @@ def get_settings() -> Settings:
         embed_api_key=_required("EMBED_API_KEY"),
         embed_dim=_positive_int("EMBED_DIM"),
         embed_max_token_size=_positive_int("EMBED_MAX_TOKEN_SIZE"),
+        embed_max_async=_positive_int("EMBED_MAX_ASYNC"),
         # .env 內以字面 \n 表示換行
         embed_query_prefix=os.environ.get("EMBED_QUERY_PREFIX", "").replace("\\n", "\n"),
         working_dir=_required("WORKING_DIR"),
@@ -120,4 +123,5 @@ def get_settings() -> Settings:
         llm_max_async=_positive_int("LLM_MAX_ASYNC"),
         llm_max_tokens=_positive_int("LLM_MAX_TOKENS"),
         vlm_max_tokens=_positive_int("VLM_MAX_TOKENS"),
+        query_max_total_tokens=_positive_int("QUERY_MAX_TOTAL_TOKENS"),
     )
