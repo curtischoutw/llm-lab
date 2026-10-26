@@ -29,9 +29,11 @@ URL_FIELDS = ("LLM_BASE_URL", "VLM_BASE_URL", "EMBED_BASE_URL")
 INT_FIELDS = (
     "EMBED_DIM",
     "EMBED_MAX_TOKEN_SIZE",
+    "EMBED_MAX_ASYNC",
     "LLM_MAX_ASYNC",
     "LLM_MAX_TOKENS",
     "VLM_MAX_TOKENS",
+    "QUERY_MAX_TOTAL_TOKENS",
 )
 TEXT_FIELDS = (
     "LLM_MODEL",
@@ -68,9 +70,11 @@ def valid_env(base_url: str = "http://127.0.0.1:9/v1") -> dict[str, str]:
         {
             "EMBED_DIM": "1024",
             "EMBED_MAX_TOKEN_SIZE": "8192",
+            "EMBED_MAX_ASYNC": "1",
             "LLM_MAX_ASYNC": "2",
             "LLM_MAX_TOKENS": "4096",
             "VLM_MAX_TOKENS": "1024",
+            "QUERY_MAX_TOTAL_TOKENS": "30000",
             "LLM_MODEL": "fake-llm",
             "LLM_API_KEY": SECRET,
             "VLM_MODEL": "fake-vlm",
@@ -84,12 +88,15 @@ def valid_env(base_url: str = "http://127.0.0.1:9/v1") -> dict[str, str]:
     return env
 
 
-def run_cli(args: list[str], overrides: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+def run_cli(
+    args: list[str], overrides: dict[str, str] | None = None, timeout: float = 60
+) -> subprocess.CompletedProcess:
     """以子行程執行 `python -m rag_lab`。
 
     Args:
         args: 命令列引數。
         overrides: 覆蓋基準設定的環境變數。
+        timeout: 子行程逾時秒數。
 
     Returns:
         CompletedProcess（text 模式，已擷取 stdout／stderr）。
@@ -103,13 +110,15 @@ def run_cli(args: list[str], overrides: dict[str, str] | None = None) -> subproc
         env=env,
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=timeout,
     )
 
 
 # ==============================
 # 子命令註冊
 # ==============================
+# ingest／query 的行為見 tests/test_pipeline.py；這裡的設定驗證測試用 eval 當探針：
+# eval 通過設定驗證後只會印「尚未實作」，不會去連端點或建立索引資料夾。
 
 
 class SubcommandsTest(unittest.TestCase):
@@ -119,13 +128,11 @@ class SubcommandsTest(unittest.TestCase):
         cls.server.start()
         cls.addClassCleanup(cls.server.stop)
 
-    def test_valid_config_unimplemented_subcommands_exit_nonzero_with_message(self):
-        for args in (["ingest", "paper.pdf"], ["query", "什麼是 RAG？"], ["eval", "questions.jsonl"]):
-            with self.subTest(args=args):
-                result = run_cli(args, valid_env(self.server.base_url))
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("尚未實作", result.stderr)
-                self.assertNotIn("設定錯誤", result.stderr)
+    def test_valid_config_unimplemented_eval_exits_nonzero_with_message(self):
+        result = run_cli(["eval", "questions.jsonl"], valid_env(self.server.base_url))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("尚未實作", result.stderr)
+        self.assertNotIn("設定錯誤", result.stderr)
 
 
 # ==============================
@@ -143,21 +150,21 @@ class ConfigValidationTest(unittest.TestCase):
     def test_missing_required_field_names_the_field(self):
         for field in REQUIRED_FIELDS:
             with self.subTest(field=field):
-                result = run_cli(["query", "q"], {field: ""})
+                result = run_cli(["eval", "q.jsonl"], {field: ""})
                 self.assert_config_rejected(result, field)
 
     def test_invalid_url_names_the_field(self):
         for field in URL_FIELDS:
             for bad in ("not-a-url", "ftp://host/v1", "http://", "127.0.0.1:8080/v1"):
                 with self.subTest(field=field, value=bad):
-                    result = run_cli(["query", "q"], {field: bad})
+                    result = run_cli(["eval", "q.jsonl"], {field: bad})
                     self.assert_config_rejected(result, field)
 
     def test_non_positive_integer_names_the_field(self):
         for field in INT_FIELDS:
             for bad in ("0", "-5", "abc", "1.5"):
                 with self.subTest(field=field, value=bad):
-                    result = run_cli(["query", "q"], {field: bad})
+                    result = run_cli(["eval", "q.jsonl"], {field: bad})
                     self.assert_config_rejected(result, field)
 
     def test_error_output_never_contains_field_values(self):
@@ -169,14 +176,14 @@ class ConfigValidationTest(unittest.TestCase):
         }
         for field, bad in leaky.items():
             with self.subTest(field=field):
-                result = run_cli(["query", "q"], {field: bad})
+                result = run_cli(["eval", "q.jsonl"], {field: bad})
                 self.assert_config_rejected(result, field)
                 combined = result.stdout + result.stderr
                 self.assertNotIn(SECRET, combined)
                 self.assertNotIn(bad, combined)
 
     def test_valid_config_never_prints_api_keys(self):
-        result = run_cli(["query", "q"])
+        result = run_cli(["eval", "q.jsonl"])
         self.assertNotIn(SECRET, result.stdout + result.stderr)
 
     def test_config_is_validated_before_every_subcommand(self):
@@ -210,7 +217,7 @@ class EnvExampleTest(unittest.TestCase):
     def test_lists_every_field_exactly_once_and_is_itself_a_valid_config(self):
         template = parse_env_example()
         self.assertEqual(set(template), set(REQUIRED_FIELDS + OPTIONAL_FIELDS))
-        result = run_cli(["query", "q"], template)
+        result = run_cli(["eval", "q.jsonl"], template)
         self.assertIn("尚未實作", result.stderr)
         self.assertNotIn("設定錯誤", result.stderr)
 
