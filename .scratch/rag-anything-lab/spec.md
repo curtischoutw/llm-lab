@@ -82,13 +82,29 @@ Status: ready-for-agent
 **Embedding**
 
 - embedding 為非對稱：LightRAG 建索引時以 `context="document"` 呼叫、檢索時以 `context="query"` 呼叫。查詢端加上可設定的 instruction 前綴，文件端不加前綴。
-- 維度由設定提供並由 LightRAG 的 `EmbeddingFunc` 在每次呼叫時驗證。以 embedding 模型名稱隔離向量庫。
-- 索引建好後 embedding 模型與維度鎖定；更換需要重建索引。
+- 維度由設定提供並由 LightRAG 的 `EmbeddingFunc` 在每次呼叫時驗證。
+- 索引建好後 embedding 模型與維度鎖定；更換需要重建索引。預設的 NanoVectorDB 向量檔名不含模型名或維度（已實測；`model_name` 只對 postgres／qdrant 後端有隔離效果），所以更換 embedding 時必須同時更換儲存資料夾，否則新舊向量會混在同一個庫。
 
 **解析與處理**
 
 - 解析器使用 MinerU（RAG-Anything 預設）；啟用圖片、表格、公式處理。
-- 並行度（`LLM_MAX_ASYNC`）預設設為 1–2，實測後再調整。
+- MinerU 版本限制在 4 以下（`mineru[core]<4`，目前 3.4.5）：RAG-Anything 1.4.3 以舊版 CLI 參數呼叫 MinerU，4.x 已改成 `mineru parse`，且版本檢查仍會通過、到解析時才失敗。這是已在環境中處理好的決定。
+- RAG-Anything 以 subprocess 依 PATH 尋找 `mineru`；CLI 必須確保專案 venv 的 bin 目錄在 PATH 上，使用者不需要先 activate。
+- 並行度（`LLM_MAX_ASYNC`）預設設為 1–2，實測後再調整。圖片、表格、公式描述的並行度另受 `max_parallel_insert` 控制，不受 `LLM_MAX_ASYNC` 限制。
+
+**失敗偵測（RAG-Anything／LightRAG 會吞錯誤，已實測）**
+
+- `aquery` 在 LLM 失敗時回傳 `None`，非法模式也回傳 `None`；預設的 VLM 路徑則拋出無意義的 `TypeError`。所有需要判斷成功與否的查詢（`query`、`eval`）改用 LightRAG 的 `aquery_llm`，它回傳 `status` 與含原例外文字的 `message`。模式合法值由 CLI 自己檢查。
+- 匯入時 LLM 或 embedding 失敗會拋錯，但訊息不含端點名稱；「指出是哪個端點」要由我們在模型函式外層加上端點名稱。
+- **VLM 失敗不會讓匯入失敗**：圖片描述會變成原始 dict 的 fallback 文字，匯入仍標示成功。因此「圖片描述來自 VLM」必須主動驗證（在 vision 函式內計數成功次數，或檢查 chunk 內容不是 fallback）。
+- 重複匯入：文件 ID 由內容雜湊產生（含圖片絕對路徑），所以搬動專案目錄或更改解析輸出資料夾會被當成新文件。重複匯入同一份不會重呼叫模型，但單檔路徑會留下 `failed` 的重複紀錄，並讓原文件卡在 `handling`，之後 `get_status_counts()` 拋 `KeyError`。避免方式：先解析取得文件 ID，已完整處理就不再呼叫匯入。
+
+**查詢行為**
+
+- `vlm_enhanced` 預設開啟，且適用所有模式（含 naive）：只要檢索內容含可用圖片，最終答案就改由 VLM 產生。這會讓五種模式的答案由不同模型產生，混淆比較。`eval` 一律固定 `vlm_enhanced=False`，只讓檢索模式這個變因變動；`query` 預設也關閉，需要時用選項開啟。
+- 查詢一律傳 `enable_rerank=False`（預設為開，沒有 rerank 模型時每次查詢都警告）。
+- 圖片安全目錄檢查的是設定中的解析輸出資料夾，不是匯入呼叫傳入的輸出資料夾，兩者必須指向同一處，否則 VLM 增強會靜默失效。
+- 實體與關係統計時，RAG-Anything 會額外加入 `belongs_to` 類型的邊（關鍵字 `belongs_to,contained_in,part_of`）；回報關係數時要說明是否包含這些邊。
 
 **CLI 介面**
 
@@ -146,6 +162,6 @@ Status: ready-for-agent
 
 **已知風險**：
 
-- 4B 的 LLM 低於 LightRAG 官方建議的本地下限（Qwen3-30B-A3B-Instruct），圖譜品質可能不佳。已接受此取捨；升級路徑是把 LLM 換成該下限模型。第一篇論文的 `ingest` 後要檢視實體與關係的品質，作為判斷依據。
+- 4B 的 LLM 低於 LightRAG 文件的建議（1.4.16：LLM 至少 32B 參數、context 至少 32K token，建議 64K），圖譜品質可能不佳。已接受此取捨；升級路徑是把 LLM 換成符合該建議的模型（只改 `LLM_BASE_URL` 與 `LLM_MODEL`）。第一篇論文的 `ingest` 後要檢視實體與關係的品質，作為判斷依據。
 - MinerU 在沒有 CUDA 的 Mac 上解析 PDF 的速度尚未實測。
 - 以 base64 圖片餵給 mlx-vlm 的行為已實測通過（單張純色圖）；真實論文中的圖表描述品質尚未驗證。

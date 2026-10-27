@@ -1,0 +1,8 @@
+# 鎖定 RAG-Anything 1.4.3；其底層 LightRAG 目前解析到 1.4.16，限制 <1.5。
+# 在 Python 3.12.12 的 venv 以 `pip install -r requirements.txt` 安裝。
+# python-dotenv、openai 等其餘套件由 raganything 帶入，不另列。
+raganything==1.4.3
+lightrag-hku<1.5
+# RAG-Anything 1.4.3 以舊版 CLI（mineru -p -o -m）呼叫 MinerU；mineru 4.x 已改成 `mineru parse`，
+# 且 `--version` 仍會通過，到解析時才失敗，所以限制在 4 以下（目前解析到 3.4.5）。
+mineru[core]<4

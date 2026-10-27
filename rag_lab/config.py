@@ -25,13 +25,21 @@ from dotenv import load_dotenv
 
 
 class ConfigError(ValueError):
-    """設定缺漏或格式錯誤。"""
+    """設定缺漏或格式錯誤。訊息只含欄位名稱與原因，不含欄位值（可能是金鑰）。
+
+    Attributes:
+        field: 出問題的環境變數名稱。
+    """
+
+    def __init__(self, field: str, reason: str):
+        super().__init__(f"{field} {reason}")
+        self.field = field
 
 
 def _required(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
-        raise ConfigError(f"缺少必要環境變數 {name}（參考 .env.example）")
+        raise ConfigError(name, "缺少必要環境變數（參考 .env.example）")
     return value
 
 
@@ -39,7 +47,7 @@ def _url(name: str) -> str:
     value = _required(name)
     parsed = urlparse(value)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise ConfigError(f"{name} 不是合法的 http(s) URL：{value!r}")
+        raise ConfigError(name, "不是合法的 http(s) URL")
     return value.rstrip("/")
 
 
@@ -48,9 +56,9 @@ def _positive_int(name: str) -> int:
     try:
         value = int(raw)
     except ValueError as exc:
-        raise ConfigError(f"{name} 必須是整數：{raw!r}") from exc
+        raise ConfigError(name, "必須是整數") from exc
     if value <= 0:
-        raise ConfigError(f"{name} 必須大於 0：{value}")
+        raise ConfigError(name, "必須大於 0")
     return value
 
 
@@ -74,12 +82,14 @@ class Settings:
     embed_api_key: str
     embed_dim: int
     embed_max_token_size: int
+    embed_max_async: int
     embed_query_prefix: str
     working_dir: str
     parser_output_dir: str
     llm_max_async: int
     llm_max_tokens: int
     vlm_max_tokens: int
+    query_max_total_tokens: int
 
 
 @lru_cache(maxsize=1)
@@ -105,6 +115,7 @@ def get_settings() -> Settings:
         embed_api_key=_required("EMBED_API_KEY"),
         embed_dim=_positive_int("EMBED_DIM"),
         embed_max_token_size=_positive_int("EMBED_MAX_TOKEN_SIZE"),
+        embed_max_async=_positive_int("EMBED_MAX_ASYNC"),
         # .env 內以字面 \n 表示換行
         embed_query_prefix=os.environ.get("EMBED_QUERY_PREFIX", "").replace("\\n", "\n"),
         working_dir=_required("WORKING_DIR"),
@@ -112,4 +123,5 @@ def get_settings() -> Settings:
         llm_max_async=_positive_int("LLM_MAX_ASYNC"),
         llm_max_tokens=_positive_int("LLM_MAX_TOKENS"),
         vlm_max_tokens=_positive_int("VLM_MAX_TOKENS"),
+        query_max_total_tokens=_positive_int("QUERY_MAX_TOTAL_TOKENS"),
     )
