@@ -15,6 +15,8 @@
   Content-Length，確認完整才改名，避免中斷後留下殘缺檔被當成完整。
 - 任何失敗（網路、HTTP、標題不符、檔案殘缺）都以非零碼結束並指出是哪個 ID，不略過後繼續。
 - 遵守 arXiv 使用規範：所有對 arXiv 的請求之間至少間隔 3 秒，並帶可辨識的 User-Agent。
+- 網路失敗包含連線重設與讀 body 到一半斷線（http.client.IncompleteRead 不是 OSError，要一併攔）。
+- 環境變數 FETCH_PAPERS_ARXIV_BASE 可改寫 arXiv 位址，只給測試指向本機假 server 用。
 - 頁數不依賴第三方 PDF 套件：解壓縮 ObjStm 後讀取頁面樹根節點的 /Count。
 
 已知極限：
@@ -26,6 +28,8 @@ Dependencies: 僅標準函式庫。
 """
 
 import argparse
+import http.client
+import os
 import re
 import sys
 import time
@@ -50,14 +54,20 @@ PAPERS: dict[str, str] = {
 }
 
 DEFAULT_OUT = Path(__file__).resolve().parent.parent / "data" / "papers"
-API_URL = "https://export.arxiv.org/api/query"
-PDF_URL = "https://export.arxiv.org/pdf/{id}"
+# ASSUMPTION：環境變數 FETCH_PAPERS_ARXIV_BASE 可改寫 arXiv 位址，唯一用途是讓測試把腳本指向本機假 server
+ARXIV_BASE = os.environ.get("FETCH_PAPERS_ARXIV_BASE", "https://export.arxiv.org").rstrip("/")
+API_URL = f"{ARXIV_BASE}/api/query"
+PDF_URL = ARXIV_BASE + "/pdf/{id}"
 USER_AGENT = "llm-lab-fetch-papers/1.0 (personal RAG evaluation corpus)"
 MIN_INTERVAL_SEC = 3.0
 TIMEOUT_SEC = 60
 
 ID_PATTERN = re.compile(r"^\d{4}\.\d{4,5}$")
 ATOM_NS = {"a": "http://www.w3.org/2005/Atom"}
+
+# 網路失敗的例外：連線／逾時／重設（OSError，URLError 與 TimeoutError 都是其子類）與讀 body 到一半
+# 斷線的 http.client.IncompleteRead 等（HTTPException，不是 OSError）
+NETWORK_ERRORS = (OSError, http.client.HTTPException)
 
 
 class FetchError(Exception):
@@ -122,10 +132,16 @@ def fetch_titles(client: ArxivClient, ids: list[str]) -> dict[str, str]:
 
     Returns:
         {不含版本號的 ID: 標題}。API 查無的 ID 不會出現在結果裡。
+
+    Raises:
+        FetchError: 網路失敗（連線、逾時、讀到一半斷線）；訊息列出涉及的 ID。
     """
     query = urllib.parse.urlencode({"id_list": ",".join(ids), "max_results": len(ids)})
-    with client.open(f"{API_URL}?{query}") as resp:
-        root = ET.fromstring(resp.read())
+    try:
+        with client.open(f"{API_URL}?{query}") as resp:
+            root = ET.fromstring(resp.read())
+    except NETWORK_ERRORS as exc:
+        raise FetchError(f"標題查詢失敗（{type(exc).__name__}: {exc}）；涉及 ID: {', '.join(ids)}") from exc
     titles: dict[str, str] = {}
     for entry in root.findall("a:entry", ATOM_NS):
         entry_id = entry.findtext("a:id", namespaces=ATOM_NS) or ""
@@ -229,7 +245,7 @@ def download_pdf(client: ArxivClient, arxiv_id: str, dest: Path) -> None:
         with client.open(PDF_URL.format(id=arxiv_id)) as resp:
             expected = resp.headers.get("Content-Length")
             body = resp.read()
-    except (urllib.error.URLError, TimeoutError) as exc:
+    except NETWORK_ERRORS as exc:
         raise FetchError(f"{arxiv_id}: 下載失敗（{type(exc).__name__}: {exc}）") from exc
     if expected is not None and int(expected) != len(body):
         raise FetchError(f"{arxiv_id}: 下載長度不符（Content-Length={expected}，實收 {len(body)}）")
@@ -286,9 +302,6 @@ def main(argv: list[str]) -> int:
             print(f"{status:10s} {arxiv_id}  pages={pages if pages is not None else '?'}  {PAPERS[arxiv_id]}")
     except FetchError as exc:
         print(f"ERROR {exc}", file=sys.stderr)
-        return 1
-    except (urllib.error.URLError, TimeoutError) as exc:
-        print(f"ERROR 標題查詢失敗（{type(exc).__name__}: {exc}）；涉及 ID: {', '.join(args.ids)}", file=sys.stderr)
         return 1
     return 0
 

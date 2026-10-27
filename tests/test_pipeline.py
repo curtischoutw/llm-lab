@@ -221,6 +221,61 @@ class IngestTest(PipelineCase):
         statuses = json.loads((self.working_dir / "kv_store_doc_status.json").read_text())
         self.assertEqual(sorted(v["status"] for v in statuses.values()), ["processed", "processed"])
 
+    def test_document_stuck_in_handling_from_an_interrupted_run_is_reported_not_fatal(self):
+        # 前一次 ingest 在多模態階段被中斷時，文件停在 RAG-Anything 的 handling 狀態；
+        # 之後 ingest 別的 PDF 不該在最後統計文件狀態時失敗
+        first = self.ingest()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        status_file = self.working_dir / "kv_store_doc_status.json"
+        statuses = json.loads(status_file.read_text())
+        self.assertEqual(len(statuses), 1)
+        for record in statuses.values():
+            record["status"] = "handling"
+        status_file.write_text(json.dumps(statuses))
+
+        other = self.tmp / "other.pdf"
+        other.write_bytes(b"%PDF-1.4 other")
+        result = self.ingest(other)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("handling=1", result.stdout)
+        self.assertIn("processed=1", result.stdout)
+        self.assertRegex(result.stdout, r"1 篇文件停在 handling")
+
+    def test_vlm_failure_does_not_hide_the_per_pdf_report_or_other_pdfs_errors(self):
+        folder = self.tmp / "papers"
+        folder.mkdir()
+        for name in ("a.pdf", "broken.pdf", "c.pdf"):
+            (folder / name).write_bytes(b"%PDF-1.4 " + name.encode())
+        self.server.fail_vision = True
+        result = self.ingest(folder)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("[1/3] a.pdf", result.stdout)
+        self.assertIn("[2/3] broken.pdf", result.stdout)
+        self.assertIn("[3/3] c.pdf", result.stdout)
+        self.assertIn("圖譜：實體", result.stdout)
+        self.assertRegex(result.stderr, r"匯入失敗：broken\.pdf：.*Mineru")
+        self.assertIn("VLM", result.stderr)
+        self.assertIn(self.server.base_url, result.stderr)
+        self.assertIn("injected vision failure", result.stderr)
+
+    def test_failed_table_description_fails_ingest_and_names_the_llm_endpoint(self):
+        # 表格描述走 llm_model_func；RAG-Anything 的 modal processor 會吞掉失敗並寫入 fallback 實體
+        self.server.fail_chat_containing = "<table>"
+        result = self.ingest()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("paper.pdf", result.stdout)
+        self.assertIn("LLM", result.stderr)
+        self.assertIn(self.server.base_url, result.stderr)
+        self.assertIn("injected chat failure", result.stderr)
+
+    def test_failed_equation_description_fails_ingest_and_names_the_llm_endpoint(self):
+        self.server.fail_chat_containing = "mc^2"
+        result = self.ingest()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("LLM", result.stderr)
+        self.assertIn(self.server.base_url, result.stderr)
+        self.assertIn("injected chat failure", result.stderr)
+
     def test_rejects_missing_or_non_pdf_paths(self):
         text_file = self.tmp / "notes.txt"
         text_file.write_text("hello")

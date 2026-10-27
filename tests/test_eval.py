@@ -19,7 +19,7 @@ import os
 import re
 import subprocess
 import sys
-import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from tests.fake_openai_server import CHAT_REPLY
@@ -314,8 +314,43 @@ class EvalRunTest(IngestedEvalCase):
                 timeout=INGEST_TIMEOUT,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            time.sleep(1.1)
         self.assertEqual(len(list((workdir / "eval_results").glob("eval_*.md"))), 2)
+
+
+# ==============================
+# 結果檔
+# ==============================
+
+
+class EvalResultFileTest(IngestedEvalCase):
+    def test_a_result_file_name_already_taken_never_costs_the_finished_run_or_overwrites_it(self):
+        # 檔名只到秒：同一秒啟動的兩個 eval 會撞名。這裡把「現在起一段時間內」每一秒的檔名都先佔住，
+        # 不論 eval 的時間戳記落在哪一秒都會撞名
+        self.results_dir.mkdir()
+        now = datetime.now()
+        taken = {}
+        for offset in range(-5, 121):
+            path = self.results_dir / f"eval_{now + timedelta(seconds=offset):%Y%m%d-%H%M%S}.md"
+            path.write_text(f"existing {offset}", encoding="utf-8")
+            taken[path] = f"existing {offset}"
+
+        result = self.run_eval(self.write_questions(question_line()))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for path, content in taken.items():
+            self.assertEqual(path.read_text(encoding="utf-8"), content)
+        new_files = [path for path in self.result_files() if path not in taken]
+        self.assertEqual(len(new_files), 1)
+        self.assertIn(str(new_files[0].resolve()), result.stdout)
+        self.assertEqual(len(table_rows(new_files[0].read_text(encoding="utf-8"))), 1)
+
+    def test_an_unwritable_output_dir_fails_before_any_query_is_sent(self):
+        self.results_dir.mkdir()
+        self.results_dir.chmod(0o555)
+        self.addCleanup(self.results_dir.chmod, 0o755)
+        result = self.run_eval(self.write_questions(question_line()))
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(str(self.results_dir), result.stderr)
+        self.assertEqual(self.eval_requests(), [], "結果寫不進去時不該先跑完整批查詢")
 
 
 # ==============================

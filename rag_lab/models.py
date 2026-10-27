@@ -14,8 +14,12 @@
   訊息內含原例外文字；API 金鑰不會出現在例外文字中，也不會被寫進訊息。
 - RAG-Anything 會吞掉 VLM 的失敗（描述退成原始 dict、匯入仍成功），所以 vision 函式
   自己計數（vision_stats），讓呼叫端能事後判斷「圖片描述是否真的來自 VLM」。
+- 表格與公式描述走 llm_model_func，失敗同樣被吞掉。所以另外提供 count_description_failures，
+  由 pipeline 包在每個 modal processor 的 caption 函式上，計數（description_stats）涵蓋
+  圖／表／公式所有描述失敗；ingest 的成敗以它為準，vision_stats 只用來顯示 VLM 呼叫數。
 
-已知極限：vision_stats 是模組層級狀態，同一個 process 內累計；CLI 一次只跑一個命令，
+已知極限：只計數 caption 呼叫本身的例外；呼叫成功但回覆內容解析失敗（RAG-Anything 內部另有 fallback）
+不會被計到。vision_stats、description_stats 是模組層級狀態，同一個 process 內累計；CLI 一次只跑一個命令，
 所以不需要重置。
 
 Dependencies: lightrag-hku、raganything（由 raganything 帶入）；tenacity 為 lightrag 的相依。
@@ -106,6 +110,48 @@ class VisionStats:
 
 
 vision_stats = VisionStats()
+
+
+@dataclass
+class DescriptionStats:
+    """圖／表／公式描述（所有 modal processor）失敗的計數。
+
+    Attributes:
+        failed: 描述呼叫失敗次數（RAG-Anything 吞掉失敗、改寫入 fallback 實體的次數）。
+        last_error: 最近一次失敗的訊息（EndpointError 帶端點名稱與位址）。
+    """
+
+    failed: int = 0
+    last_error: str | None = None
+
+
+description_stats = DescriptionStats()
+
+
+def count_description_failures(caption_func: Any) -> Any:
+    """包住 modal processor 的 modal_caption_func，失敗時計數後照常重拋。
+
+    RAG-Anything 的圖／表／公式 processor 在 caption 呼叫失敗時 log 一行錯誤、寫入 fallback
+    實體並讓匯入照常成功。表格與公式走 llm_model_func（不是 vision_model_func），所以只在
+    vision 層計數會漏掉它們；在 processor 的 caption 函式這一層才涵蓋所有種類。
+
+    Args:
+        caption_func: processor 目前的 modal_caption_func。
+
+    Returns:
+        同樣簽章的 async 函式；例外照常往外拋（由 processor 自己吞掉），只多記一筆計數。
+    """
+
+    async def counted(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return await caption_func(*args, **kwargs)
+        except Exception as exc:
+            description_stats.failed += 1
+            description_stats.last_error = str(exc) if isinstance(exc, EndpointError) else _describe(exc)
+            raise
+
+    return counted
+
 
 # ==============================
 # LLM
