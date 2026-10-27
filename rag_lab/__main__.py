@@ -142,7 +142,14 @@ def _collect_pdfs(raw: str) -> tuple[list[Path], list[Path]]:
 
 
 def _run_ingest(raw_path: str) -> int:
-    """執行 ingest 並印出各階段耗時、圖譜與 VLM 統計。"""
+    """執行 ingest 並印出各階段耗時、圖譜與 VLM 統計。
+
+    Args:
+        raw_path: 命令列的 PDF 檔或資料夾路徑。
+
+    Returns:
+        結束碼：0 成功；EXIT_USAGE 輸入路徑不合法；EXIT_FAILURE 有任何一篇匯入失敗或有描述失敗。
+    """
     try:
         pdfs, non_pdfs = _collect_pdfs(raw_path)
     except ValueError as exc:
@@ -189,7 +196,16 @@ def _run_ingest(raw_path: str) -> int:
 
 
 def _run_query(question: str, mode: str, vlm_enhanced: bool) -> int:
-    """執行 query 並印出答案。"""
+    """執行 query 並印出答案。
+
+    Args:
+        question: 問題文字。
+        mode: 檢索模式。
+        vlm_enhanced: 是否啟用 VLM 增強查詢。
+
+    Returns:
+        結束碼 0；失敗以例外往上拋，由 main 轉成 EXIT_FAILURE。
+    """
     from rag_lab import pipeline
 
     print(pipeline.query(question, mode, vlm_enhanced))
@@ -221,7 +237,16 @@ def _reserve_result_file(out_dir: Path, generated_at: datetime) -> Path:
 
 
 def _run_eval(questions_path: str, output_dir: str) -> int:
-    """對題目檔的每一題跑五種檢索模式，寫出 Markdown 對照表。"""
+    """對題目檔的每一題跑五種檢索模式，寫出 Markdown 對照表。
+
+    Args:
+        questions_path: 題目檔（JSONL）路徑。
+        output_dir: 結果檔資料夾。
+
+    Returns:
+        結束碼：0 全部成功；EXIT_USAGE 題目檔讀不到或格式錯誤；EXIT_FAILURE 有任何一格失敗
+        （結果檔仍會寫出）。
+    """
     path = Path(questions_path).expanduser()
     try:
         questions = load_questions(path)
@@ -238,7 +263,12 @@ def _run_eval(questions_path: str, output_dir: str) -> int:
     generated_at = datetime.now()
     # 結果檔在查詢前就建好並佔住檔名：跑了幾十分鐘才發現寫不進去或撞名，結果就白費了
     result_path = _reserve_result_file(Path(output_dir).expanduser(), generated_at)
-    cells = pipeline.evaluate(questions)
+    try:
+        cells = pipeline.evaluate(questions)
+    except BaseException:
+        # 沒跑完就不留下預先建立的空結果檔（例外照常往外拋）
+        result_path.unlink(missing_ok=True)
+        raise
     meta = [
         ("題目檔", str(path.resolve())),
         ("題數", str(len(questions))),
@@ -264,7 +294,15 @@ def _run_eval(questions_path: str, output_dir: str) -> int:
 
 
 def _run_graph(sample: int, seed: int) -> int:
-    """抽樣印出知識圖譜的實體與關係。"""
+    """抽樣印出知識圖譜的實體與關係。
+
+    Args:
+        sample: 抽樣實體數。
+        seed: 抽樣種子。
+
+    Returns:
+        結束碼 0；圖譜不存在或為空以例外往上拋，由 main 轉成 EXIT_FAILURE。
+    """
     from rag_lab import graph_report
 
     graph = graph_report.load_graph(get_settings().working_dir)

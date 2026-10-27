@@ -71,6 +71,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from lightrag import QueryParam
+from lightrag.base import DocStatus
 from lightrag.constants import DEFAULT_MAX_ENTITY_TOKENS, DEFAULT_MAX_RELATION_TOKENS, DEFAULT_MAX_TOTAL_TOKENS
 from raganything import RAGAnything, RAGAnythingConfig
 from raganything.callbacks import ProcessingCallback
@@ -156,7 +157,14 @@ async def _close(rag: RAGAnything) -> None:
 
 
 async def _initialize(rag: RAGAnything) -> None:
-    """初始化 LightRAG 與儲存；失敗時拋 PipelineError。"""
+    """初始化 LightRAG 與儲存。
+
+    Args:
+        rag: 尚未初始化的 RAGAnything。
+
+    Raises:
+        PipelineError: RAG-Anything 回報初始化失敗。
+    """
     ensure_mineru_on_path()
     result = await rag._ensure_lightrag_initialized()
     if not result or not result.get("success"):
@@ -247,7 +255,19 @@ class IngestSummary:
 
 
 async def _ingest_one(rag: RAGAnything, pdf: Path) -> IngestReport:
-    """匯入單篇 PDF；已完整處理就略過。"""
+    """匯入單篇 PDF；已完整處理就略過，先前未完成的先清掉舊紀錄再重匯。
+
+    Args:
+        rag: 已初始化的 RAGAnything。
+        pdf: PDF 路徑。
+
+    Returns:
+        這一篇的 IngestReport（total_seconds 與 description_failed 由呼叫端填入）。
+
+    Raises:
+        PipelineError: 解析不出內容，或清除舊紀錄失敗。
+        Exception: MinerU、LLM 等匯入過程的失敗（由 _ingest 轉成該篇的 report.error）。
+    """
     timer = StageTimer()
     rag.callback_manager.register(timer)
     try:
@@ -277,7 +297,14 @@ async def _ingest_one(rag: RAGAnything, pdf: Path) -> IngestReport:
 
 
 async def _graph_stats(rag: RAGAnything) -> tuple[int, int, int]:
-    """讀取圖譜的實體數、關係數與其中的 belongs_to 邊數。"""
+    """讀取圖譜的實體數、關係數與其中的 belongs_to 邊數。
+
+    Args:
+        rag: 已初始化的 RAGAnything。
+
+    Returns:
+        (實體數, 關係數（含 belongs_to）, 其中的 belongs_to 邊數)。
+    """
     graph = rag.lightrag.chunk_entity_relation_graph
     nodes = await graph.get_all_nodes()
     edges = await graph.get_all_edges()
@@ -296,9 +323,9 @@ async def _status_counts(rag: RAGAnything) -> dict[str, int]:
         rag: 已初始化的 RAGAnything。
 
     Returns:
-        {狀態名稱: 文件數}，只含實際出現的狀態。
+        {狀態名稱: 文件數}：LightRAG 的各狀態一律列出（沒有就是 0），其他狀態（例如 handling）只在實際出現時列出。
     """
-    counts: dict[str, int] = {}
+    counts = {status.value: 0 for status in DocStatus}
     page = 1
     while True:
         docs, total = await rag.lightrag.doc_status.get_docs_paginated(
@@ -421,7 +448,7 @@ def query_param(mode: str, max_total_tokens: int) -> QueryParam:
     return QueryParam(mode=mode, **query_kwargs(max_total_tokens))
 
 
-async def _answer(rag: RAGAnything, question: str, mode: str, settings: Settings) -> str | None:
+async def _answer(rag: RAGAnything, question: str, mode: str, settings: Settings) -> str:
     """在已初始化的 RAGAnything 上以 aquery_llm 查詢（不啟用 VLM 增強）。
 
     Args:
@@ -431,18 +458,36 @@ async def _answer(rag: RAGAnything, question: str, mode: str, settings: Settings
         settings: 已驗證的設定（取 QUERY_MAX_TOTAL_TOKENS）。
 
     Returns:
-        答案文字；LightRAG 回成功但沒有內容時為 None 或空字串，由呼叫端判斷。
+        答案文字（非空字串）。
 
     Raises:
-        PipelineError: LightRAG 回報查詢失敗（訊息含原例外文字）。
+        PipelineError: LightRAG 回報查詢失敗（訊息含原例外文字），或成功但沒有答案內容。
     """
     result = await rag.lightrag.aquery_llm(question, query_param(mode, settings.query_max_total_tokens))
     if result.get("status") != "success":
         raise PipelineError(f"查詢失敗（mode={mode}）：{result.get('message')}")
-    return (result.get("llm_response") or {}).get("content")
+    answer = (result.get("llm_response") or {}).get("content")
+    if not answer or not isinstance(answer, str):
+        raise PipelineError(f"查詢沒有回傳答案內容（mode={mode}）")
+    return answer
 
 
 async def _query(question: str, mode: str, vlm_enhanced: bool, settings: Settings) -> str:
+    """初始化後以指定模式查詢一次，收尾後回傳答案。
+
+    Args:
+        question: 問題文字。
+        mode: 檢索模式。
+        vlm_enhanced: True 時走 RAG-Anything 的 VLM 增強查詢，並多檢查 VLM 端點。
+        settings: 已驗證的設定。
+
+    Returns:
+        答案文字（非空字串）。
+
+    Raises:
+        EndpointError: 端點不可達或呼叫失敗。
+        PipelineError: 初始化失敗、查詢失敗，或沒有答案內容。
+    """
     models.check_reachable("LLM", "Embedding", *(["VLM"] if vlm_enhanced else []))
     rag = build_rag(settings)
     try:
@@ -454,12 +499,12 @@ async def _query(question: str, mode: str, vlm_enhanced: bool, settings: Setting
             answer = await rag.aquery_vlm_enhanced(
                 question, mode=mode, **query_kwargs(settings.query_max_total_tokens)
             )
+            if not answer or not isinstance(answer, str):
+                raise PipelineError(f"查詢沒有回傳答案內容（mode={mode}，vlm_enhanced=True）")
         else:
             answer = await _answer(rag, question, mode, settings)
     finally:
         await _close(rag)
-    if not answer or not isinstance(answer, str):
-        raise PipelineError(f"查詢沒有回傳答案內容（mode={mode}，vlm_enhanced={vlm_enhanced}）")
     return answer
 
 
@@ -487,6 +532,19 @@ def query(question: str, mode: str, vlm_enhanced: bool = False) -> str:
 
 
 async def _evaluate(questions: list[Question], settings: Settings) -> list[list[Cell]]:
+    """在同一個 RAGAnything 實例上依題目、模式順序逐格查詢；單格失敗記在該格。
+
+    Args:
+        questions: 已驗證的題目。
+        settings: 已驗證的設定。
+
+    Returns:
+        cells[i][j] 是第 i 題在 RETRIEVAL_MODES[j] 的結果。
+
+    Raises:
+        EndpointError: LLM 或 embedding 端點在開始前就不可達。
+        PipelineError: 初始化失敗。
+    """
     models.check_reachable("LLM", "Embedding")
     rag = build_rag(settings)
     cells: list[list[Cell]] = []
@@ -496,10 +554,7 @@ async def _evaluate(questions: list[Question], settings: Settings) -> list[list[
             row: list[Cell] = []
             for mode in RETRIEVAL_MODES:
                 try:
-                    answer = await _answer(rag, question.question, mode, settings)
-                    if not answer or not isinstance(answer, str):
-                        raise PipelineError(f"查詢沒有回傳答案內容（mode={mode}）")
-                    row.append(Cell(answer=answer))
+                    row.append(Cell(answer=await _answer(rag, question.question, mode, settings)))
                 except Exception as exc:
                     # 單格失敗不中斷整批：把原因記在這一格，CLI 據此標示並以非零碼結束
                     row.append(Cell(error=f"{type(exc).__name__}: {exc}"))
