@@ -428,8 +428,8 @@ def ingest(pdfs: list[Path]) -> IngestSummary:
         EndpointError: 開始前有端點不可達。
         SessionError: 已有開啟中的 Session，或在不允許的環境呼叫（見 Session）。
     """
-    # 先檢查端點再開 session：端點不可達時不建立 WORKING_DIR、不跑 mineru
-    models.check_reachable("LLM", "VLM", "Embedding")
+    # Session 建構時只檢查 LLM 與 embedding；VLM 在開 Session 之前先檢查，不可達時不建立 WORKING_DIR、不跑 mineru
+    models.check_reachable("VLM")
     with Session() as session:
         return session.ingest(pdfs)
 
@@ -527,18 +527,21 @@ def query(question: str, mode: str, vlm_enhanced: bool = False) -> str:
 
     Args:
         question: 問題文字。
-        mode: naive、local、global、hybrid、mix 之一（由 CLI 驗證）。
+        mode: naive、local、global、hybrid、mix 之一。
         vlm_enhanced: True 時檢索到的圖片會交給 VLM 產生答案，並要求 VLM 端點可連。
 
     Returns:
         答案文字。
 
     Raises:
+        ValueError: mode 不是五種檢索模式之一。
         PipelineError: 初始化失敗、查詢失敗，或沒有答案內容。
         EndpointError: 開始前端點不可達，或 VLM 呼叫失敗。
         SessionError: 已有開啟中的 Session，或在不允許的環境呼叫（見 Session）。
     """
-    models.check_reachable("LLM", "Embedding", *(["VLM"] if vlm_enhanced else []))
+    if vlm_enhanced:
+        # Session 建構時只檢查 LLM 與 embedding；VLM 在開 Session 之前先檢查
+        models.check_reachable("VLM")
     with Session() as session:
         return session.query(question, mode, vlm_enhanced)
 
@@ -593,7 +596,6 @@ def evaluate(questions: list[Question]) -> list[list[Cell]]:
         PipelineError: 初始化失敗。
         SessionError: 已有開啟中的 Session，或在不允許的環境呼叫（見 Session）。
     """
-    models.check_reachable("LLM", "Embedding")
     with Session() as session:
         return session.evaluate(questions)
 
@@ -645,7 +647,8 @@ class Session:
 
     規則：
         - 同一個 process 同一時間只能有一個開啟中的 Session。
-        - 只能在建立它的執行緒使用；不能在已有執行中 event loop 的執行緒建立或呼叫。
+        - 只能在建立它的執行緒使用；建立它的執行緒已結束時，其他執行緒可以 close()。
+        - 不能在已有執行中 event loop 的執行緒建立或呼叫。
         - 讀到的是開啟當下的索引：開著的期間另一個 process 匯入的內容，這個 Session 看不到。
         - 忘了 close 時，process 結束前會在同一個 event loop 上收尾，並在 stderr 印警告。
 
@@ -653,20 +656,25 @@ class Session:
         SessionError: 已有開啟中的 Session，或目前執行緒已有執行中的 event loop。
         ConfigError: 設定缺漏或格式錯誤。
         EndpointError: LLM 或 embedding 端點不可達。
+        OSError: 無法建立 WORKING_DIR。
         PipelineError: RAG-Anything 初始化失敗。
+        建構失敗時的收尾若也失敗，收尾的錯誤附在原例外的 note，原例外照常拋出。
     """
 
     def __init__(self) -> None:
         _reject_running_loop()
         if not _session_lock.acquire(blocking=False):
             raise SessionError("已經有一個開啟中的 Session；同一個 process 同一時間只能開一個，請先 close() 它")
-        self._owner = threading.get_ident()
+        self._owner = threading.current_thread()
         self._closed = False
         self._runner = asyncio.Runner()
         self._rag: RAGAnything | None = None
         try:
             self._settings = get_settings()
             models.check_reachable("LLM", "Embedding")
+            # RAG-Anything 建構時先註冊 atexit 才建立 WORKING_DIR；建立失敗時拿不到實例、無法取消註冊，
+            # 所以先自己建立，讓這種失敗發生在建構 RAGAnything 之前
+            Path(self._settings.working_dir).mkdir(parents=True, exist_ok=True)
             self._rag = build_rag(self._settings)
             # RAG-Anything 在建構時註冊 atexit(self.close)：它會把實例留到 process 結束，結束時又用新的
             # event loop 碰綁在這個 loop 上的鎖（錯誤被吞掉）。改由 Session 自己收尾。
@@ -674,24 +682,38 @@ class Session:
             self._runner.run(_initialize(self._rag))
             # 每個實例只包一次：每次 ingest 都包會疊成多層，同一次失敗被計多次
             _count_description_failures(self._rag)
-        except BaseException:
-            self._release()
+        except BaseException as exc:
+            try:
+                self._release()
+            except Exception as cleanup:
+                # 收尾失敗不能蓋掉原本的錯誤（呼叫端依例外類別處理）；收尾的錯誤附在 note 讓使用者看得到
+                exc.add_note(f"開 Session 失敗後的收尾也失敗：{type(cleanup).__name__}: {cleanup}")
             raise
         atexit.register(self._close_at_exit)
 
     def __enter__(self) -> "Session":
-        """Returns:
-        這個 Session。
+        """進入 with 區塊。
+
+        Returns:
+            這個 Session。
         """
         return self
 
     def __exit__(self, *exc_info: object) -> None:
-        """離開 with 區塊時關閉（不吞例外）。"""
+        """離開 with 區塊時關閉；不吞 with 區塊內的例外。
+
+        Args:
+            *exc_info: with 區塊內的例外型別、例外與 traceback（沒有例外時皆為 None）。
+        """
         self.close()
 
     @property
     def closed(self) -> bool:
-        """是否已關閉。"""
+        """Session 是否已關閉。
+
+        Returns:
+            已關閉為 True。
+        """
         return self._closed
 
     def ingest(self, pdfs: list[Path]) -> IngestSummary:
@@ -722,11 +744,15 @@ class Session:
             答案文字。
 
         Raises:
+            ValueError: mode 不是五種檢索模式之一。
             SessionError: Session 已關閉，或從不允許的執行緒／環境呼叫。
             EndpointError: 開始前端點不可達，或 VLM 呼叫失敗。
             PipelineError: 查詢失敗，或沒有答案內容。
         """
         self._check_usable()
+        # LightRAG 還接受 bypass（不檢索、直接問 LLM），回來的答案看起來像 RAG 的結果；只允許五種檢索模式
+        if mode not in RETRIEVAL_MODES:
+            raise ValueError(f"mode 必須是 {'、'.join(RETRIEVAL_MODES)} 之一，收到 {mode!r}")
         return self._runner.run(_query(self._rag, question, mode, vlm_enhanced, self._settings))
 
     def evaluate(self, questions: list[Question]) -> list[list[Cell]]:
@@ -749,12 +775,12 @@ class Session:
         """寫回儲存、關閉限流 worker、重置 LightRAG 共用狀態並釋放 event loop；重複呼叫不做事。
 
         Raises:
-            SessionError: 從建立它以外的執行緒呼叫。
+            SessionError: 建立它的執行緒還在執行，卻從其他執行緒呼叫。
         """
         if self._closed:
             return
-        if threading.get_ident() != self._owner:
-            raise SessionError("Session 只能在建立它的執行緒使用")
+        if threading.current_thread() is not self._owner and self._owner.is_alive():
+            raise SessionError("Session 只能在建立它的執行緒使用（建立它的執行緒結束後，其他執行緒才能 close）")
         atexit.unregister(self._close_at_exit)
         self._release()
 
@@ -767,7 +793,7 @@ class Session:
         """
         if self._closed:
             raise SessionClosedError("Session 已關閉，請開一個新的 Session")
-        if threading.get_ident() != self._owner:
+        if threading.current_thread() is not self._owner:
             raise SessionError("Session 只能在建立它的執行緒使用")
         _reject_running_loop()
 
@@ -786,5 +812,8 @@ class Session:
         finally:
             self._rag = None
             self._closed = True
-            self._runner.close()
-            _session_lock.release()
+            try:
+                self._runner.close()
+            finally:
+                # 關 event loop 時被中斷（Ctrl-C）也要釋放：否則這個 process 再也開不了 Session
+                _session_lock.release()

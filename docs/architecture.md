@@ -42,7 +42,7 @@ rag_storage/   知識圖譜＋向量庫＋快取（＝知識庫本體）
 | `eval/` | `eval` 指令的題目檔（JSONL）；目前只有範例 `questions.example.jsonl` | 是 | 手寫 | 範例檔被測試引用，不能刪 |
 | `docs/` | 這份架構文件；`docs/agents/` 是給 Claude Code 技能讀的設定（issue tracker 位置、triage 標籤、domain 文件的讀法） | 是 | 手寫 | 不能 |
 | `.scratch/rag-anything-lab/` | 主程式的規格 `spec.md` 與 7 張 ticket（`issues/`）。ticket 03–07 末尾有實測結果段落，README 的數據出自這裡 | 是 | 手寫 | 不建議：設計決策與實測結果記錄在這裡 |
-| `.scratch/architecture-and-python-api/` | 這份架構文件、Python 範例、公開函式重複呼叫修正的規格與 3 張 ticket | 是 | 手寫 | 不建議，理由同上 |
+| `.scratch/architecture-and-python-api/` | 這份架構文件、Python 範例、`Session` API 的規格與 5 張 ticket（01–05） | 是 | 手寫 | 不建議，理由同上 |
 | `.env.example` | 所有設定欄位與註解，預設值對應本機 MLX server | 是 | — | 不能 |
 | `requirements.txt` | 專案 venv 的相依套件：`raganything==1.4.3` 鎖定版本，`lightrag-hku<1.5` 與 `mineru[core]<4` 只限制上限，其餘由 raganything 帶入 | 是 | — | 不能 |
 | `CLAUDE.md` | 給 Claude Code 的專案說明 | 是 | — | 不能 |
@@ -110,11 +110,11 @@ __main__ ──► config
 
 ### 3.3 `tests/`：自動測試
 
-測試只從子行程進入（`python -m rag_lab ...`、`python -m examples...`），只看結束碼、輸出和產生的檔案，不 import `rag_lab` 內部。模型與 MinerU 都用假的，不需要開 server，`python -m unittest` 一次跑完。
+測試只從子行程進入，只看結束碼、輸出和產生的檔案，測試本身的 process 不 import `rag_lab`。子行程有三種：CLI（`python -m rag_lab ...`）、範例（`python -m examples...`），以及 `test_python_api.py` 以 `python -c` 執行的一段程式（在子行程裡呼叫 `rag_lab.pipeline` 的公開介面並印出每一步的結果）。模型與 MinerU 都用假的，不需要開 server，`python -m unittest` 一次跑完。
 
 | 檔案 | 內容 |
 |---|---|
-| `__init__.py` | 測試套件的說明：測試只從子行程進入、模型用假 server |
+| `__init__.py` | 測試套件的說明：測試從子行程進入、模型用假 server |
 | `fake_openai_server.py` | 假的 OpenAI 相容 server：chat、vision、embedding 都回固定且合法的內容，並記錄收到的請求 |
 | `fake_mineru.py` | 假的 `mineru` 指令：依檔名寫出固定的解析結果（文字、一張圖、一個表、一條公式）；設了 `FAKE_MINERU_VERSION_LOG` 時記錄每次 `--version`，用來計算初始化次數 |
 | `test_cli.py` | 設定驗證、子命令註冊、結束碼；提供其他測試共用的 `run_cli`、`valid_env` |
@@ -173,7 +173,7 @@ with Session() as session:
 
 | 方法 | 回傳 | 失敗時 |
 |---|---|---|
-| `query(question, mode, vlm_enhanced=False)` | 答案字串 | 開始前端點不可達拋 `EndpointError`；查詢失敗（含查詢途中 LLM 失敗）或沒有答案拋 `PipelineError`；`vlm_enhanced=True` 時 VLM 呼叫失敗拋 `EndpointError` |
+| `query(question, mode, vlm_enhanced=False)` | 答案字串 | `mode` 不是五種檢索模式之一拋 `ValueError`（LightRAG 另外接受的 `bypass` 不檢索，這裡不允許）；開始前端點不可達拋 `EndpointError`；查詢失敗（含查詢途中 LLM 失敗）或沒有答案拋 `PipelineError`；`vlm_enhanced=True` 時 VLM 呼叫失敗拋 `EndpointError` |
 | `ingest(pdfs: list[Path])` | `IngestSummary`：每篇的耗時與錯誤、圖譜統計、這一次的 VLM 與描述統計 | 單篇失敗記在該篇的 `error`、圖表公式描述失敗記在 `description_error`，都不拋例外；開始前端點不可達拋 `EndpointError` |
 | `evaluate(questions: list[Question])` | `cells[i][j]`：第 i 題在第 j 種模式的答案或錯誤 | 單格失敗記在該格的 `error`，不拋例外；開始前 LLM 或 embedding 端點不可達拋 `EndpointError` |
 | `close()` | — | 離開 `with` 時自動呼叫；重複呼叫不做事 |
@@ -182,7 +182,7 @@ with Session() as session:
 
 `Session` 的規則，違反時拋 `SessionError`（關閉後呼叫拋它的子類 `SessionClosedError`）：
 - 同一個 process 同一時間只能開一個 `Session`。LightRAG 的共用狀態是 process 層級的，要先 `close()` 前一個。
-- 只能在建立它的執行緒使用。
+- 只能在建立它的執行緒使用；建立它的執行緒已經結束時，其他執行緒可以呼叫 `close()`。
 - 不能在已經有執行中 event loop 的地方使用（Jupyter、async 函式）。替代寫法：把開 `Session` 與所有呼叫寫成一個同步函式，再用 `await asyncio.to_thread(該函式)` 執行。
 - 忘了 `close()` 時，process 結束前會自動收尾（寫回快取與索引），並在 stderr 印出警告。
 
@@ -215,7 +215,7 @@ with Session() as session:
 
 一定要用 `python -m`，從 repo 根目錄執行：
 - `import rag_lab` 要靠 repo 根目錄在 `sys.path` 上。直接執行 `python examples/query_from_python.py` 只會把 `examples/` 加進 `sys.path`，會出現 `ModuleNotFoundError`。
-- `.env` 裡的 `WORKING_DIR=./rag_storage` 是相對於目前目錄的路徑。
+- `WORKING_DIR` 的預設值（`.env.example`）是 `./rag_storage`，相對於目前目錄。
 
 自己寫的程式也一樣：放在 `examples/` 底下，或放在 repo 根目錄的其他資料夾，然後用 `python -m <資料夾>.<檔名>` 執行。
 

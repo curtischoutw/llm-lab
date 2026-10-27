@@ -29,7 +29,8 @@ from tests.test_pipeline import INGEST_TIMEOUT, PipelineCase
 # argv[1] 是 PDF 路徑，argv[2] 是題目檔，argv[3] 是 functions（模組函式）或 session（同一個 Session），其餘是步驟。
 # 步驟 stats:<檔名> 匯入 PDF 旁邊的另一個檔案，印出這一次的 VLM 與描述統計；
 # 步驟 instances 印出存活的 RAGAnything 實例數，並在最後（Session 已關閉）再印一次；
-# 步驟 second／closed／thread／loop 各做一種誤用並印出例外類別；init_fail 讓開 session 失敗一次；
+# 步驟 second／closed／thread／loop／bad_mode 各做一種誤用並印出例外類別；orphan 讓建立 session 的執行緒
+# 沒關閉就結束，再由主執行緒關閉；init_fail 讓開 session 失敗一次；
 # forget 開一個 session 問一題、不關閉就結束。
 DRIVER = """
 import asyncio
@@ -46,11 +47,13 @@ from raganything import RAGAnything
 
 
 def instances():
+    '''Returns: gc 後存活的 RAGAnything 實例數。'''
     gc.collect()
     return sum(isinstance(obj, RAGAnything) for obj in gc.get_objects())
 
 
 def error_name(call):
+    '''Args: call 無引數的函式。Returns: (例外類別名稱, 訊息)；沒有例外時為 ("ok", "")。'''
     try:
         call()
     except Exception as exc:
@@ -59,10 +62,12 @@ def error_name(call):
 
 
 def ask(session):
+    '''Args: session 或 pipeline 模組。Returns: 固定問題的答案。'''
     return session.query("What is Fake Entity Alpha?", mode="mix")
 
 
 def in_other_thread(session):
+    '''Args: session 開著的 Session。Returns: 在另一個執行緒提問的 error_name 結果。'''
     outcome = []
     worker = threading.Thread(target=lambda: outcome.append(error_name(lambda: ask(session))))
     worker.start()
@@ -71,6 +76,7 @@ def in_other_thread(session):
 
 
 async def construct_inside_running_loop():
+    '''Returns: 在執行中的 event loop 裡建構 Session 的 error_name 結果。'''
     return error_name(pipeline.Session)
 
 
@@ -119,6 +125,15 @@ with pipeline.Session() if use_session else contextlib.nullcontext(pipeline) as 
             working_dir = Path(get_settings().working_dir)
             print(f"init_fail {error_name(pipeline.Session)[0] != 'ok'}")
             working_dir.unlink()
+        elif step == "bad_mode":
+            with pipeline.Session() as session:
+                print(f"bad_mode {error_name(lambda: session.query('What is Fake Entity Alpha?', mode='bypass'))[0]}")
+        elif step == "orphan":
+            opened = []
+            worker = threading.Thread(target=lambda: opened.append(pipeline.Session()))
+            worker.start()
+            worker.join()
+            print(f"orphan close {error_name(opened[0].close)[0]}")
         elif step == "forget":
             session = pipeline.Session()
             forgotten.append(session)
@@ -153,7 +168,7 @@ class PythonApiCase(PipelineCase):
 
         Args:
             *steps: ingest、stats:<檔名>、query、evaluate、instances、second、closed、thread、loop、
-                init_fail、forget 的任意序列。
+                bad_mode、orphan、init_fail、forget 的任意序列。
             mode: functions 呼叫模組函式；session 在同一個 Session 裡呼叫。
 
         Returns:
@@ -262,6 +277,20 @@ class SessionMisuseTest(PythonApiCase):
                 f"query {CHAT_REPLY}",
             ],
         )
+
+    def test_an_unknown_mode_is_rejected_before_querying(self):
+        before = len(self.server.requests)
+        result = self.run_api("bad_mode")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["bad_mode ValueError"])
+        # LightRAG 的 bypass 模式不檢索、直接問 LLM；不合法的模式不該送出任何 chat 請求
+        chats = [r for r in self.server.requests[before:] if r["path"] == "/v1/chat/completions"]
+        self.assertEqual(chats, [])
+
+    def test_a_session_left_open_by_a_finished_thread_can_be_closed_elsewhere(self):
+        result = self.run_api("orphan", "query")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["orphan close ok", f"query {CHAT_REPLY}"])
 
     def test_a_failed_session_start_releases_everything(self):
         shutil.rmtree(self.working_dir)
