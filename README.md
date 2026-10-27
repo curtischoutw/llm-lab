@@ -114,15 +114,16 @@ ln -sf ../papers/2410.05779.pdf ../papers/2404.16130.pdf ../papers/2510.12323.pd
 .venv/bin/python -m rag_lab eval eval/questions.example.jsonl
 ```
 
-在 Python 裡呼叫（設定一樣讀 `.env`）：
+在 Python 裡呼叫（設定一樣讀 `.env`）。在同一個 `Session` 裡問多題，知識庫只載入一次：
 
 ```python
-from rag_lab.pipeline import query
+from rag_lab.pipeline import Session
 
-answer = query("What are the two retrieval levels in LightRAG?", mode="mix")
+with Session() as session:
+    answer = session.query("What are the two retrieval levels in LightRAG?", mode="mix")
 ```
 
-完整範例在 `examples/query_from_python.py`，在 repo 根目錄用 `.venv/bin/python -m examples.query_from_python` 執行；三個公開函式（`query`、`ingest`、`evaluate`）的說明見 `docs/architecture.md` 第 4 節。
+只問一題也可以直接呼叫 `rag_lab.pipeline.query(question, mode="mix")`，它等於開一個 `Session`、問一題、關閉。完整範例在 `examples/query_from_python.py`，在 repo 根目錄用 `.venv/bin/python -m examples.query_from_python` 執行；`Session` 的規則與 `ingest`、`evaluate` 的說明見 `docs/architecture.md` 第 4 節。
 
 ## 5. 實測數據
 
