@@ -162,6 +162,6 @@ Status: ready-for-agent
 
 **已知風險**：
 
-- 4B 的 LLM 低於 LightRAG 官方建議的本地下限（Qwen3-30B-A3B-Instruct），圖譜品質可能不佳。已接受此取捨；升級路徑是把 LLM 換成該下限模型。第一篇論文的 `ingest` 後要檢視實體與關係的品質，作為判斷依據。
+- 4B 的 LLM 低於 LightRAG 文件的建議（1.4.16：LLM 至少 32B 參數、context 至少 32K token，建議 64K），圖譜品質可能不佳。已接受此取捨；升級路徑是把 LLM 換成符合該建議的模型（只改 `LLM_BASE_URL` 與 `LLM_MODEL`）。第一篇論文的 `ingest` 後要檢視實體與關係的品質，作為判斷依據。
 - MinerU 在沒有 CUDA 的 Mac 上解析 PDF 的速度尚未實測。
 - 以 base64 圖片餵給 mlx-vlm 的行為已實測通過（單張純色圖）；真實論文中的圖表描述品質尚未驗證。
