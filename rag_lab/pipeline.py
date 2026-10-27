@@ -106,7 +106,9 @@ def ensure_mineru_on_path() -> None:
     Python 所在的 bin 目錄（專案 venv）附加到 PATH 尾端，使用者不需要先 activate venv。
     """
     if shutil.which("mineru") is None:
-        os.environ["PATH"] = os.pathsep.join([os.environ.get("PATH", ""), str(Path(sys.executable).parent)])
+        # 只有既有 PATH 非空才串接：PATH 沒設定時，開頭的空項目代表目前目錄，cwd 裡的 mineru 會比 venv 的先被執行
+        entries = [entry for entry in (os.environ.get("PATH"), str(Path(sys.executable).parent)) if entry]
+        os.environ["PATH"] = os.pathsep.join(entries)
 
 
 def build_rag(settings: Settings) -> RAGAnything:

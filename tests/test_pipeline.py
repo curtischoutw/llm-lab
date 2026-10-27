@@ -487,6 +487,37 @@ class QueryBudgetTest(PipelineCase):
 
 
 # ==============================
+# PATH 處理
+# ==============================
+
+
+class MineruPathTest(PipelineCase):
+    def test_unset_path_does_not_put_the_current_directory_ahead_of_the_venv_mineru(self):
+        # PATH 沒設定時，PATH 開頭的空項目代表目前目錄；cwd 裡的 mineru 不該比 venv 的先被執行
+        cwd = self.tmp / "cwd"
+        cwd.mkdir()
+        marker = cwd / "trap-ran"
+        trap = cwd / "mineru"
+        # 用 shell 內建的重導向留記號：被測行程的 PATH 沒有 /usr/bin，找不到 touch
+        trap.write_text(f"#!/bin/sh\necho ran > '{marker}'\nexit 0\n")
+        trap.chmod(trap.stat().st_mode | stat.S_IXUSR)
+
+        env = {key: value for key, value in os.environ.items() if key != "PATH"}
+        env.update(self.env())
+        del env["PATH"]
+        env["PYTHONPATH"] = str(REPO_ROOT)
+        subprocess.run(
+            [sys.executable, "-m", "rag_lab", "query", "What is Fake Entity Alpha?"],
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=INGEST_TIMEOUT,
+        )
+        self.assertFalse(marker.exists(), "目前目錄的 mineru 被執行了")
+
+
+# ==============================
 # 端點不可達
 # ==============================
 

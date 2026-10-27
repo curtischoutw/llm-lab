@@ -7,6 +7,7 @@
 關鍵設計決策：
 - 題目檔整批驗證：逐行檢查後一次回報所有錯誤（每條含行號與欄位），任何一行有錯就整批拒絕，
   不讓使用者等了幾十分鐘才發現第 9 題的 type 拼錯。空白行略過但仍計入行號。
+- 只以 \n 分行（不用 splitlines，它也會在 JSON 字串裡合法的 U+2028 等字元斷行），並以 utf-8-sig 讀檔略過 BOM。
 - 欄位固定為 id、question、reference、type、source，皆為非空字串；type 限 text、figure、
   table、cross-paper；id 不可重複。多出來的欄位視為錯誤（ASSUMPTION：避免欄名拼錯被默默忽略）。
 - 對照表每題一列：id、type、source、question、reference 與五種模式各一欄。儲存格內的 `|`
@@ -85,7 +86,7 @@ def _validate_record(record: object, line_no: int, first_line_of_id: dict[str, i
     Args:
         record: json.loads 的結果。
         line_no: 這一行的行號（從 1 起算）。
-        first_line_of_id: 已出現過的 id 與其行號；通過驗證時會把這一行的 id 記進去。
+        first_line_of_id: 已出現過的 id 與其行號；這一行的 id 合法（非空字串）就會記進去，不論其他欄位是否有錯。
 
     Returns:
         (通過驗證的 Question 或 None, 錯誤訊息清單)。
@@ -96,22 +97,27 @@ def _validate_record(record: object, line_no: int, first_line_of_id: dict[str, i
     for name in record:
         if name not in QUESTION_FIELDS:
             errors.append(f"第 {line_no} 行：欄位 {name}：不認得的欄位（可用欄位：{', '.join(QUESTION_FIELDS)}）")
+    valid_fields = set()
     for name in QUESTION_FIELDS:
         if name not in record:
             errors.append(f"第 {line_no} 行：欄位 {name}：缺少")
         elif not isinstance(record[name], str) or not record[name].strip():
             errors.append(f"第 {line_no} 行：欄位 {name}：必須是非空字串")
-    if errors:
-        return None, errors
-    if record["type"] not in QUESTION_TYPES:
+        else:
+            valid_fields.add(name)
+    if "type" in valid_fields and record["type"] not in QUESTION_TYPES:
         errors.append(f"第 {line_no} 行：欄位 type：{record['type']!r} 不合法（可用值：{', '.join(QUESTION_TYPES)}）")
-    if record["id"] in first_line_of_id:
-        errors.append(
-            f"第 {line_no} 行：欄位 id：{record['id']!r} 與第 {first_line_of_id[record['id']]} 行重複"
-        )
+    # 重複檢查只看 id 本身是否合法，不管同一行的其他欄位有沒有錯：第一次出現的那行有別的錯誤時，
+    # 後面重複的行仍要被報告
+    if "id" in valid_fields:
+        if record["id"] in first_line_of_id:
+            errors.append(
+                f"第 {line_no} 行：欄位 id：{record['id']!r} 與第 {first_line_of_id[record['id']]} 行重複"
+            )
+        else:
+            first_line_of_id[record["id"]] = line_no
     if errors:
         return None, errors
-    first_line_of_id[record["id"]] = line_no
     return Question(**{name: record[name] for name in QUESTION_FIELDS}), []
 
 
@@ -130,13 +136,16 @@ def load_questions(path: Path) -> list[Question]:
         OSError: 檔案不存在或無法讀取。
     """
     try:
-        text = path.read_text(encoding="utf-8")
+        # utf-8-sig：檔案開頭有 BOM（Windows 編輯器常見）時略過它，否則第 1 行無法通過 json.loads
+        text = path.read_text(encoding="utf-8-sig")
     except UnicodeDecodeError as exc:
         raise QuestionFileError(f"{path}：不是 UTF-8 編碼的文字檔（{exc.reason}，位置 {exc.start}）") from exc
     questions: list[Question] = []
     errors: list[str] = []
     first_line_of_id: dict[str, int] = {}
-    for line_no, line in enumerate(text.splitlines(), start=1):
+    # 只在 \n 斷行：splitlines() 也會在 U+2028／U+2029、\x85 等字元斷行，那些在 JSON 字串裡是合法的。
+    # 行尾的 \r（CRLF 檔案）由 json.loads 與 strip() 當作空白處理
+    for line_no, line in enumerate(text.split("\n"), start=1):
         if not line.strip():
             continue
         try:

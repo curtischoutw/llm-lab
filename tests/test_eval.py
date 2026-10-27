@@ -183,6 +183,13 @@ class EvalQuestionFileTest(EvalCase):
         self.assertRegex(result.stderr, r"第 1 行.*type")
         self.assertRegex(result.stderr, r"第 3 行.*source")
 
+    def test_duplicate_id_is_reported_even_when_its_first_line_has_other_errors(self):
+        path = self.write_questions(question_line(type="chart"), question_line(question="same id again"))
+        result = self.run_eval(path)
+        self.assert_rejected_before_any_work(result)
+        self.assertRegex(result.stderr, r"第 1 行.*type")
+        self.assertRegex(result.stderr, r"第 2 行.*id.*與第 1 行重複")
+
     def test_empty_or_missing_file_is_rejected(self):
         empty = self.write_questions("", name="empty.jsonl")
         self.assert_rejected_before_any_work(self.run_eval(empty))
@@ -245,6 +252,22 @@ class EvalRunTest(IngestedEvalCase):
         for row, example in zip(rows, examples):
             self.assertIn(example["reference"], row)
             self.assertIn(example["type"], row)
+
+    def test_unicode_line_separators_inside_a_json_string_do_not_split_the_record(self):
+        # U+2028、U+2029、U+0085 以原字元寫在 JSON 字串裡是合法的，但 str.splitlines() 會在這些位置斷行
+        path = self.write_questions(
+            question_line(question="What is Fake Entity\u2028Alpha?\u2029\x85", reference="A made-up concept.")
+        )
+        result = self.run_eval(path)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(table_rows(self.result_files()[0].read_text(encoding="utf-8"))), 1)
+
+    def test_question_file_with_a_utf8_bom_is_accepted(self):
+        path = self.tmp / "bom.jsonl"
+        path.write_text(question_line() + "\n", encoding="utf-8-sig")
+        result = self.run_eval(path)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([row[0] for row in table_rows(self.result_files()[0].read_text(encoding="utf-8"))], ["q1"])
 
     def test_every_documented_question_type_is_accepted(self):
         lines = [
