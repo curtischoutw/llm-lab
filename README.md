@@ -114,6 +114,16 @@ ln -sf ../papers/2410.05779.pdf ../papers/2404.16130.pdf ../papers/2510.12323.pd
 .venv/bin/python -m rag_lab eval eval/questions.example.jsonl
 ```
 
+在 Python 裡呼叫（設定一樣讀 `.env`）：
+
+```python
+from rag_lab.pipeline import query
+
+answer = query("What are the two retrieval levels in LightRAG?", mode="mix")
+```
+
+完整範例在 `examples/query_from_python.py`，在 repo 根目錄用 `.venv/bin/python -m examples.query_from_python` 執行；三個公開函式（`query`、`ingest`、`evaluate`）的說明見 `docs/architecture.md` 第 4 節。
+
 ## 5. 實測數據
 
 模型組合：LLM `Qwen3-4B-Instruct-2507-4bit`、VLM `Qwen3-VL-4B-Instruct-4bit`、embedding `Qwen3-Embedding-0.6B-8bit`；MinerU backend `pipeline`；`LLM_MAX_ASYNC=1`、`EMBED_MAX_ASYNC=1`、`QUERY_MAX_TOTAL_TOKENS=12000`；M2 Pro 32 GB。2410.05779 是 2026-10-26 單篇匯入時量測，另外兩篇是 2026-10-27 以資料夾匯入時量測（紀錄在 `.scratch/rag-anything-lab/issues/03-*.md` 與 `05-*.md`）。
