@@ -4,7 +4,7 @@
 
 三個模型（LLM、VLM、embedding）都經由 OpenAI 相容的 HTTP 端點呼叫，端點與模型名稱全部寫在 `.env`。本機用 MLX server 提供；換機器或換模型時只改 `.env`。
 
-規格與實測紀錄在 `.scratch/rag-anything-lab/`（`spec.md` 與 `issues/`）。
+規格與實測紀錄在 `.scratch/rag-anything-lab/`（`spec.md` 與 `issues/`）。每個目錄與程式的用途見 [`docs/architecture.md`](docs/architecture.md)。
 
 ## 1. 建立環境
 
