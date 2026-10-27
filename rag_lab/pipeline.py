@@ -43,6 +43,10 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   只有 shutdown 設定的旗標能讓它結束。不呼叫的話，端點在請求進行中失敗（例如 mlx_lm.server
   生成執行緒死掉，正在生成的請求永遠不回應）時，asyncio.run 收尾會永遠等不到它，CLI 卡住
   且不印錯誤。finalize_storages 不會呼叫 shutdown。
+- 收尾最後還要呼叫 LightRAG 的 finalize_share_data()：shared_storage 的鎖是 process 層級的全域
+  物件，第一次初始化時綁在當時的 event loop 上。ingest／query／evaluate 每次以 asyncio.run 開新
+  loop，不重置的話同一個 process 第二次呼叫會因「Lock is bound to a different event loop」查詢失敗
+  （CLI 每次只呼叫一次所以碰不到，從 Python 連續呼叫才會）。
 - 計時用 RAG-Anything 的 ProcessingCallback：解析＝第一次 parse_document（之後 process
   內的 parse 是快取命中）；建圖＝文字插入（含 LightRAG 實體抽取）；多模態＝圖表公式描述。
 - mineru 以 subprocess 依 PATH 尋找：PATH 上找不到時，把目前 Python 所在的 bin 目錄
@@ -73,6 +77,7 @@ from pathlib import Path
 from lightrag import QueryParam
 from lightrag.base import DocStatus
 from lightrag.constants import DEFAULT_MAX_ENTITY_TOKENS, DEFAULT_MAX_RELATION_TOKENS, DEFAULT_MAX_TOTAL_TOKENS
+from lightrag.kg.shared_storage import finalize_share_data
 from raganything import RAGAnything, RAGAnythingConfig
 from raganything.callbacks import ProcessingCallback
 
@@ -143,7 +148,7 @@ def build_rag(settings: Settings) -> RAGAnything:
 
 
 async def _close(rag: RAGAnything) -> None:
-    """寫回儲存，並關掉 LightRAG 的 LLM 與 embedding 限流 worker。
+    """寫回儲存，關掉 LightRAG 的 LLM 與 embedding 限流 worker，並重置 process 層級的共用鎖。
 
     Args:
         rag: 要收尾的 RAGAnything（可能尚未完成初始化）。
@@ -151,9 +156,12 @@ async def _close(rag: RAGAnything) -> None:
     try:
         await rag.finalize_storages()
     finally:
-        if rag.lightrag is not None:
-            await rag.lightrag.llm_model_func.shutdown()
-            await rag.lightrag.embedding_func.func.shutdown()
+        try:
+            if rag.lightrag is not None:
+                await rag.lightrag.llm_model_func.shutdown()
+                await rag.lightrag.embedding_func.func.shutdown()
+        finally:
+            finalize_share_data()
 
 
 async def _initialize(rag: RAGAnything) -> None:
