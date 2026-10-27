@@ -34,7 +34,7 @@
 
 **升級選項**（未更換設定，由使用者決定）
 
-- 換成 LightRAG 官方建議的本地下限 `Qwen3-30B-A3B-Instruct`：只改 `.env` 的 `LLM_BASE_URL`、`LLM_MODEL`。這台 32 GB 機器在 4B 模型下 ingest 時 wired 記憶體最高 17 GB，能不能同時放下 30B-A3B 與 VLM 尚未驗證。
+- 換成較大的 LLM：只改 `.env` 的 `LLM_BASE_URL`、`LLM_MODEL`。LightRAG 1.4.16 文件建議 LLM 至少 32B 參數、context 至少 32K token；更新紀錄提到 Qwen3-30B-A3B 的抽取準確度有改善（2026-10-27 更正：先前寫成「官方建議的本地下限為 Qwen3-30B-A3B-Instruct」，與文件不符）。這台 32 GB 機器在 4B 模型下 ingest 時 wired 記憶體最高 17 GB，能不能同時放下 30B-A3B 與 VLM 尚未驗證。
 - 在記憶體較大的機器或雲端端點上跑 LLM，同樣只改上述兩個欄位；換 LLM 不需要重建 embedding 索引，但要刪除 `WORKING_DIR` 重新 ingest，圖譜才會用新模型抽取。
 - 維持 4B：接受上述問題。這次觀察只涵蓋一篇論文，問題 1 只出現在參考文獻與公式為主的兩個 chunk。
 
