@@ -19,7 +19,7 @@ import os
 import re
 import subprocess
 import sys
-import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from tests.fake_openai_server import CHAT_REPLY
@@ -183,6 +183,13 @@ class EvalQuestionFileTest(EvalCase):
         self.assertRegex(result.stderr, r"第 1 行.*type")
         self.assertRegex(result.stderr, r"第 3 行.*source")
 
+    def test_duplicate_id_is_reported_even_when_its_first_line_has_other_errors(self):
+        path = self.write_questions(question_line(type="chart"), question_line(question="same id again"))
+        result = self.run_eval(path)
+        self.assert_rejected_before_any_work(result)
+        self.assertRegex(result.stderr, r"第 1 行.*type")
+        self.assertRegex(result.stderr, r"第 2 行.*id.*與第 1 行重複")
+
     def test_empty_or_missing_file_is_rejected(self):
         empty = self.write_questions("", name="empty.jsonl")
         self.assert_rejected_before_any_work(self.run_eval(empty))
@@ -245,6 +252,22 @@ class EvalRunTest(IngestedEvalCase):
         for row, example in zip(rows, examples):
             self.assertIn(example["reference"], row)
             self.assertIn(example["type"], row)
+
+    def test_unicode_line_separators_inside_a_json_string_do_not_split_the_record(self):
+        # U+2028、U+2029、U+0085 以原字元寫在 JSON 字串裡是合法的，但 str.splitlines() 會在這些位置斷行
+        path = self.write_questions(
+            question_line(question="What is Fake Entity\u2028Alpha?\u2029\x85", reference="A made-up concept.")
+        )
+        result = self.run_eval(path)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(table_rows(self.result_files()[0].read_text(encoding="utf-8"))), 1)
+
+    def test_question_file_with_a_utf8_bom_is_accepted(self):
+        path = self.tmp / "bom.jsonl"
+        path.write_text(question_line() + "\n", encoding="utf-8-sig")
+        result = self.run_eval(path)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([row[0] for row in table_rows(self.result_files()[0].read_text(encoding="utf-8"))], ["q1"])
 
     def test_every_documented_question_type_is_accepted(self):
         lines = [
@@ -314,8 +337,43 @@ class EvalRunTest(IngestedEvalCase):
                 timeout=INGEST_TIMEOUT,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            time.sleep(1.1)
         self.assertEqual(len(list((workdir / "eval_results").glob("eval_*.md"))), 2)
+
+
+# ==============================
+# 結果檔
+# ==============================
+
+
+class EvalResultFileTest(IngestedEvalCase):
+    def test_a_result_file_name_already_taken_never_costs_the_finished_run_or_overwrites_it(self):
+        # 檔名只到秒：同一秒啟動的兩個 eval 會撞名。這裡把「現在起一段時間內」每一秒的檔名都先佔住，
+        # 不論 eval 的時間戳記落在哪一秒都會撞名
+        self.results_dir.mkdir()
+        now = datetime.now()
+        taken = {}
+        for offset in range(-5, 121):
+            path = self.results_dir / f"eval_{now + timedelta(seconds=offset):%Y%m%d-%H%M%S}.md"
+            path.write_text(f"existing {offset}", encoding="utf-8")
+            taken[path] = f"existing {offset}"
+
+        result = self.run_eval(self.write_questions(question_line()))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for path, content in taken.items():
+            self.assertEqual(path.read_text(encoding="utf-8"), content)
+        new_files = [path for path in self.result_files() if path not in taken]
+        self.assertEqual(len(new_files), 1)
+        self.assertIn(str(new_files[0].resolve()), result.stdout)
+        self.assertEqual(len(table_rows(new_files[0].read_text(encoding="utf-8"))), 1)
+
+    def test_an_unwritable_output_dir_fails_before_any_query_is_sent(self):
+        self.results_dir.mkdir()
+        self.results_dir.chmod(0o555)
+        self.addCleanup(self.results_dir.chmod, 0o755)
+        result = self.run_eval(self.write_questions(question_line()))
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(str(self.results_dir), result.stderr)
+        self.assertEqual(self.eval_requests(), [], "結果寫不進去時不該先跑完整批查詢")
 
 
 # ==============================

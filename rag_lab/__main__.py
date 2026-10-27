@@ -15,7 +15,8 @@ rag_lab.graph_report 後格式化輸出。
 - ingest 資料夾時只處理 PDF（不遞迴），其他檔案在 stdout 說明「略過非 PDF」，不算錯誤；
   某一篇失敗時其餘照常匯入，失敗的篇名與原因印到 stderr，整體以 1 結束。
 - eval 的結果檔寫到 --output-dir（預設 ./eval_results，已在 .gitignore），檔名含時間戳記
-  （eval_YYYYMMDD-HHMMSS.md），以獨佔模式建立，不會覆蓋既有結果。失敗的格會在表中標示，並把
+  （eval_YYYYMMDD-HHMMSS.md），在查詢開始前就以獨佔模式建立（撞名時加 -1、-2 序號），所以不會
+  覆蓋既有結果，資料夾不可寫也會在查詢前就失敗。失敗的格會在表中標示，並把
   「第幾題、哪個模式、原因」印到 stderr；有任何失敗格時整體以 1 結束，結果檔仍然寫出。
 - 結果（耗時、答案、結果檔路徑）印 stdout；進度與 LightRAG／RAG-Anything 的 log 在 stderr。
 
@@ -24,6 +25,7 @@ rag_lab.pipeline，graph 才載入 rag_lab.graph_report（不連任何模型端�
 """
 
 import argparse
+import itertools
 import sys
 from collections.abc import Sequence
 from datetime import datetime
@@ -140,7 +142,14 @@ def _collect_pdfs(raw: str) -> tuple[list[Path], list[Path]]:
 
 
 def _run_ingest(raw_path: str) -> int:
-    """執行 ingest 並印出各階段耗時、圖譜與 VLM 統計。"""
+    """執行 ingest 並印出各階段耗時、圖譜與 VLM 統計。
+
+    Args:
+        raw_path: 命令列的 PDF 檔或資料夾路徑。
+
+    Returns:
+        結束碼：0 成功；EXIT_USAGE 輸入路徑不合法；EXIT_FAILURE 有任何一篇匯入失敗或有描述失敗。
+    """
     try:
         pdfs, non_pdfs = _collect_pdfs(raw_path)
     except ValueError as exc:
@@ -163,6 +172,8 @@ def _run_ingest(raw_path: str) -> int:
         print(f"  MinerU 解析：{report.parse_seconds:.1f} s（backend={pipeline.MINERU_BACKEND}）")
         print(f"  建圖（文字切塊、實體抽取、向量）：{report.graph_seconds:.1f} s")
         print(f"  多模態（圖／表／公式描述）：{report.multimodal_seconds:.1f} s，{report.multimodal_items} 項")
+        if report.description_failed:
+            print(f"  其中 {report.description_failed} 項描述失敗（詳見 stderr）")
     failures = [report for report in summary.reports if report.error]
     print(f"VLM 呼叫：成功 {summary.vlm_ok}，失敗 {summary.vlm_failed}")
     if summary.vlm_sample:
@@ -172,24 +183,70 @@ def _run_ingest(raw_path: str) -> int:
         f"（其中 RAG-Anything 加的 belongs_to 邊 {summary.belongs_to}，其餘 {summary.relations - summary.belongs_to}）"
     )
     print("文件狀態：" + "，".join(f"{status}={count}" for status, count in sorted(summary.status_counts.items())))
+    stuck = summary.status_counts.get("handling", 0)
+    if stuck:
+        print(f"注意：{stuck} 篇文件停在 handling（先前匯入在多模態階段被中斷）；對該 PDF 重新執行 ingest 會重試")
     for report in failures:
         print(f"匯入失敗：{report.pdf.name}：{report.error}", file=sys.stderr)
+    if summary.description_error:
+        print(summary.description_error, file=sys.stderr)
     if failures:
         print(f"{len(failures)}/{len(summary.reports)} 篇匯入失敗；其餘已匯入的資料保留，重新執行會重試失敗的篇", file=sys.stderr)
-        return EXIT_FAILURE
-    return 0
+    return EXIT_FAILURE if failures or summary.description_error else 0
 
 
 def _run_query(question: str, mode: str, vlm_enhanced: bool) -> int:
-    """執行 query 並印出答案。"""
+    """執行 query 並印出答案。
+
+    Args:
+        question: 問題文字。
+        mode: 檢索模式。
+        vlm_enhanced: 是否啟用 VLM 增強查詢。
+
+    Returns:
+        結束碼 0；失敗以例外往上拋，由 main 轉成 EXIT_FAILURE。
+    """
     from rag_lab import pipeline
 
     print(pipeline.query(question, mode, vlm_enhanced))
     return 0
 
 
+def _reserve_result_file(out_dir: Path, generated_at: datetime) -> Path:
+    """建立資料夾並以獨佔模式建立空的結果檔，檔名撞到既有檔案時加序號。
+
+    Args:
+        out_dir: 結果資料夾（不存在會建立）。
+        generated_at: 檔名用的時間戳記（只到秒）。
+
+    Returns:
+        已建立（空的）結果檔路徑，呼叫端稍後寫入內容。
+
+    Raises:
+        OSError: 資料夾建不起來或不可寫。
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"eval_{generated_at:%Y%m%d-%H%M%S}"
+    for attempt in itertools.count():
+        path = out_dir / (f"{stem}.md" if attempt == 0 else f"{stem}-{attempt}.md")
+        try:
+            path.open("x", encoding="utf-8").close()
+        except FileExistsError:
+            continue
+        return path
+
+
 def _run_eval(questions_path: str, output_dir: str) -> int:
-    """對題目檔的每一題跑五種檢索模式，寫出 Markdown 對照表。"""
+    """對題目檔的每一題跑五種檢索模式，寫出 Markdown 對照表。
+
+    Args:
+        questions_path: 題目檔（JSONL）路徑。
+        output_dir: 結果檔資料夾。
+
+    Returns:
+        結束碼：0 全部成功；EXIT_USAGE 題目檔讀不到或格式錯誤；EXIT_FAILURE 有任何一格失敗
+        （結果檔仍會寫出）。
+    """
     path = Path(questions_path).expanduser()
     try:
         questions = load_questions(path)
@@ -203,11 +260,15 @@ def _run_eval(questions_path: str, output_dir: str) -> int:
     from rag_lab import pipeline
 
     settings = get_settings()
-    # 結果資料夾在查詢前就建好：跑了幾十分鐘才發現寫不進去，結果就白費了
-    out_dir = Path(output_dir).expanduser()
-    out_dir.mkdir(parents=True, exist_ok=True)
     generated_at = datetime.now()
-    cells = pipeline.evaluate(questions)
+    # 結果檔在查詢前就建好並佔住檔名：跑了幾十分鐘才發現寫不進去或撞名，結果就白費了
+    result_path = _reserve_result_file(Path(output_dir).expanduser(), generated_at)
+    try:
+        cells = pipeline.evaluate(questions)
+    except BaseException:
+        # 沒跑完就不留下預先建立的空結果檔（例外照常往外拋）
+        result_path.unlink(missing_ok=True)
+        raise
     meta = [
         ("題目檔", str(path.resolve())),
         ("題數", str(len(questions))),
@@ -216,9 +277,7 @@ def _run_eval(questions_path: str, output_dir: str) -> int:
         ("LLM_MODEL", settings.llm_model),
         ("EMBED_MODEL", settings.embed_model),
     ]
-    result_path = out_dir / f"eval_{generated_at:%Y%m%d-%H%M%S}.md"
-    with result_path.open("x", encoding="utf-8") as handle:
-        handle.write(render_report(questions, cells, meta, generated_at))
+    result_path.write_text(render_report(questions, cells, meta, generated_at), encoding="utf-8")
     print(f"對照表：{result_path.resolve()}")
 
     failures = [
@@ -235,7 +294,15 @@ def _run_eval(questions_path: str, output_dir: str) -> int:
 
 
 def _run_graph(sample: int, seed: int) -> int:
-    """抽樣印出知識圖譜的實體與關係。"""
+    """抽樣印出知識圖譜的實體與關係。
+
+    Args:
+        sample: 抽樣實體數。
+        seed: 抽樣種子。
+
+    Returns:
+        結束碼 0；圖譜不存在或為空以例外往上拋，由 main 轉成 EXIT_FAILURE。
+    """
     from rag_lab import graph_report
 
     graph = graph_report.load_graph(get_settings().working_dir)

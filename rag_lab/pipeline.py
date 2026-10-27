@@ -14,8 +14,11 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   doc ID 不會重新排入，只會另寫一筆 status=failed 的 dup- 紀錄；刪除時保留 LLM 快取，
   上次已成功的 chunk 重跑時直接命中快取。
 - 開始處理前先確認要用的端點連得上（models.check_reachable），不可達就指出名稱與位址並立即
-  失敗，不要等到解析完才發現。VLM 失敗不會讓 RAG-Anything 報錯，所以匯入後依
-  models.vision_stats 判斷，有失敗就以 PipelineError 回報（含端點與位址）。
+  失敗，不要等到解析完才發現。圖／表／公式的描述失敗不會讓 RAG-Anything 報錯（processor 吞掉
+  後寫入 fallback 實體），所以匯入時把每個 modal processor 的 caption 函式包上計數
+  （models.count_description_failures），匯入後依 models.description_stats 判斷。有失敗時不拋例外
+  （拋了就看不到逐篇報告與其他篇的錯誤），而是記在 IngestSummary.description_error（含端點與
+  位址），由 CLI 印完報告後以非零碼結束。
 - 查詢走 LightRAG 的 aquery_llm（回 status 與 message），不用 aquery：後者在 LLM 失敗
   時回 None、非法模式也回 None。status 不是 success 或沒有答案內容一律當失敗。
 - 查詢預設 vlm_enhanced=False（只走 LLM、不讓 VLM 改寫答案；與 spec 一致，五種模式的答案才由
@@ -52,8 +55,9 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   但不先初始化就查詢會直接拋 ValueError。
 - VLM 增強查詢（aquery_vlm_enhanced）沒有 aquery_llm 的 status／message：LLM 失敗時只回 None，
   這裡只能報「沒有回傳答案內容」，看不到原例外文字（VLM 失敗則有端點與位址）。
-- VLM 失敗不會讓 RAG-Anything 匯入失敗（描述會退成原始 dict 文字）；這裡只能事後依
-  models.vision_stats 計數判斷並回報，已寫入索引的退化描述不會自動修復。
+- 描述失敗不會讓 RAG-Anything 匯入失敗（圖片描述退成原始 dict 文字、表格與公式退成原始內容）；
+  這裡只能事後依 models.description_stats 計數判斷並回報，已寫入索引的退化描述不會自動修復，
+  文件也已被標為完整處理（重跑會略過，要刪索引重來）。
 
 Dependencies: raganything、lightrag-hku（由 raganything 帶入）。
 """
@@ -67,6 +71,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from lightrag import QueryParam
+from lightrag.base import DocStatus
 from lightrag.constants import DEFAULT_MAX_ENTITY_TOKENS, DEFAULT_MAX_RELATION_TOKENS, DEFAULT_MAX_TOTAL_TOKENS
 from raganything import RAGAnything, RAGAnythingConfig
 from raganything.callbacks import ProcessingCallback
@@ -81,6 +86,9 @@ from rag_lab.evaluation import RETRIEVAL_MODES, Cell, Question
 
 # MinerU 解析後端。在 Mac（無 CUDA）上實測挑選，理由見 ticket 03 回報。
 MINERU_BACKEND = "pipeline"
+
+# 統計文件狀態時每頁讀幾筆（LightRAG 的上限是 200）
+STATUS_PAGE_SIZE = 200
 
 
 class PipelineError(RuntimeError):
@@ -99,7 +107,9 @@ def ensure_mineru_on_path() -> None:
     Python 所在的 bin 目錄（專案 venv）附加到 PATH 尾端，使用者不需要先 activate venv。
     """
     if shutil.which("mineru") is None:
-        os.environ["PATH"] = os.pathsep.join([os.environ.get("PATH", ""), str(Path(sys.executable).parent)])
+        # 只有既有 PATH 非空才串接：PATH 沒設定時，開頭的空項目代表目前目錄，cwd 裡的 mineru 會比 venv 的先被執行
+        entries = [entry for entry in (os.environ.get("PATH"), str(Path(sys.executable).parent)) if entry]
+        os.environ["PATH"] = os.pathsep.join(entries)
 
 
 def build_rag(settings: Settings) -> RAGAnything:
@@ -147,7 +157,14 @@ async def _close(rag: RAGAnything) -> None:
 
 
 async def _initialize(rag: RAGAnything) -> None:
-    """初始化 LightRAG 與儲存；失敗時拋 PipelineError。"""
+    """初始化 LightRAG 與儲存。
+
+    Args:
+        rag: 尚未初始化的 RAGAnything。
+
+    Raises:
+        PipelineError: RAG-Anything 回報初始化失敗。
+    """
     ensure_mineru_on_path()
     result = await rag._ensure_lightrag_initialized()
     if not result or not result.get("success"):
@@ -196,6 +213,7 @@ class IngestReport:
         multimodal_items: 處理的圖／表／公式數。
         total_seconds: 這一篇從開始到結束的總耗時。
         error: 失敗時的「型別：訊息」；None 表示成功。
+        description_failed: 這一篇的圖／表／公式描述失敗次數。
     """
 
     pdf: Path
@@ -206,6 +224,7 @@ class IngestReport:
     multimodal_items: int = 0
     total_seconds: float = 0.0
     error: str | None = None
+    description_failed: int = 0
 
 
 @dataclass
@@ -221,6 +240,7 @@ class IngestSummary:
         vlm_ok: VLM 成功呼叫次數。
         vlm_failed: VLM 失敗呼叫次數。
         vlm_sample: 第一則 VLM 圖片描述（供人工判斷與原圖是否相符）。
+        description_error: 有圖／表／公式描述失敗時的完整說明（含端點與位址）；None 表示沒有。
     """
 
     reports: list[IngestReport] = field(default_factory=list)
@@ -231,10 +251,23 @@ class IngestSummary:
     vlm_ok: int = 0
     vlm_failed: int = 0
     vlm_sample: str | None = None
+    description_error: str | None = None
 
 
 async def _ingest_one(rag: RAGAnything, pdf: Path) -> IngestReport:
-    """匯入單篇 PDF；已完整處理就略過。"""
+    """匯入單篇 PDF；已完整處理就略過，先前未完成的先清掉舊紀錄再重匯。
+
+    Args:
+        rag: 已初始化的 RAGAnything。
+        pdf: PDF 路徑。
+
+    Returns:
+        這一篇的 IngestReport（total_seconds 與 description_failed 由呼叫端填入）。
+
+    Raises:
+        PipelineError: 解析不出內容，或清除舊紀錄失敗。
+        Exception: MinerU、LLM 等匯入過程的失敗（由 _ingest 轉成該篇的 report.error）。
+    """
     timer = StageTimer()
     rag.callback_manager.register(timer)
     try:
@@ -264,7 +297,14 @@ async def _ingest_one(rag: RAGAnything, pdf: Path) -> IngestReport:
 
 
 async def _graph_stats(rag: RAGAnything) -> tuple[int, int, int]:
-    """讀取圖譜的實體數、關係數與其中的 belongs_to 邊數。"""
+    """讀取圖譜的實體數、關係數與其中的 belongs_to 邊數。
+
+    Args:
+        rag: 已初始化的 RAGAnything。
+
+    Returns:
+        (實體數, 關係數（含 belongs_to）, 其中的 belongs_to 邊數)。
+    """
     graph = rag.lightrag.chunk_entity_relation_graph
     nodes = await graph.get_all_nodes()
     edges = await graph.get_all_edges()
@@ -272,13 +312,65 @@ async def _graph_stats(rag: RAGAnything) -> tuple[int, int, int]:
     return len(nodes), len(edges), belongs_to
 
 
+async def _status_counts(rag: RAGAnything) -> dict[str, int]:
+    """統計文件狀態，包含 RAG-Anything 自己加的狀態（例如 handling）。
+
+    不用 doc_status.get_status_counts()：LightRAG 的 JsonDocStatusStorage 只認自己的
+    DocStatus，store 裡有 RAG-Anything 的 handling 紀錄（前一次匯入在多模態階段被中斷）
+    就會拋 KeyError。get_docs_paginated 不過濾狀態，回傳原始狀態字串。
+
+    Args:
+        rag: 已初始化的 RAGAnything。
+
+    Returns:
+        {狀態名稱: 文件數}：LightRAG 的各狀態一律列出（沒有就是 0），其他狀態（例如 handling）只在實際出現時列出。
+    """
+    counts = {status.value: 0 for status in DocStatus}
+    page = 1
+    while True:
+        docs, total = await rag.lightrag.doc_status.get_docs_paginated(
+            page=page, page_size=STATUS_PAGE_SIZE, sort_field="id"
+        )
+        for _, doc in docs:
+            status = str(getattr(doc.status, "value", doc.status))
+            counts[status] = counts.get(status, 0) + 1
+        if page * STATUS_PAGE_SIZE >= total:
+            return counts
+        page += 1
+
+
+def _count_description_failures(rag: RAGAnything) -> None:
+    """把每個 modal processor 的 caption 函式包上失敗計數（見 models.count_description_failures）。
+
+    Args:
+        rag: 已初始化的 RAGAnything（modal_processors 已建立）。
+    """
+    for processor in rag.modal_processors.values():
+        processor.modal_caption_func = models.count_description_failures(processor.modal_caption_func)
+
+
 async def _ingest(pdfs: list[Path], settings: Settings) -> IngestSummary:
+    """匯入一批 PDF 並彙整結果。
+
+    Args:
+        pdfs: 要匯入的 PDF 路徑。
+        settings: 已驗證的設定。
+
+    Returns:
+        IngestSummary；單篇失敗與描述失敗都記在裡面，不拋例外。
+
+    Raises:
+        EndpointError: 開始前有端點不可達。
+        PipelineError: 初始化失敗。
+    """
     models.check_reachable("LLM", "VLM", "Embedding")
     rag = build_rag(settings)
     summary = IngestSummary()
     try:
         await _initialize(rag)
+        _count_description_failures(rag)
         for pdf in pdfs:
+            failed_before = models.description_stats.failed
             started = time.perf_counter()
             try:
                 report = await _ingest_one(rag, pdf)
@@ -286,19 +378,21 @@ async def _ingest(pdfs: list[Path], settings: Settings) -> IngestSummary:
                 # 單篇失敗不中斷整批：記下是哪一篇、為什麼，CLI 據此印出並以非零碼結束
                 report = IngestReport(pdf, skipped=False, parse_seconds=0.0, error=f"{type(exc).__name__}: {exc}")
             report.total_seconds = time.perf_counter() - started
+            report.description_failed = models.description_stats.failed - failed_before
             summary.reports.append(report)
         summary.entities, summary.relations, summary.belongs_to = await _graph_stats(rag)
-        counts = await rag.lightrag.doc_status.get_status_counts()
-        summary.status_counts = {str(getattr(key, "value", key)): value for key, value in counts.items()}
+        summary.status_counts = await _status_counts(rag)
     finally:
         await _close(rag)
     stats = models.vision_stats
     summary.vlm_ok, summary.vlm_failed, summary.vlm_sample = stats.ok, stats.failed, stats.sample
-    if stats.failed:
-        raise PipelineError(
-            f"匯入完成，但有 {stats.failed} 次 VLM 呼叫失敗（成功 {stats.ok} 次）；RAG-Anything 不會因此報錯，"
-            f"受影響圖片的描述已退化成原始 dict 並寫入索引。最近錯誤：{stats.last_error}。"
-            f"請修好 VLM 端點後刪除 {settings.working_dir} 與 {settings.parser_output_dir} 再重新匯入。"
+    described = models.description_stats
+    if described.failed:
+        summary.description_error = (
+            f"匯入完成，但有 {described.failed} 次圖／表／公式描述呼叫失敗；RAG-Anything 不會因此報錯，"
+            f"受影響項目的描述已退化成原始內容並寫入索引，文件仍標為完整處理（重新執行會略過）。"
+            f"最近錯誤：{described.last_error}。"
+            f"請修好端點後刪除 {settings.working_dir} 與 {settings.parser_output_dir} 再重新匯入。"
         )
     return summary
 
@@ -310,10 +404,11 @@ def ingest(pdfs: list[Path]) -> IngestSummary:
         pdfs: 要匯入的 PDF 路徑。
 
     Returns:
-        IngestSummary。
+        IngestSummary；單篇失敗與描述失敗記在裡面（reports[].error、description_error），由呼叫端決定結束碼。
 
     Raises:
-        PipelineError: 解析不出內容、初始化失敗等可預期失敗。
+        PipelineError: 初始化失敗等整批層級的可預期失敗。
+        EndpointError: 開始前有端點不可達。
     """
     return asyncio.run(_ingest(pdfs, get_settings()))
 
@@ -353,7 +448,7 @@ def query_param(mode: str, max_total_tokens: int) -> QueryParam:
     return QueryParam(mode=mode, **query_kwargs(max_total_tokens))
 
 
-async def _answer(rag: RAGAnything, question: str, mode: str, settings: Settings) -> str | None:
+async def _answer(rag: RAGAnything, question: str, mode: str, settings: Settings) -> str:
     """在已初始化的 RAGAnything 上以 aquery_llm 查詢（不啟用 VLM 增強）。
 
     Args:
@@ -363,18 +458,36 @@ async def _answer(rag: RAGAnything, question: str, mode: str, settings: Settings
         settings: 已驗證的設定（取 QUERY_MAX_TOTAL_TOKENS）。
 
     Returns:
-        答案文字；LightRAG 回成功但沒有內容時為 None 或空字串，由呼叫端判斷。
+        答案文字（非空字串）。
 
     Raises:
-        PipelineError: LightRAG 回報查詢失敗（訊息含原例外文字）。
+        PipelineError: LightRAG 回報查詢失敗（訊息含原例外文字），或成功但沒有答案內容。
     """
     result = await rag.lightrag.aquery_llm(question, query_param(mode, settings.query_max_total_tokens))
     if result.get("status") != "success":
         raise PipelineError(f"查詢失敗（mode={mode}）：{result.get('message')}")
-    return (result.get("llm_response") or {}).get("content")
+    answer = (result.get("llm_response") or {}).get("content")
+    if not answer or not isinstance(answer, str):
+        raise PipelineError(f"查詢沒有回傳答案內容（mode={mode}）")
+    return answer
 
 
 async def _query(question: str, mode: str, vlm_enhanced: bool, settings: Settings) -> str:
+    """初始化後以指定模式查詢一次，收尾後回傳答案。
+
+    Args:
+        question: 問題文字。
+        mode: 檢索模式。
+        vlm_enhanced: True 時走 RAG-Anything 的 VLM 增強查詢，並多檢查 VLM 端點。
+        settings: 已驗證的設定。
+
+    Returns:
+        答案文字（非空字串）。
+
+    Raises:
+        EndpointError: 端點不可達或呼叫失敗。
+        PipelineError: 初始化失敗、查詢失敗，或沒有答案內容。
+    """
     models.check_reachable("LLM", "Embedding", *(["VLM"] if vlm_enhanced else []))
     rag = build_rag(settings)
     try:
@@ -386,12 +499,12 @@ async def _query(question: str, mode: str, vlm_enhanced: bool, settings: Setting
             answer = await rag.aquery_vlm_enhanced(
                 question, mode=mode, **query_kwargs(settings.query_max_total_tokens)
             )
+            if not answer or not isinstance(answer, str):
+                raise PipelineError(f"查詢沒有回傳答案內容（mode={mode}，vlm_enhanced=True）")
         else:
             answer = await _answer(rag, question, mode, settings)
     finally:
         await _close(rag)
-    if not answer or not isinstance(answer, str):
-        raise PipelineError(f"查詢沒有回傳答案內容（mode={mode}，vlm_enhanced={vlm_enhanced}）")
     return answer
 
 
@@ -419,6 +532,19 @@ def query(question: str, mode: str, vlm_enhanced: bool = False) -> str:
 
 
 async def _evaluate(questions: list[Question], settings: Settings) -> list[list[Cell]]:
+    """在同一個 RAGAnything 實例上依題目、模式順序逐格查詢；單格失敗記在該格。
+
+    Args:
+        questions: 已驗證的題目。
+        settings: 已驗證的設定。
+
+    Returns:
+        cells[i][j] 是第 i 題在 RETRIEVAL_MODES[j] 的結果。
+
+    Raises:
+        EndpointError: LLM 或 embedding 端點在開始前就不可達。
+        PipelineError: 初始化失敗。
+    """
     models.check_reachable("LLM", "Embedding")
     rag = build_rag(settings)
     cells: list[list[Cell]] = []
@@ -428,10 +554,7 @@ async def _evaluate(questions: list[Question], settings: Settings) -> list[list[
             row: list[Cell] = []
             for mode in RETRIEVAL_MODES:
                 try:
-                    answer = await _answer(rag, question.question, mode, settings)
-                    if not answer or not isinstance(answer, str):
-                        raise PipelineError(f"查詢沒有回傳答案內容（mode={mode}）")
-                    row.append(Cell(answer=answer))
+                    row.append(Cell(answer=await _answer(rag, question.question, mode, settings)))
                 except Exception as exc:
                     # 單格失敗不中斷整批：把原因記在這一格，CLI 據此標示並以非零碼結束
                     row.append(Cell(error=f"{type(exc).__name__}: {exc}"))
