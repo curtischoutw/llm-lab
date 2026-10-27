@@ -50,7 +50,11 @@ rag-anything-lab 的 7 張 ticket 都已結案，知識庫（3 篇論文）也�
 22. 作為使用者，我想在同一個 Python 程式裡連續呼叫 `query()` 問很多題，以便批次處理自己的問題清單。
 23. 作為使用者，我想在同一個 Python 程式裡先 `ingest()` 新論文再 `query()`，以便用一支程式完成「加文件、提問」。
 24. 作為使用者，我想在同一個 Python 程式裡先 `evaluate()` 再 `query()`（或反過來），以便組合不同的公開函式。
-25. 作為使用者，我想知道 `query()` 每次呼叫都會重新載入知識庫（每題多幾秒），不適合當常駐服務，以便規劃 web API 或聊天機器人時知道需要另外的介面。
+25. 作為使用者，我想開一個 session 之後問很多題，知識庫只初始化一次，以便批次提問時不用每題重新載入（2026-10-28 修訂，取代原本「知道 `query()` 每次重新載入」的故事）。
+30. 作為使用者，我想在同一個 session 裡依序 ingest 好幾批 PDF，每一批的統計（VLM 成功／失敗、描述失敗）只算那一批，以便依每批的報告判斷成敗。
+31. 作為使用者，我想在誤用 session 時（同時開第二個、關閉後還在用、在別的執行緒或 Jupyter 裡用）得到專案自己的明確錯誤與替代寫法，而不是 LightRAG 內部的 event loop 錯誤。
+32. 作為使用者，我想在忘了關閉 session 時，process 結束前仍會把儲存寫回並印出警告，以便不會在不知情的狀況下失去快取或索引的更新。
+33. 作為使用者，我想讓連續呼叫的記憶體不隨呼叫次數增加，以便長時間跑批次。
 26. 作為使用者，我想從 README 一眼看到架構文件和 Python 用法的入口，以便不會漏掉這些文件。
 27. 作為維護者，我想讓範例有自動測試，以便 `rag_lab` 改介面時範例不會在沒人發現的狀況下失效。
 28. 作為維護者，我想讓「重複呼叫公開函式」有回歸測試，以便日後升級 LightRAG 或改收尾流程時，這個 bug 不會再出現而沒被發現。
@@ -64,7 +68,7 @@ rag-anything-lab 的 7 張 ticket 都已結案，知識庫（3 篇論文）也�
 - **範例的位置**：repo 最上層新增 `examples` 目錄，不放 `__init__.py`，靠 namespace package import。已確認專案 venv 裡沒有已安裝的 `examples` 套件會遮蔽它。不放在 `scripts`，因為 `scripts` 是維運工具（下載、啟動 server、smoke test）。
 - **範例的執行方式**：在 repo 根目錄用 `python -m examples.<名稱>`。不在範例裡改 `sys.path`，也不把 `rag_lab` 做成可安裝的套件（不新增打包設定）。
 - **範例的內容**：只示範問答。一份 2 題的問題清單，以 mix 模式逐題呼叫 `query()`，每題印出 `Q: <問題>`、`A: <答案>` 兩行。範例不攔例外、不整理回傳結構、不示範模式比較（模式比較已經有 `eval` 指令）。2 題沿用 README 現有的兩個問題。
-- **範例只使用現有的公開函式**：不新增 session 之類「初始化一次、問很多題」的 API。每題重新初始化多花的幾秒，相對於一題 52–66 秒的 LLM 生成可以忽略。
+- ~~**範例只使用現有的公開函式**~~：2026-10-28 由使用者推翻，改做 session API，見文末「修訂：Session API」。
 - **重複呼叫 bug 的修法**：在 pipeline 的收尾流程最後，呼叫 LightRAG 提供的 `finalize_share_data()` 重置 process 層級的共用鎖。這一步放在收尾的 `finally` 層裡，所以儲存寫回或限流 worker 關閉失敗時也會執行。三個公開函式共用同一個收尾流程，所以三個都一起修好。pipeline 模組 docstring 的關鍵設計決策要補上這一條與原因。
   - 實驗依據：同一支腳本連問兩題，不重置時第二題失敗（rc=1，錯誤為 `Lock ... is bound to a different event loop`）；每題之後重置則兩題都成功（rc=0）。
 - **README 的修改**：最上方說明處加一行連到架構文件；「使用」一節結尾加「在 Python 裡呼叫」，內容是 3 行程式碼加一句指向範例與架構文件的話。
@@ -92,7 +96,10 @@ rag-anything-lab 的 7 張 ticket 都已結案，知識庫（3 篇論文）也�
 
 ## Out of Scope
 
-- 「初始化一次、問很多題」的 session API、常駐服務（web API、聊天機器人）、終端機互動問答。
+- 常駐服務（web API、聊天機器人）、終端機互動問答。（session API 原本列在這裡，2026-10-28 移入範圍，見文末修訂。）
+- session 的非同步介面（`async with`）；在 Jupyter 等已有 running loop 的環境直接使用 session（只給明確錯誤與替代寫法）。
+- 呼叫途中被中斷（Ctrl-C）後的 BROKEN 狀態機（使用者選了中間程度的誤用保護）。
+- 多個 session 同時開啟（LightRAG 的共用狀態是 process 層級，同一時間只允許一個）。
 - 把 `rag_lab` 做成可安裝的套件（新增打包設定）。
 - 範例裡的錯誤處理示範、回傳結構整理、檢索模式比較。
 - 依函式逐一說明的 API 參考文件。
@@ -117,3 +124,53 @@ rag-anything-lab 的 7 張 ticket 都已結案，知識庫（3 篇論文）也�
   - read-back 另外回報 `examples/` 等「進版控：是」與 git 狀態不符，這是因為草稿還沒 commit，不需要修文件。
 - 架構文件內的數字（3 篇匯入約 1.7 小時、每題 52–66 秒）出自 rag-anything-lab 的 ticket 03、05 實測，改數字前先對照那些 ticket。
 - 修 bug 後，CLI 的行為不變（每次只呼叫一次）。風險是升級 LightRAG 時 `finalize_share_data` 的位置或語意可能改變，縫 2、縫 3 的測試會在那時失敗。
+
+## 修訂：Session API（2026-10-28）
+
+### 為什麼修訂
+
+tickets 01–03 完成後，code review 指出「公開函式可在同一個程式裡任意次數呼叫」不成立：
+- ingest 的 VLM／描述統計是模組層級、不會重置，同一個 process 第二次 ingest 會累加（reviewer 在假 server 上重現：第二份報告 `vlm_ok=2`）；
+- RAG-Anything 每個實例在建構時 `atexit.register(self.close)`，每次呼叫的實例連同載入的知識庫留到 process 結束；
+- 每次呼叫結束時的共用鎖重置會破壞同時進行中的其他呼叫；
+- 根因是每次呼叫都開新的 event loop 並重建一切。
+
+使用者在三個選項（在現有做法上補洞／改做 session API／收回重複呼叫的承諾）中選了 session API。
+
+### 決策紀錄
+
+- **決策**：在 pipeline 模組新增同步的 context manager `Session`，內部持有一個 `asyncio.Runner`，所有呼叫在同一個 event loop 上執行；知識庫在開 session 時初始化一次。`ingest`／`query`／`evaluate` 三個模組函式保留為「開 session、呼叫一次、關閉」的薄包裝，CLI 不改。
+- **放棄**：
+  - 在現有做法上補洞：每題仍重新初始化，且「不能同時呼叫」只能靠文件約束。
+  - 收回重複呼叫的承諾：使用者無法在程式裡批次提問。
+  - 背景執行緒持有 loop：要處理跨執行緒傳例外與關閉，程式碼較多；`asyncio.Runner` 已能在同一執行緒重複 `run()`（Python 3.11+，專案鎖定 3.12）。
+- **證據**：兩個獨立的設計 agent（簡單優先、穩固優先）都收斂到 `Session` 加 `asyncio.Runner` 加薄包裝；`asyncio.run` 本身就是 `with Runner(): runner.run()`，所以薄包裝與現有行為等價；LightRAG 在 `__post_init__` 呼叫 `initialize_share_data()`，finalize 後 `_initialized` 歸零，所以先後開兩個 session 會重建鎖。
+- **推翻條件**：升級 LightRAG 1.4.x 小版後「先後開兩個 session」的測試出現 event loop 錯誤；或使用者需要在 async 程式／Jupyter 裡直接使用（屆時要做非同步介面）。
+
+### 介面
+
+- `Session()`：不收參數，設定由 `.env` 讀取。建構時就檢查端點、建立並初始化 RAGAnything（不延後到第一次呼叫），初始化失敗當場拋錯並釋放所有資源。
+- 方法簽章與模組函式相同：`ingest(pdfs) -> IngestSummary`、`query(question, mode, vlm_enhanced=False) -> str`、`evaluate(questions) -> list[list[Cell]]`；另有 `close()`（可重複呼叫）與 `closed` 屬性，支援 `with`。
+- 誤用一律拋 `SessionError`（繼承 `RuntimeError`，不繼承 `PipelineError`：誤用是程式錯誤，不該被 `except PipelineError` 接走）；關閉後呼叫拋它的子類 `SessionClosedError`。
+
+### 實作決策
+
+- **event loop**：每個 session 一個 `asyncio.Runner`。關閉順序：在同一個 runner 上執行收尾（寫回儲存、關限流 worker、重置 LightRAG 共用狀態），再關 runner。
+- **共用狀態重置**：`finalize_share_data()` 只在 session 關閉時執行一次，session 內的各次呼叫不再執行。
+- **同時只允許一個 session**：模組層級的鎖以非阻塞方式取得；取不到就拋 `SessionError`，訊息指出已開啟的 session 要先關閉。鎖在 close 與建構失敗時釋放。
+- **執行緒與 running loop**：記下建立 session 的執行緒；其他執行緒呼叫任何方法拋 `SessionError`。建構與每次呼叫前檢查目前執行緒是否已有 running loop（Jupyter、async 程式），有就拋 `SessionError`，訊息附替代寫法（把開 session 與所有呼叫包成一個函式，用 `asyncio.to_thread` 執行）。
+- **統計每次 ingest 獨立**：models 提供原地清零 VLM 與描述統計的函式，每次 ingest 開始時呼叫。描述失敗計數的包裝在 session 初始化後只做一次（原本每次 ingest 包一層，同一個實例第二次 ingest 會包兩層、重複計數）。models 模組 docstring 的「CLI 一次只跑一個命令，所以不需要重置」要改寫。
+- **atexit**：建立 RAGAnything 後立即取消它註冊的 atexit（它在結束時會用新的 loop 碰舊的鎖，錯誤被吞掉），改註冊 session 自己的收尾：使用者忘了 close 時，process 結束前在同一個 runner 上完整收尾並在 stderr 印警告；正常 close 後取消這個註冊，讓 session 與實例可以被回收。
+- **呼叫中的例外**：一般 `Exception` 不改變 session 狀態（與現有逐篇、逐格容錯一致）。不做 BROKEN 狀態。
+- **已知極限**（寫進架構文件）：session 讀的是開啟當下的索引；開著的期間另一個 process ingest 的內容，這個 session 看不到。
+
+### 測試決策（追加）
+
+縫不變：CLI 子行程、範例子行程、Python API 子行程。Python API 縫的 driver 加入 session 步驟，印出統計與例外類別名稱。
+
+- C1 正確性：同一個 session 依序 ingest 兩份不同的 PDF，兩份報告的 VLM／描述統計都等於單獨 ingest 的值；在 vision 失敗的設定下，兩份各自報 1 次失敗。同一個 session 依序 ingest → query → evaluate → query，每步結果等於各自獨立執行。
+- C2 資源：同一個 session 問 N 題，假 mineru 的 `--version`（RAG-Anything 每次初始化執行一次）只被呼叫 1 次；`gc` 後計數 RAGAnything 實例，session 開著時為 1，關閉後為 0。
+- C3 CLI 不變：既有 CLI 測試與 tickets 01 的 4 個模組函式測試不改，全綠。
+- C4 範例：範例改示範 `Session`，主體不超過 15 行、不出現 asyncio。
+- C5 誤用：同時開第二個 session、關閉後呼叫、其他執行緒呼叫、在 running loop 內建構，各拋預期的例外類別；之後再開新 session 問一題要成功。忘了 close 時結束碼為 0、stderr 有警告，之後 CLI query 命中快取。
+- 先紅後綠：統計累加與計數包兩層的測試要在修正前失敗（貼出失敗輸出）。

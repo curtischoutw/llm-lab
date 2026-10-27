@@ -6,7 +6,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] 新增 Python API 縫的測試：以子行程執行一段在同一個 process 裡呼叫公開函式的程式，對假 OpenAI server 與假 mineru 執行。至少覆蓋四種順序：
   - `ingest` 後 `query`；
@@ -20,3 +20,9 @@
 - [ ] pipeline 模組 docstring 的關鍵設計決策要寫上這一條與原因。
 - [ ] 主測試套件與下載腳本的測試全綠，貼出實際輸出。
 - [ ] CLI 行為不變：既有的 CLI 測試不做任何修改就通過。
+
+## 結案說明（2026-10-28）
+
+- 4 個 Python API 縫測試：其中 3 個在拿掉修正時因 `Lock ... is bound to a different event loop` 失敗，修正後通過。「同一份 PDF ingest 兩次」在拿掉修正時也通過（第二次判定略過，沒有用到綁在舊 loop 上的鎖），所以它驗證的是略過行為，不是這個 bug 的回歸測試。
+- 修正後完整測試：主套件 84 個 OK，下載腳本 6 個 OK。
+- code review 之後確認，「任意次數呼叫」在這個 ticket 的做法下不成立（統計累加、實例被 atexit 留住、不能同時呼叫）。依使用者決定改做 session API，見 spec 的「修訂：Session API」與 ticket 04。

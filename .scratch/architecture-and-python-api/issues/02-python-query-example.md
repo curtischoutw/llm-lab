@@ -11,7 +11,7 @@ README 的「使用」一節結尾，加上「在 Python 裡呼叫」的 3 行�
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] 範例縫的測試：先 ingest 一份假 PDF，再以子行程在 repo 根目錄執行範例。斷言：
   - 結束碼為 0；

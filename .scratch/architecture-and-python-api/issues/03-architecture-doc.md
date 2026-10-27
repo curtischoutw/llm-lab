@@ -13,7 +13,7 @@ README 最上方有一行連到這份文件。內容範圍與深度見 spec 的 
 
 **Blocked by:** 01, 02
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] 修正第一次 read-back 找到的 6 處（見 spec 的 Further Notes）：
   - 測試表補上測試套件的 `__init__`；
@@ -27,3 +27,7 @@ README 最上方有一行連到這份文件。內容範圍與深度見 spec 的 
 - [ ] README 最上方的連結指向這份文件。
 - [ ] 文字符合使用者的寫作規則：用描述不用比喻、不誇飾、絕對化的斷言要能自圓其說。
 - [ ] 01、02 merge 之後，派一個沒參與撰寫的 agent 對照實際 repo 做 read-back，逐條核對路徑、版控狀態、函式簽章、import、CLI 參數、README 章節號碼。結果不能有任何不符；無法確認的項目要列出理由。
+
+## 結案說明（2026-10-28）
+
+- 第一次 read-back 的 6 處已修正。第二次 read-back 仍找到 2 處小錯（`docs/agents/` 漏列 `domain.md`、`requirements.txt` 不是全部鎖版本），並指出「任意順序、任意次數」沒有測試支持；code review 另指出 `query()` 的例外寫錯。改做 session API 後第 4.2 節要整段重寫，所以這些修正與最後一次 read-back 移到 ticket 05。本 ticket「read-back 無不符」這一條未達成，由 05 承接。
