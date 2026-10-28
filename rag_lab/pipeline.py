@@ -224,10 +224,10 @@ class StageTimer(ProcessingCallback):
 
 @dataclass
 class IngestReport:
-    """單篇 PDF 匯入結果。
+    """單篇文件匯入結果。
 
     Attributes:
-        pdf: PDF 路徑。
+        document: 文件路徑。
         skipped: True 表示已完整處理過，沒有重新匯入。
         parse_seconds: MinerU 解析耗時（skipped 時為快取查詢時間）。
         graph_seconds: 文字建圖耗時（含 LLM 實體抽取）。
@@ -238,7 +238,7 @@ class IngestReport:
         description_failed: 這一篇的圖／表／公式描述失敗次數。
     """
 
-    pdf: Path
+    document: Path
     skipped: bool
     parse_seconds: float
     graph_seconds: float = 0.0
@@ -254,7 +254,7 @@ class IngestSummary:
     """一次 ingest 的整體結果。
 
     Attributes:
-        reports: 每篇 PDF 的報告。
+        reports: 每篇文件的報告。
         entities: 圖譜實體（節點）數。
         relations: 圖譜關係（邊）數，含 belongs_to。
         belongs_to: 其中 RAG-Anything 加的 belongs_to 邊數。
@@ -276,12 +276,12 @@ class IngestSummary:
     description_error: str | None = None
 
 
-async def _ingest_one(rag: RAGAnything, pdf: Path) -> IngestReport:
-    """匯入單篇 PDF；已完整處理就略過，先前未完成的先清掉舊紀錄再重匯。
+async def _ingest_one(rag: RAGAnything, document: Path) -> IngestReport:
+    """匯入單篇文件；已完整處理就略過，先前未完成的先清掉舊紀錄再重匯。
 
     Args:
         rag: 已初始化的 RAGAnything。
-        pdf: PDF 路徑。
+        document: 文件路徑。
 
     Returns:
         這一篇的 IngestReport（total_seconds 與 description_failed 由呼叫端填入）。
@@ -294,22 +294,22 @@ async def _ingest_one(rag: RAGAnything, pdf: Path) -> IngestReport:
     rag.callback_manager.register(timer)
     try:
         parse_kwargs = {"backend": MINERU_BACKEND}
-        content_list, doc_id = await rag.parse_document(str(pdf), **parse_kwargs)
+        content_list, doc_id = await rag.parse_document(str(document), **parse_kwargs)
         if not content_list:
-            raise PipelineError(f"MinerU 沒有從 {pdf.name} 解析出任何內容（輸出資料夾：{rag.config.parser_output_dir}）")
+            raise PipelineError(f"MinerU 沒有從 {document.name} 解析出任何內容（輸出資料夾：{rag.config.parser_output_dir}）")
         if await rag.is_document_fully_processed(doc_id):
-            return IngestReport(pdf, skipped=True, parse_seconds=timer.parse_seconds or 0.0)
+            return IngestReport(document, skipped=True, parse_seconds=timer.parse_seconds or 0.0)
         if await rag.lightrag.doc_status.get_by_id(doc_id) is not None:
             deletion = await rag.lightrag.adelete_by_doc_id(doc_id)
             if deletion.status != "success":
                 raise PipelineError(
-                    f"{pdf.name} 先前的匯入沒有完成，清除舊紀錄 {doc_id} 失敗（{deletion.status}）：{deletion.message}"
+                    f"{document.name} 先前的匯入沒有完成，清除舊紀錄 {doc_id} 失敗（{deletion.status}）：{deletion.message}"
                 )
-        await rag.process_document_complete(str(pdf), **parse_kwargs)
+        await rag.process_document_complete(str(document), **parse_kwargs)
     finally:
         rag.callback_manager.unregister(timer)
     return IngestReport(
-        pdf,
+        document,
         skipped=False,
         parse_seconds=timer.parse_seconds or 0.0,
         graph_seconds=timer.text_insert_seconds,
@@ -371,12 +371,12 @@ def _count_description_failures(rag: RAGAnything) -> None:
         processor.modal_caption_func = models.count_description_failures(processor.modal_caption_func)
 
 
-async def _ingest(rag: RAGAnything, pdfs: list[Path], settings: Settings) -> IngestSummary:
-    """在已初始化的 RAGAnything 上匯入一批 PDF 並彙整結果。
+async def _ingest(rag: RAGAnything, documents: list[Path], settings: Settings) -> IngestSummary:
+    """在已初始化的 RAGAnything 上匯入一批文件並彙整結果。
 
     Args:
         rag: 已完成 _initialize 的實例。
-        pdfs: 要匯入的 PDF 路徑。
+        documents: 要匯入的文件路徑。
         settings: 已驗證的設定。
 
     Returns:
@@ -388,14 +388,14 @@ async def _ingest(rag: RAGAnything, pdfs: list[Path], settings: Settings) -> Ing
     models.check_reachable("LLM", "VLM", "Embedding")
     models.reset_stats()
     summary = IngestSummary()
-    for pdf in pdfs:
+    for document in documents:
         failed_before = models.description_stats.failed
         started = time.perf_counter()
         try:
-            report = await _ingest_one(rag, pdf)
+            report = await _ingest_one(rag, document)
         except Exception as exc:
             # 單篇失敗不中斷整批：記下是哪一篇、為什麼，CLI 據此印出並以非零碼結束
-            report = IngestReport(pdf, skipped=False, parse_seconds=0.0, error=f"{type(exc).__name__}: {exc}")
+            report = IngestReport(document, skipped=False, parse_seconds=0.0, error=f"{type(exc).__name__}: {exc}")
         report.total_seconds = time.perf_counter() - started
         report.description_failed = models.description_stats.failed - failed_before
         summary.reports.append(report)
@@ -414,11 +414,11 @@ async def _ingest(rag: RAGAnything, pdfs: list[Path], settings: Settings) -> Ing
     return summary
 
 
-def ingest(pdfs: list[Path]) -> IngestSummary:
-    """匯入一批 PDF：開一個 Session、匯入一次、關閉。
+def ingest(documents: list[Path]) -> IngestSummary:
+    """匯入一批文件：開一個 Session、匯入一次、關閉。
 
     Args:
-        pdfs: 要匯入的 PDF 路徑。
+        documents: 要匯入的文件路徑。
 
     Returns:
         IngestSummary；單篇失敗與描述失敗記在裡面（reports[].error、description_error），由呼叫端決定結束碼。
@@ -431,7 +431,7 @@ def ingest(pdfs: list[Path]) -> IngestSummary:
     # Session 建構時只檢查 LLM 與 embedding；VLM 在開 Session 之前先檢查，不可達時不建立 WORKING_DIR、不跑 mineru
     models.check_reachable("VLM")
     with Session() as session:
-        return session.ingest(pdfs)
+        return session.ingest(documents)
 
 
 # ==============================
@@ -716,11 +716,11 @@ class Session:
         """
         return self._closed
 
-    def ingest(self, pdfs: list[Path]) -> IngestSummary:
-        """匯入一批 PDF（見模組函式 ingest）。
+    def ingest(self, documents: list[Path]) -> IngestSummary:
+        """匯入一批文件（見模組函式 ingest）。
 
         Args:
-            pdfs: 要匯入的 PDF 路徑。
+            documents: 要匯入的文件路徑。
 
         Returns:
             這一次匯入的 IngestSummary；VLM 與描述統計只計這一次。
@@ -730,7 +730,7 @@ class Session:
             EndpointError: 開始前有端點不可達。
         """
         self._check_usable()
-        return self._runner.run(_ingest(self._rag, pdfs, self._settings))
+        return self._runner.run(_ingest(self._rag, documents, self._settings))
 
     def query(self, question: str, mode: str, vlm_enhanced: bool = False) -> str:
         """以指定檢索模式回答問題（見模組函式 query）。

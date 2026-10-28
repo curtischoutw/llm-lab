@@ -26,8 +26,8 @@ from tests.test_cli import OPTIONAL_FIELDS, REPO_ROOT, REQUIRED_FIELDS
 from tests.test_pipeline import INGEST_TIMEOUT, PipelineCase
 
 # 依 argv 的步驟依序呼叫公開函式；每一步印一行結果。
-# argv[1] 是 PDF 路徑，argv[2] 是題目檔，argv[3] 是 functions（模組函式）或 session（同一個 Session），其餘是步驟。
-# 步驟 stats:<檔名> 匯入 PDF 旁邊的另一個檔案，印出這一次的 VLM 與描述統計；
+# argv[1] 是文件路徑，argv[2] 是題目檔，argv[3] 是 functions（模組函式）或 session（同一個 Session），其餘是步驟。
+# 步驟 stats:<檔名> 匯入文件旁邊的另一個檔案，印出這一次的 VLM 與描述統計；
 # 步驟 instances 印出存活的 RAGAnything 實例數，並在最後（Session 已關閉）再印一次；
 # 步驟 second／closed／thread／loop／bad_mode 各做一種誤用並印出例外類別；orphan 讓建立 session 的執行緒
 # 沒關閉就結束，再由主執行緒關閉；init_fail 讓開 session 失敗一次；
@@ -82,18 +82,18 @@ async def construct_inside_running_loop():
 
 forgotten = []
 
-pdf = Path(sys.argv[1])
+document = Path(sys.argv[1])
 questions = Path(sys.argv[2])
 use_session = sys.argv[3] == "session"
 with pipeline.Session() if use_session else contextlib.nullcontext(pipeline) as api:
     for step in sys.argv[4:]:
         if step == "ingest":
-            summary = api.ingest([pdf])
+            summary = api.ingest([document])
             for report in summary.reports:
                 print(f"ingest skipped={report.skipped} error={report.error}")
         elif step.startswith("stats:"):
             name = step.removeprefix("stats:")
-            summary = api.ingest([pdf.parent / name])
+            summary = api.ingest([document.parent / name])
             failed = sum(report.description_failed for report in summary.reports)
             print(
                 f"stats {name} vlm_ok={summary.vlm_ok} vlm_failed={summary.vlm_failed} "
@@ -187,7 +187,7 @@ class PythonApiCase(PipelineCase):
         env = {k: v for k, v in os.environ.items() if k not in REQUIRED_FIELDS + OPTIONAL_FIELDS}
         env.update(self.env(FAKE_MINERU_VERSION_LOG=str(self.version_log)))
         return subprocess.run(
-            [sys.executable, "-c", DRIVER, str(self.pdf), str(questions), mode, *steps],
+            [sys.executable, "-c", DRIVER, str(self.document), str(questions), mode, *steps],
             cwd=REPO_ROOT,
             env=env,
             capture_output=True,
@@ -224,7 +224,7 @@ class EmptyIndexTest(PythonApiCase):
             ["ingest skipped=False error=None", f"query {CHAT_REPLY}"],
         )
 
-    def test_ingesting_the_same_pdf_twice_skips_the_second_time(self):
+    def test_ingesting_the_same_document_twice_skips_the_second_time(self):
         result = self.run_api("ingest", "ingest")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(
@@ -338,7 +338,7 @@ class IngestStatsTest(PythonApiCase):
         self.server.fail_vision = True
         result = self.run_api("stats:a.pdf", "stats:b.pdf", mode="session")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        # 假 mineru 每份 PDF 有一張圖：VLM 失敗 1 次，圖片描述失敗 1 次
+        # 假 mineru 每份文件有一張圖：VLM 失敗 1 次，圖片描述失敗 1 次
         self.assertEqual(
             result.stdout.splitlines(),
             [

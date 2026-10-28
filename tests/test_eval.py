@@ -7,7 +7,7 @@
 關鍵設計決策：
 - 題目檔格式錯誤的測試不需要索引：驗證在連任何端點、建任何資料夾之前完成，所以測試順便斷言
   假 server 沒收到請求、索引與結果資料夾都沒建立。
-- 執行類測試先 ingest 一份假 PDF，再對同一份索引跑 eval。
+- 執行類測試先 ingest 一份假文件，再對同一份索引跑 eval。
 - 範例題目檔（eval/questions.example.jsonl）直接拿來當輸入，同時驗證它是合法的題目檔；
   斷言用的 id、題型、參考答案從該檔讀出，不在測試裡另寫一份。
 
@@ -114,7 +114,7 @@ class EvalCase(PipelineCase):
 
 
 class IngestedEvalCase(EvalCase):
-    """先匯入一份假 PDF，之後的 eval 對這份索引查詢。"""
+    """先匯入一份假文件，之後的 eval 對這份索引查詢。"""
 
     def setUp(self):
         super().setUp()

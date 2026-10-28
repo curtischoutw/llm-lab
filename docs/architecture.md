@@ -93,7 +93,7 @@ __main__ ──► config
 | `__main__.py` | CLI 入口：解析參數、驗證輸入、呼叫 `pipeline`／`graph_report`、格式化輸出、決定結束碼（0 成功、1 執行失敗、2 用法或輸入錯誤、3 設定錯誤） | `main(argv)`；子命令 `ingest`、`query`、`graph`、`eval` |
 | `config.py` | 從 `.env` 與環境變數讀設定並驗證；必填欄位缺漏或格式錯就拋錯，不給預設值（只有 `EMBED_QUERY_PREFIX` 是選填，預設空字串） | `get_settings() -> Settings`、`ConfigError` |
 | `models.py` | 把三個 OpenAI 相容端點包成 RAG-Anything 需要的模型函式；失敗包成帶端點名稱與位址的錯誤；計數圖、表、公式描述的失敗（RAG-Anything 自己會吞掉） | `llm_model_func`、`vision_model_func`、`build_embedding_func()`、`check_reachable(...)`、`EndpointError` |
-| `pipeline.py` | 核心流程：建立 RAGAnything 實例、匯入（解析、建圖、多模態描述）、查詢、批次比較；把 LightRAG 會吞掉的錯誤轉成可偵測的失敗；`Session` 讓同一個 process 只初始化一次、依序呼叫 | `Session`（`ingest`、`query`、`evaluate`、`close`）、模組函式 `ingest(pdfs) -> IngestSummary`、`query(question, mode, vlm_enhanced=False) -> str`、`evaluate(questions) -> list[list[Cell]]`、`PipelineError`、`SessionError`、`SessionClosedError` |
+| `pipeline.py` | 核心流程：建立 RAGAnything 實例、匯入（解析、建圖、多模態描述）、查詢、批次比較；把 LightRAG 會吞掉的錯誤轉成可偵測的失敗；`Session` 讓同一個 process 只初始化一次、依序呼叫 | `Session`（`ingest`、`query`、`evaluate`、`close`）、模組函式 `ingest(documents) -> IngestSummary`、`query(question, mode, vlm_enhanced=False) -> str`、`evaluate(questions) -> list[list[Cell]]`、`PipelineError`、`SessionError`、`SessionClosedError` |
 | `evaluation.py` | `eval` 的題目檔讀取驗證與 Markdown 對照表排版，不需要任何模型 | `load_questions(path)`、`render_report(...)`、`RETRIEVAL_MODES`、`QuestionFileError` |
 | `graph_report.py` | 直接讀 `rag_storage/` 的 graphml，抽樣列出實體與關係，不需要模型 server | `load_graph(working_dir)`、`format_report(graph, sample_size, seed)` |
 
@@ -174,7 +174,7 @@ with Session() as session:
 | 方法 | 回傳 | 失敗時 |
 |---|---|---|
 | `query(question, mode, vlm_enhanced=False)` | 答案字串 | `mode` 不是五種檢索模式之一拋 `ValueError`（LightRAG 另外接受的 `bypass` 不檢索，這裡不允許）；開始前端點不可達拋 `EndpointError`；查詢失敗（含查詢途中 LLM 失敗）或沒有答案拋 `PipelineError`；`vlm_enhanced=True` 時 VLM 呼叫失敗拋 `EndpointError` |
-| `ingest(pdfs: list[Path])` | `IngestSummary`：每篇的耗時與錯誤、圖譜統計、這一次的 VLM 與描述統計 | 單篇失敗記在該篇的 `error`、圖表公式描述失敗記在 `description_error`，都不拋例外；開始前端點不可達拋 `EndpointError` |
+| `ingest(documents: list[Path])` | `IngestSummary`：每篇的耗時與錯誤、圖譜統計、這一次的 VLM 與描述統計 | 單篇失敗記在該篇的 `error`、圖表公式描述失敗記在 `description_error`，都不拋例外；開始前端點不可達拋 `EndpointError` |
 | `evaluate(questions: list[Question])` | `cells[i][j]`：第 i 題在第 j 種模式的答案或錯誤 | 單格失敗記在該格的 `error`，不拋例外；開始前 LLM 或 embedding 端點不可達拋 `EndpointError` |
 | `close()` | — | 離開 `with` 時自動呼叫；重複呼叫不做事 |
 

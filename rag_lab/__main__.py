@@ -83,8 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="rag_lab", description="RAG-Anything 本地實驗 CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    ingest = sub.add_parser("ingest", help="匯入單一 PDF 或整個資料夾（資料夾內非 PDF 會略過）")
-    ingest.add_argument("path", help="PDF 檔或資料夾路徑")
+    ingest = sub.add_parser("ingest", help="匯入單一文件或整個資料夾（資料夾內非 PDF 會略過）")
+    ingest.add_argument("path", help="文件或資料夾路徑")
 
     query = sub.add_parser("query", help="以指定檢索模式提問")
     query.add_argument("question", help="問題文字")
@@ -115,14 +115,14 @@ def build_parser() -> argparse.ArgumentParser:
 # ==============================
 
 
-def _collect_pdfs(raw: str) -> tuple[list[Path], list[Path]]:
-    """把 ingest 的路徑參數展開成 PDF 清單，並列出資料夾內被略過的非 PDF 檔。
+def _collect_documents(raw: str) -> tuple[list[Path], list[Path]]:
+    """把 ingest 的路徑參數展開成文件清單，並列出資料夾內被略過的非 PDF 檔。
 
     Args:
-        raw: 單一 PDF 檔，或含 PDF 的資料夾（不遞迴；ASSUMPTION：第一批語料是平的資料夾）。
+        raw: 單一文件，或含文件的資料夾（不遞迴；ASSUMPTION：第一批語料是平的資料夾）。
 
     Returns:
-        (依檔名排序的 PDF 絕對路徑, 依檔名排序的非 PDF 檔路徑)；單一檔案時後者為空。
+        (依檔名排序的文件絕對路徑, 依檔名排序的非 PDF 檔路徑)；單一檔案時後者為空。
 
     Raises:
         ValueError: 路徑不存在、不是 PDF、或資料夾內沒有 PDF。
@@ -130,10 +130,10 @@ def _collect_pdfs(raw: str) -> tuple[list[Path], list[Path]]:
     path = Path(raw).expanduser().resolve()
     if path.is_dir():
         files = sorted(p for p in path.iterdir() if p.is_file())
-        pdfs = [p for p in files if p.suffix.lower() == ".pdf"]
-        if not pdfs:
+        documents = [p for p in files if p.suffix.lower() == ".pdf"]
+        if not documents:
             raise ValueError(f"資料夾內沒有 PDF：{path}")
-        return pdfs, [p for p in files if p not in pdfs]
+        return documents, [p for p in files if p not in documents]
     if not path.is_file():
         raise ValueError(f"路徑不存在：{path}")
     if path.suffix.lower() != ".pdf":
@@ -145,13 +145,13 @@ def _run_ingest(raw_path: str) -> int:
     """執行 ingest 並印出各階段耗時、圖譜與 VLM 統計。
 
     Args:
-        raw_path: 命令列的 PDF 檔或資料夾路徑。
+        raw_path: 命令列的文件或資料夾路徑。
 
     Returns:
         結束碼：0 成功；EXIT_USAGE 輸入路徑不合法；EXIT_FAILURE 有任何一篇匯入失敗或有描述失敗。
     """
     try:
-        pdfs, non_pdfs = _collect_pdfs(raw_path)
+        documents, non_pdfs = _collect_documents(raw_path)
     except ValueError as exc:
         print(f"輸入錯誤：{exc}", file=sys.stderr)
         return EXIT_USAGE
@@ -160,9 +160,9 @@ def _run_ingest(raw_path: str) -> int:
 
     from rag_lab import pipeline
 
-    summary = pipeline.ingest(pdfs)
+    summary = pipeline.ingest(documents)
     for index, report in enumerate(summary.reports, start=1):
-        print(f"[{index}/{len(summary.reports)}] {report.pdf.name}：耗時 {report.total_seconds:.1f} s")
+        print(f"[{index}/{len(summary.reports)}] {report.document.name}：耗時 {report.total_seconds:.1f} s")
         if report.error:
             print("  失敗（詳見 stderr）")
             continue
@@ -185,9 +185,9 @@ def _run_ingest(raw_path: str) -> int:
     print("文件狀態：" + "，".join(f"{status}={count}" for status, count in sorted(summary.status_counts.items())))
     stuck = summary.status_counts.get("handling", 0)
     if stuck:
-        print(f"注意：{stuck} 篇文件停在 handling（先前匯入在多模態階段被中斷）；對該 PDF 重新執行 ingest 會重試")
+        print(f"注意：{stuck} 篇文件停在 handling（先前匯入在多模態階段被中斷）；對該文件重新執行 ingest 會重試")
     for report in failures:
-        print(f"匯入失敗：{report.pdf.name}：{report.error}", file=sys.stderr)
+        print(f"匯入失敗：{report.document.name}：{report.error}", file=sys.stderr)
     if summary.description_error:
         print(summary.description_error, file=sys.stderr)
     if failures:
