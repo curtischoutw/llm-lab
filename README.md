@@ -1,6 +1,6 @@
 # rag-anything-lab
 
-用 [RAG-Anything](https://github.com/HKUDS/RAG-Anything) 1.4.3（底層 LightRAG）做的本地 RAG 實驗環境。四個指令：`ingest` 匯入 PDF、`query` 提問、`eval` 用題目檔批次比較五種檢索模式、`graph` 抽樣檢視知識圖譜。
+用 [RAG-Anything](https://github.com/HKUDS/RAG-Anything) 1.4.3（底層 LightRAG）做的本地 RAG 實驗環境。四個指令：`ingest` 匯入文件、`query` 提問、`eval` 用題目檔批次比較五種檢索模式、`graph` 抽樣檢視知識圖譜。
 
 三個模型（LLM、VLM、embedding）都經由 OpenAI 相容的 HTTP 端點呼叫，端點與模型名稱全部寫在 `.env`。本機用 MLX server 提供；換機器或換模型時只改 `.env`。
 
@@ -99,7 +99,7 @@ VLM 與 embedding（同一個 server，port 8081）：
 
 不需要先 activate venv，直接用 venv 的 python 執行。
 
-匯入單篇 PDF：
+匯入單篇文件：
 
 ```sh
 .venv/bin/python -m rag_lab ingest data/papers/2410.05779.pdf

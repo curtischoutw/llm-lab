@@ -1,6 +1,6 @@
 """ingest／query 的 CLI 行為測試：對假 OpenAI server 與假 mineru 跑完整流程。
 
-為什麼存在：ticket 03 的第一條完整路徑（匯入一篇 PDF、再問答）需要快速、不依賴
+為什麼存在：ticket 03 的第一條完整路徑（匯入一篇文件、再問答）需要快速、不依賴
 真實模型的回歸保護。spec 的測試縫只有 CLI，所以這裡全部從 `python -m rag_lab` 進入，
 只觀察結束碼、stdout／stderr、產生的檔案，以及假 server 在 HTTP 邊界收到的請求。
 
@@ -71,8 +71,8 @@ class PipelineCase(unittest.TestCase):
 
         self.working_dir = self.tmp / "rag_storage"
         self.output_dir = self.tmp / "output"
-        self.pdf = self.tmp / "paper.pdf"
-        self.pdf.write_bytes(b"%PDF-1.4 fake")
+        self.document = self.tmp / "paper.pdf"
+        self.document.write_bytes(b"%PDF-1.4 fake")
 
     def env(self, **overrides: str) -> dict[str, str]:
         """組出指向假 server 與暫存資料夾的環境變數。
@@ -95,7 +95,7 @@ class PipelineCase(unittest.TestCase):
 
     def ingest(self, path: Path | None = None, **overrides: str):
         """執行 `ingest`。"""
-        return run_cli(["ingest", str(path or self.pdf)], self.env(**overrides), timeout=INGEST_TIMEOUT)
+        return run_cli(["ingest", str(path or self.document)], self.env(**overrides), timeout=INGEST_TIMEOUT)
 
     def query(self, question: str = "What is Fake Entity Alpha?", *extra: str, **overrides: str):
         """執行 `query`。"""
@@ -108,7 +108,7 @@ class PipelineCase(unittest.TestCase):
 
 
 class IngestTest(PipelineCase):
-    def test_ingests_one_pdf_and_reports_stage_timings(self):
+    def test_ingests_one_document_and_reports_stage_timings(self):
         result = self.ingest()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("paper.pdf", result.stdout)
@@ -142,7 +142,7 @@ class IngestTest(PipelineCase):
         self.assertIn("圖譜：實體 5，關係 7", result.stdout)
         self.assertIn("belongs_to 邊 6", result.stdout)
 
-    def test_reingesting_the_same_pdf_creates_nothing_and_calls_no_model(self):
+    def test_reingesting_the_same_document_creates_nothing_and_calls_no_model(self):
         first = self.ingest()
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         requests_after_first = len(self.server.requests)
@@ -156,7 +156,7 @@ class IngestTest(PipelineCase):
             self.assertIn("failed=0", result.stdout)
         self.assertIn("圖譜：實體 5，關係 7", second.stdout)
 
-    def test_retrying_a_failed_pdf_processes_it_without_a_dup_record(self):
+    def test_retrying_a_failed_document_processes_it_without_a_dup_record(self):
         self.server.fail_chat = True
         failed = self.ingest()
         self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
@@ -170,7 +170,7 @@ class IngestTest(PipelineCase):
         statuses = json.loads((self.working_dir / "kv_store_doc_status.json").read_text())
         self.assertEqual([doc_id for doc_id in statuses if doc_id.startswith("dup-")], [])
 
-    def test_ingests_every_pdf_in_a_folder(self):
+    def test_ingests_every_document_in_a_folder(self):
         folder = self.tmp / "papers"
         folder.mkdir()
         for name in ("a.pdf", "b.pdf"):
@@ -195,7 +195,7 @@ class IngestTest(PipelineCase):
         self.assertNotIn("notes.txt", result.stderr)
         self.assertIn("processed=1", result.stdout)
 
-    def test_each_pdf_in_a_folder_reports_its_own_total_elapsed_time(self):
+    def test_each_document_in_a_folder_reports_its_own_total_elapsed_time(self):
         folder = self.tmp / "papers"
         folder.mkdir()
         for name in ("a.pdf", "b.pdf"):
@@ -205,7 +205,7 @@ class IngestTest(PipelineCase):
         self.assertRegex(result.stdout, r"\[1/2\] a\.pdf.*耗時 \d+\.\d s")
         self.assertRegex(result.stdout, r"\[2/2\] b\.pdf.*耗時 \d+\.\d s")
 
-    def test_one_failing_pdf_is_named_others_are_kept_and_exit_code_is_nonzero(self):
+    def test_one_failing_document_is_named_others_are_kept_and_exit_code_is_nonzero(self):
         folder = self.tmp / "papers"
         folder.mkdir()
         for name in ("a.pdf", "broken.pdf", "c.pdf"):
@@ -223,7 +223,7 @@ class IngestTest(PipelineCase):
 
     def test_document_stuck_in_handling_from_an_interrupted_run_is_reported_not_fatal(self):
         # 前一次 ingest 在多模態階段被中斷時，文件停在 RAG-Anything 的 handling 狀態；
-        # 之後 ingest 別的 PDF 不該在最後統計文件狀態時失敗
+        # 之後 ingest 別的文件不該在最後統計文件狀態時失敗
         first = self.ingest()
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         status_file = self.working_dir / "kv_store_doc_status.json"
@@ -241,7 +241,7 @@ class IngestTest(PipelineCase):
         self.assertIn("processed=1", result.stdout)
         self.assertRegex(result.stdout, r"1 篇文件停在 handling")
 
-    def test_vlm_failure_does_not_hide_the_per_pdf_report_or_other_pdfs_errors(self):
+    def test_vlm_failure_does_not_hide_the_per_document_report_or_other_documents_errors(self):
         folder = self.tmp / "papers"
         folder.mkdir()
         for name in ("a.pdf", "broken.pdf", "c.pdf"):
@@ -313,10 +313,10 @@ class IngestTest(PipelineCase):
         # 曾因 LightRAG 的限流 worker 吞掉取消、asyncio.run 收尾時永遠等不到它結束而卡住。
         self.server.chat_delay = 0.2
         self.server.die_after_chat = 3
-        pdf = self.tmp / "multichunk.pdf"
-        pdf.write_bytes(b"%PDF-1.4 fake")
+        document = self.tmp / "multichunk.pdf"
+        document.write_bytes(b"%PDF-1.4 fake")
         try:
-            result = run_cli(["ingest", str(pdf)], self.env(LLM_MAX_ASYNC="2"), timeout=HANG_TIMEOUT)
+            result = run_cli(["ingest", str(document)], self.env(LLM_MAX_ASYNC="2"), timeout=HANG_TIMEOUT)
         except subprocess.TimeoutExpired:
             self.fail(f"LLM 端點失敗後 ingest 超過 {HANG_TIMEOUT} 秒沒有結束")
         self.assertNotEqual(result.returncode, 0)
@@ -452,8 +452,8 @@ class QueryBudgetTest(PipelineCase):
     def setUp(self):
         super().setUp()
         # multichunk 會切出約 20 個 chunk，naive 模式全部檢索得到，預設 30k 的上限放得下大部分
-        self.pdf = self.tmp / "multichunk.pdf"
-        self.pdf.write_bytes(b"%PDF-1.4 fake")
+        self.document = self.tmp / "multichunk.pdf"
+        self.document.write_bytes(b"%PDF-1.4 fake")
         ingested = self.ingest()
         self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
 
