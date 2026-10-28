@@ -7,7 +7,8 @@
 關鍵設計決策：
 - 輸出版面對齊 MinerU 3.x：`<out>/<主檔名>/<method>/<主檔名>_content_list.json`，
   圖片放在同層 `images/`，content list 內用相對路徑，由 RAG-Anything 轉成絕對路徑。
-- `--version` 要成功：RAG-Anything 的安裝檢查就是跑它。
+- `--version` 要成功：RAG-Anything 的安裝檢查就是跑它（每個 RAGAnything 實例初始化時一次）。環境變數
+  `FAKE_MINERU_VERSION_LOG` 有設定時，每次 `--version` 在該檔附加一行，測試據此數初始化次數。
 - 依參數寫入 `argv.json` 旁證，測試可確認 RAG-Anything 實際傳了哪些參數。
 - 內容只依 PDF 檔名（主檔名）決定，同一個檔案每次輸出相同。主檔名以 `broken` 開頭時以非零碼結束，模擬解析失敗。主檔名以 `multichunk` 開頭時
   多輸出 8 段長文字，讓 LightRAG 切出多個 chunk，測試能觀察多個 LLM 請求同時進行的情境。
@@ -20,6 +21,7 @@ Dependencies: 僅標準函式庫。
 import argparse
 import base64
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -39,6 +41,10 @@ def main(argv: list[str]) -> int:
         結束碼；0 表示成功。
     """
     if argv == ["--version"]:
+        log = os.environ.get("FAKE_MINERU_VERSION_LOG")
+        if log:
+            with open(log, "a", encoding="utf-8") as handle:
+                handle.write("--version\n")
         print("mineru, version fake")
         return 0
 

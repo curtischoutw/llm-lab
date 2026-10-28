@@ -18,9 +18,11 @@
   由 pipeline 包在每個 modal processor 的 caption 函式上，計數（description_stats）涵蓋
   圖／表／公式所有描述失敗；ingest 的成敗以它為準，vision_stats 只用來顯示 VLM 呼叫數。
 
+- vision_stats、description_stats 是模組層級狀態，由 pipeline 在每次 ingest 開始時以 reset_stats()
+  原地清零；同一時間只有一個 Session（見 pipeline.Session），所以不會有兩次 ingest 同時寫入。
+
 已知極限：只計數 caption 呼叫本身的例外；呼叫成功但回覆內容解析失敗（RAG-Anything 內部另有 fallback）
-不會被計到。vision_stats、description_stats 是模組層級狀態，同一個 process 內累計；CLI 一次只跑一個命令，
-所以不需要重置。
+不會被計到。
 
 Dependencies: lightrag-hku、raganything（由 raganything 帶入）；tenacity 為 lightrag 的相依。
 """
@@ -126,6 +128,18 @@ class DescriptionStats:
 
 
 description_stats = DescriptionStats()
+
+
+def reset_stats() -> None:
+    """把 vision_stats 與 description_stats 原地清零，讓下一次 ingest 只計自己的呼叫。
+
+    原地清零而不是換新物件：其他模組持有的參照（例如 `from rag_lab.models import vision_stats`）
+    才不會停在舊物件上。
+    """
+    vision_stats.ok = vision_stats.failed = 0
+    vision_stats.last_error = vision_stats.sample = None
+    description_stats.failed = 0
+    description_stats.last_error = None
 
 
 def count_description_failures(caption_func: Any) -> Any:

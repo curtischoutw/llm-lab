@@ -1,6 +1,6 @@
-"""匯入（ingest）與問答（query）的流程：把設定接上 RAG-Anything／LightRAG。
+"""匯入（ingest）、問答（query）、批次比較（evaluate）的流程與 Session：把設定接上 RAG-Anything／LightRAG。
 
-為什麼存在：CLI 的 ingest／query 需要一層把「設定 → RAGAnything 實例 → 解析、建圖、
+為什麼存在：CLI 與使用者的 Python 程式都需要一層把「設定 → RAGAnything 實例 → 解析、建圖、
 檢索」串起來的程式，並把 RAG-Anything／LightRAG 會吞掉的錯誤改成可偵測的失敗。
 CLI 只負責參數與輸出格式，這裡負責行為。
 
@@ -24,8 +24,8 @@ CLI 只負責參數與輸出格式，這裡負責行為。
 - 查詢預設 vlm_enhanced=False（只走 LLM、不讓 VLM 改寫答案；與 spec 一致，五種模式的答案才由
   同一個模型產生、可比較），並固定 enable_rerank=False（spec 不用 reranker，預設值會讓每次
   查詢都警告）。vlm_enhanced=True 時改走 RAGAnything.aquery_vlm_enhanced，並多檢查 VLM 端點。
-- eval（evaluate）在同一個 RAGAnything 實例上，依題目順序、五種模式順序依序查詢，不是每格重新
-  初始化。每格沿用 query 的 _answer（aquery_llm、QUERY_MAX_TOTAL_TOKENS、vlm_enhanced=False、
+- eval（evaluate）在同一個 Session（同一個 RAGAnything 實例）上，依題目順序、五種模式順序依序查詢，
+  不是每格重新初始化。每格沿用 query 的 _answer（aquery_llm、QUERY_MAX_TOTAL_TOKENS、vlm_enhanced=False、
   enable_rerank=False）；單格失敗（含沒有答案內容）記在該格的 Cell.error，不中斷其餘格。
   開始前只檢查 LLM 與 Embedding 端點可達（eval 不走 VLM）。
 - 多篇匯入時單篇失敗不中斷整批：失敗記在該篇的 IngestReport.error，其餘照常處理並保留，
@@ -41,8 +41,21 @@ CLI 只負責參數與輸出格式，這裡負責行為。
 - 收尾（_close）除了 finalize_storages，還要呼叫 LightRAG 兩個限流器（LLM、embedding）的
   shutdown()：限流 worker 在執行呼叫時被取消會把 CancelledError 吞掉、回到等待迴圈，
   只有 shutdown 設定的旗標能讓它結束。不呼叫的話，端點在請求進行中失敗（例如 mlx_lm.server
-  生成執行緒死掉，正在生成的請求永遠不回應）時，asyncio.run 收尾會永遠等不到它，CLI 卡住
+  生成執行緒死掉，正在生成的請求永遠不回應）時，關閉 event loop 的收尾會永遠等不到它，CLI 卡住
   且不印錯誤。finalize_storages 不會呼叫 shutdown。
+- Session：同一個 process 依序做多次 ingest／query／evaluate 時只初始化一次知識庫。所有呼叫在同一個
+  asyncio.Runner 的 event loop 上執行：LightRAG 的共用鎖（shared_storage，process 層級的全域物件）
+  在初始化時綁定當時的 loop，換 loop 就會「Lock is bound to a different event loop」。關閉時才收尾，
+  收尾最後呼叫 finalize_share_data() 重置共用狀態，下一個 Session 初始化時會重建並綁到它自己的 loop。
+  共用狀態是 process 層級，所以同一時間只允許一個開啟中的 Session（模組層級的鎖），也只能在建立它的
+  執行緒、沒有執行中 event loop 的地方使用；誤用拋 SessionError（不繼承 PipelineError：誤用是程式錯誤）。
+- 模組函式 ingest／query／evaluate 是「開 Session、呼叫一次、關閉」，CLI 經由它們使用 Session。
+  開 Session 之前先檢查端點：端點不可達時不建立 WORKING_DIR、不跑 mineru。
+- RAG-Anything 在建構時註冊 atexit(self.close)：實例會被留到 process 結束，結束時又用新的 event loop
+  碰綁在舊 loop 上的鎖（錯誤被吞掉）。Session 建立實例後立即取消這個註冊，改註冊自己的收尾：忘了 close
+  時在同一個 loop 上完整收尾並在 stderr 警告；正常 close 後取消，實例才能被回收。
+- 每次 ingest 開始時把 models 的 VLM 與描述統計清零，報告只計這一次；描述失敗計數的包裝在 Session
+  初始化後只包一次（每次 ingest 都包會疊成多層，同一次失敗被計多次）。
 - 計時用 RAG-Anything 的 ProcessingCallback：解析＝第一次 parse_document（之後 process
   內的 parse 是快取命中）；建圖＝文字插入（含 LightRAG 實體抽取）；多模態＝圖表公式描述。
 - mineru 以 subprocess 依 PATH 尋找：PATH 上找不到時，把目前 Python 所在的 bin 目錄
@@ -58,14 +71,19 @@ CLI 只負責參數與輸出格式，這裡負責行為。
 - 描述失敗不會讓 RAG-Anything 匯入失敗（圖片描述退成原始 dict 文字、表格與公式退成原始內容）；
   這裡只能事後依 models.description_stats 計數判斷並回報，已寫入索引的退化描述不會自動修復，
   文件也已被標為完整處理（重跑會略過，要刪索引重來）。
+- Session 讀的是開啟當下的索引：開著的期間另一個 process 匯入的內容，這個 Session 看不到。
+- Session 是同步介面，不能直接在 Jupyter 或 async 函式裡使用（例外訊息附 asyncio.to_thread 的替代寫法）。
+- 呼叫途中被中斷（KeyboardInterrupt）後不保證 Session 狀態一致；中斷後應關閉 Session 再開新的。
 
 Dependencies: raganything、lightrag-hku（由 raganything 帶入）。
 """
 
 import asyncio
+import atexit
 import os
 import shutil
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -73,6 +91,7 @@ from pathlib import Path
 from lightrag import QueryParam
 from lightrag.base import DocStatus
 from lightrag.constants import DEFAULT_MAX_ENTITY_TOKENS, DEFAULT_MAX_RELATION_TOKENS, DEFAULT_MAX_TOTAL_TOKENS
+from lightrag.kg.shared_storage import finalize_share_data
 from raganything import RAGAnything, RAGAnythingConfig
 from raganything.callbacks import ProcessingCallback
 
@@ -143,7 +162,7 @@ def build_rag(settings: Settings) -> RAGAnything:
 
 
 async def _close(rag: RAGAnything) -> None:
-    """寫回儲存，並關掉 LightRAG 的 LLM 與 embedding 限流 worker。
+    """寫回儲存，關掉 LightRAG 的 LLM 與 embedding 限流 worker，並重置 process 層級的共用鎖。
 
     Args:
         rag: 要收尾的 RAGAnything（可能尚未完成初始化）。
@@ -151,9 +170,12 @@ async def _close(rag: RAGAnything) -> None:
     try:
         await rag.finalize_storages()
     finally:
-        if rag.lightrag is not None:
-            await rag.lightrag.llm_model_func.shutdown()
-            await rag.lightrag.embedding_func.func.shutdown()
+        try:
+            if rag.lightrag is not None:
+                await rag.lightrag.llm_model_func.shutdown()
+                await rag.lightrag.embedding_func.func.shutdown()
+        finally:
+            finalize_share_data()
 
 
 async def _initialize(rag: RAGAnything) -> None:
@@ -349,10 +371,11 @@ def _count_description_failures(rag: RAGAnything) -> None:
         processor.modal_caption_func = models.count_description_failures(processor.modal_caption_func)
 
 
-async def _ingest(pdfs: list[Path], settings: Settings) -> IngestSummary:
-    """匯入一批 PDF 並彙整結果。
+async def _ingest(rag: RAGAnything, pdfs: list[Path], settings: Settings) -> IngestSummary:
+    """在已初始化的 RAGAnything 上匯入一批 PDF 並彙整結果。
 
     Args:
+        rag: 已完成 _initialize 的實例。
         pdfs: 要匯入的 PDF 路徑。
         settings: 已驗證的設定。
 
@@ -361,29 +384,23 @@ async def _ingest(pdfs: list[Path], settings: Settings) -> IngestSummary:
 
     Raises:
         EndpointError: 開始前有端點不可達。
-        PipelineError: 初始化失敗。
     """
     models.check_reachable("LLM", "VLM", "Embedding")
-    rag = build_rag(settings)
+    models.reset_stats()
     summary = IngestSummary()
-    try:
-        await _initialize(rag)
-        _count_description_failures(rag)
-        for pdf in pdfs:
-            failed_before = models.description_stats.failed
-            started = time.perf_counter()
-            try:
-                report = await _ingest_one(rag, pdf)
-            except Exception as exc:
-                # 單篇失敗不中斷整批：記下是哪一篇、為什麼，CLI 據此印出並以非零碼結束
-                report = IngestReport(pdf, skipped=False, parse_seconds=0.0, error=f"{type(exc).__name__}: {exc}")
-            report.total_seconds = time.perf_counter() - started
-            report.description_failed = models.description_stats.failed - failed_before
-            summary.reports.append(report)
-        summary.entities, summary.relations, summary.belongs_to = await _graph_stats(rag)
-        summary.status_counts = await _status_counts(rag)
-    finally:
-        await _close(rag)
+    for pdf in pdfs:
+        failed_before = models.description_stats.failed
+        started = time.perf_counter()
+        try:
+            report = await _ingest_one(rag, pdf)
+        except Exception as exc:
+            # 單篇失敗不中斷整批：記下是哪一篇、為什麼，CLI 據此印出並以非零碼結束
+            report = IngestReport(pdf, skipped=False, parse_seconds=0.0, error=f"{type(exc).__name__}: {exc}")
+        report.total_seconds = time.perf_counter() - started
+        report.description_failed = models.description_stats.failed - failed_before
+        summary.reports.append(report)
+    summary.entities, summary.relations, summary.belongs_to = await _graph_stats(rag)
+    summary.status_counts = await _status_counts(rag)
     stats = models.vision_stats
     summary.vlm_ok, summary.vlm_failed, summary.vlm_sample = stats.ok, stats.failed, stats.sample
     described = models.description_stats
@@ -398,7 +415,7 @@ async def _ingest(pdfs: list[Path], settings: Settings) -> IngestSummary:
 
 
 def ingest(pdfs: list[Path]) -> IngestSummary:
-    """匯入一批 PDF。
+    """匯入一批 PDF：開一個 Session、匯入一次、關閉。
 
     Args:
         pdfs: 要匯入的 PDF 路徑。
@@ -409,8 +426,12 @@ def ingest(pdfs: list[Path]) -> IngestSummary:
     Raises:
         PipelineError: 初始化失敗等整批層級的可預期失敗。
         EndpointError: 開始前有端點不可達。
+        SessionError: 已有開啟中的 Session，或在不允許的環境呼叫（見 Session）。
     """
-    return asyncio.run(_ingest(pdfs, get_settings()))
+    # Session 建構時只檢查 LLM 與 embedding；VLM 在開 Session 之前先檢查，不可達時不建立 WORKING_DIR、不跑 mineru
+    models.check_reachable("VLM")
+    with Session() as session:
+        return session.ingest(pdfs)
 
 
 # ==============================
@@ -472,10 +493,11 @@ async def _answer(rag: RAGAnything, question: str, mode: str, settings: Settings
     return answer
 
 
-async def _query(question: str, mode: str, vlm_enhanced: bool, settings: Settings) -> str:
-    """初始化後以指定模式查詢一次，收尾後回傳答案。
+async def _query(rag: RAGAnything, question: str, mode: str, vlm_enhanced: bool, settings: Settings) -> str:
+    """在已初始化的 RAGAnything 上以指定模式查詢一次。
 
     Args:
+        rag: 已完成 _initialize 的實例。
         question: 問題文字。
         mode: 檢索模式。
         vlm_enhanced: True 時走 RAG-Anything 的 VLM 增強查詢，並多檢查 VLM 端點。
@@ -485,45 +507,43 @@ async def _query(question: str, mode: str, vlm_enhanced: bool, settings: Setting
         答案文字（非空字串）。
 
     Raises:
-        EndpointError: 端點不可達或呼叫失敗。
-        PipelineError: 初始化失敗、查詢失敗，或沒有答案內容。
+        EndpointError: 開始前端點不可達，或 VLM 呼叫失敗。
+        PipelineError: 查詢失敗（含查詢途中 LLM 失敗），或沒有答案內容。
     """
     models.check_reachable("LLM", "Embedding", *(["VLM"] if vlm_enhanced else []))
-    rag = build_rag(settings)
-    try:
-        await _initialize(rag)
-        if vlm_enhanced:
-            # RAG-Anything 的 VLM 增強路徑：先取回檢索 prompt、把圖片路徑換成 base64 圖片再交給 VLM。
-            # 它沒有 aquery_llm 的 status 欄位；失敗時回 None（LLM 失敗的訊息 LightRAG 已吞掉），
-            # VLM 失敗則拋 EndpointError（含端點與位址）。
-            answer = await rag.aquery_vlm_enhanced(
-                question, mode=mode, **query_kwargs(settings.query_max_total_tokens)
-            )
-            if not answer or not isinstance(answer, str):
-                raise PipelineError(f"查詢沒有回傳答案內容（mode={mode}，vlm_enhanced=True）")
-        else:
-            answer = await _answer(rag, question, mode, settings)
-    finally:
-        await _close(rag)
+    if not vlm_enhanced:
+        return await _answer(rag, question, mode, settings)
+    # RAG-Anything 的 VLM 增強路徑：先取回檢索 prompt、把圖片路徑換成 base64 圖片再交給 VLM。
+    # 它沒有 aquery_llm 的 status 欄位；失敗時回 None（LLM 失敗的訊息 LightRAG 已吞掉），
+    # VLM 失敗則拋 EndpointError（含端點與位址）。
+    answer = await rag.aquery_vlm_enhanced(question, mode=mode, **query_kwargs(settings.query_max_total_tokens))
+    if not answer or not isinstance(answer, str):
+        raise PipelineError(f"查詢沒有回傳答案內容（mode={mode}，vlm_enhanced=True）")
     return answer
 
 
 def query(question: str, mode: str, vlm_enhanced: bool = False) -> str:
-    """以指定檢索模式回答問題。
+    """以指定檢索模式回答問題：開一個 Session、查詢一次、關閉。
 
     Args:
         question: 問題文字。
-        mode: naive、local、global、hybrid、mix 之一（由 CLI 驗證）。
+        mode: naive、local、global、hybrid、mix 之一。
         vlm_enhanced: True 時檢索到的圖片會交給 VLM 產生答案，並要求 VLM 端點可連。
 
     Returns:
         答案文字。
 
     Raises:
-        PipelineError: 查詢失敗，或沒有答案內容。
-        EndpointError: 端點不可達或呼叫失敗。
+        ValueError: mode 不是五種檢索模式之一。
+        PipelineError: 初始化失敗、查詢失敗，或沒有答案內容。
+        EndpointError: 開始前端點不可達，或 VLM 呼叫失敗。
+        SessionError: 已有開啟中的 Session，或在不允許的環境呼叫（見 Session）。
     """
-    return asyncio.run(_query(question, mode, vlm_enhanced, get_settings()))
+    if vlm_enhanced:
+        # Session 建構時只檢查 LLM 與 embedding；VLM 在開 Session 之前先檢查
+        models.check_reachable("VLM")
+    with Session() as session:
+        return session.query(question, mode, vlm_enhanced)
 
 
 # ==============================
@@ -531,10 +551,11 @@ def query(question: str, mode: str, vlm_enhanced: bool = False) -> str:
 # ==============================
 
 
-async def _evaluate(questions: list[Question], settings: Settings) -> list[list[Cell]]:
-    """在同一個 RAGAnything 實例上依題目、模式順序逐格查詢；單格失敗記在該格。
+async def _evaluate(rag: RAGAnything, questions: list[Question], settings: Settings) -> list[list[Cell]]:
+    """在已初始化的 RAGAnything 上依題目、模式順序逐格查詢；單格失敗記在該格。
 
     Args:
+        rag: 已完成 _initialize 的實例。
         questions: 已驗證的題目。
         settings: 已驗證的設定。
 
@@ -543,29 +564,23 @@ async def _evaluate(questions: list[Question], settings: Settings) -> list[list[
 
     Raises:
         EndpointError: LLM 或 embedding 端點在開始前就不可達。
-        PipelineError: 初始化失敗。
     """
     models.check_reachable("LLM", "Embedding")
-    rag = build_rag(settings)
     cells: list[list[Cell]] = []
-    try:
-        await _initialize(rag)
-        for question in questions:
-            row: list[Cell] = []
-            for mode in RETRIEVAL_MODES:
-                try:
-                    row.append(Cell(answer=await _answer(rag, question.question, mode, settings)))
-                except Exception as exc:
-                    # 單格失敗不中斷整批：把原因記在這一格，CLI 據此標示並以非零碼結束
-                    row.append(Cell(error=f"{type(exc).__name__}: {exc}"))
-            cells.append(row)
-    finally:
-        await _close(rag)
+    for question in questions:
+        row: list[Cell] = []
+        for mode in RETRIEVAL_MODES:
+            try:
+                row.append(Cell(answer=await _answer(rag, question.question, mode, settings)))
+            except Exception as exc:
+                # 單格失敗不中斷整批：把原因記在這一格，CLI 據此標示並以非零碼結束
+                row.append(Cell(error=f"{type(exc).__name__}: {exc}"))
+        cells.append(row)
     return cells
 
 
 def evaluate(questions: list[Question]) -> list[list[Cell]]:
-    """對每一題以五種檢索模式各查詢一次。
+    """對每一題以五種檢索模式各查詢一次：開一個 Session、跑完全部題目、關閉。
 
     五個模式與所有題目共用同一個 RAGAnything 實例，依題目順序、模式順序依序執行。
     查詢固定 vlm_enhanced=False、enable_rerank=False，並沿用 query 的 QUERY_MAX_TOTAL_TOKENS。
@@ -579,5 +594,226 @@ def evaluate(questions: list[Question]) -> list[list[Cell]]:
     Raises:
         EndpointError: LLM 或 embedding 端點在開始前就不可達。
         PipelineError: 初始化失敗。
+        SessionError: 已有開啟中的 Session，或在不允許的環境呼叫（見 Session）。
     """
-    return asyncio.run(_evaluate(questions, get_settings()))
+    with Session() as session:
+        return session.evaluate(questions)
+
+
+# ==============================
+# Session
+# ==============================
+
+
+class SessionError(RuntimeError):
+    """Session 的誤用（程式錯誤）：同時開第二個、在其他執行緒或已有 running loop 的環境使用。
+
+    刻意不繼承 PipelineError：誤用要修程式，不該被處理匯入／查詢失敗的 `except PipelineError` 接走。
+    """
+
+
+class SessionClosedError(SessionError):
+    """在已關閉的 Session 上呼叫。"""
+
+
+# 同一個 process 同一時間只允許一個開啟中的 Session：LightRAG 的共用狀態是 process 層級的全域物件
+_session_lock = threading.Lock()
+
+RUNNING_LOOP_HINT = (
+    "Session 是同步介面，不能在已有執行中 event loop 的執行緒使用（例如 Jupyter 或 async 函式）。"
+    "替代寫法：把開 Session 與所有呼叫寫成一個同步函式，再以 `await asyncio.to_thread(該函式)` 執行。"
+)
+
+
+def _reject_running_loop() -> None:
+    """目前執行緒已有執行中的 event loop 時拋 SessionError。
+
+    Raises:
+        SessionError: 目前執行緒已有執行中的 event loop。
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    raise SessionError(RUNNING_LOOP_HINT)
+
+
+class Session:
+    """只初始化一次知識庫、依序執行多次 ingest／query／evaluate 的同步 session。
+
+    用法：`with Session() as session: session.query(...)`。所有呼叫在同一個 asyncio.Runner 的 event loop
+    上執行，LightRAG 的共用鎖與 RAGAnything 的實例鎖都綁在這個 loop；關閉時才寫回儲存、關限流 worker、
+    重置 LightRAG 的共用狀態。
+
+    規則：
+        - 同一個 process 同一時間只能有一個開啟中的 Session。
+        - 只能在建立它的執行緒使用；建立它的執行緒已結束時，其他執行緒可以 close()。
+        - 不能在已有執行中 event loop 的執行緒建立或呼叫。
+        - 讀到的是開啟當下的索引：開著的期間另一個 process 匯入的內容，這個 Session 看不到。
+        - 忘了 close 時，process 結束前會在同一個 event loop 上收尾，並在 stderr 印警告。
+
+    Raises（建構時）:
+        SessionError: 已有開啟中的 Session，或目前執行緒已有執行中的 event loop。
+        ConfigError: 設定缺漏或格式錯誤。
+        EndpointError: LLM 或 embedding 端點不可達。
+        OSError: 無法建立 WORKING_DIR。
+        PipelineError: RAG-Anything 初始化失敗。
+        建構失敗時的收尾若也失敗，收尾的錯誤附在原例外的 note，原例外照常拋出。
+    """
+
+    def __init__(self) -> None:
+        _reject_running_loop()
+        if not _session_lock.acquire(blocking=False):
+            raise SessionError("已經有一個開啟中的 Session；同一個 process 同一時間只能開一個，請先 close() 它")
+        self._owner = threading.current_thread()
+        self._closed = False
+        self._runner = asyncio.Runner()
+        self._rag: RAGAnything | None = None
+        try:
+            self._settings = get_settings()
+            models.check_reachable("LLM", "Embedding")
+            # RAG-Anything 建構時先註冊 atexit 才建立 WORKING_DIR；建立失敗時拿不到實例、無法取消註冊，
+            # 所以先自己建立，讓這種失敗發生在建構 RAGAnything 之前
+            Path(self._settings.working_dir).mkdir(parents=True, exist_ok=True)
+            self._rag = build_rag(self._settings)
+            # RAG-Anything 在建構時註冊 atexit(self.close)：它會把實例留到 process 結束，結束時又用新的
+            # event loop 碰綁在這個 loop 上的鎖（錯誤被吞掉）。改由 Session 自己收尾。
+            atexit.unregister(self._rag.close)
+            self._runner.run(_initialize(self._rag))
+            # 每個實例只包一次：每次 ingest 都包會疊成多層，同一次失敗被計多次
+            _count_description_failures(self._rag)
+        except BaseException as exc:
+            try:
+                self._release()
+            except Exception as cleanup:
+                # 收尾失敗不能蓋掉原本的錯誤（呼叫端依例外類別處理）；收尾的錯誤附在 note 讓使用者看得到
+                exc.add_note(f"開 Session 失敗後的收尾也失敗：{type(cleanup).__name__}: {cleanup}")
+            raise
+        atexit.register(self._close_at_exit)
+
+    def __enter__(self) -> "Session":
+        """進入 with 區塊。
+
+        Returns:
+            這個 Session。
+        """
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        """離開 with 區塊時關閉；不吞 with 區塊內的例外。
+
+        Args:
+            *exc_info: with 區塊內的例外型別、例外與 traceback（沒有例外時皆為 None）。
+        """
+        self.close()
+
+    @property
+    def closed(self) -> bool:
+        """Session 是否已關閉。
+
+        Returns:
+            已關閉為 True。
+        """
+        return self._closed
+
+    def ingest(self, pdfs: list[Path]) -> IngestSummary:
+        """匯入一批 PDF（見模組函式 ingest）。
+
+        Args:
+            pdfs: 要匯入的 PDF 路徑。
+
+        Returns:
+            這一次匯入的 IngestSummary；VLM 與描述統計只計這一次。
+
+        Raises:
+            SessionError: Session 已關閉，或從不允許的執行緒／環境呼叫。
+            EndpointError: 開始前有端點不可達。
+        """
+        self._check_usable()
+        return self._runner.run(_ingest(self._rag, pdfs, self._settings))
+
+    def query(self, question: str, mode: str, vlm_enhanced: bool = False) -> str:
+        """以指定檢索模式回答問題（見模組函式 query）。
+
+        Args:
+            question: 問題文字。
+            mode: naive、local、global、hybrid、mix 之一。
+            vlm_enhanced: True 時檢索到的圖片會交給 VLM 產生答案。
+
+        Returns:
+            答案文字。
+
+        Raises:
+            ValueError: mode 不是五種檢索模式之一。
+            SessionError: Session 已關閉，或從不允許的執行緒／環境呼叫。
+            EndpointError: 開始前端點不可達，或 VLM 呼叫失敗。
+            PipelineError: 查詢失敗，或沒有答案內容。
+        """
+        self._check_usable()
+        # LightRAG 還接受 bypass（不檢索、直接問 LLM），回來的答案看起來像 RAG 的結果；只允許五種檢索模式
+        if mode not in RETRIEVAL_MODES:
+            raise ValueError(f"mode 必須是 {'、'.join(RETRIEVAL_MODES)} 之一，收到 {mode!r}")
+        return self._runner.run(_query(self._rag, question, mode, vlm_enhanced, self._settings))
+
+    def evaluate(self, questions: list[Question]) -> list[list[Cell]]:
+        """對每一題以五種檢索模式各查詢一次（見模組函式 evaluate）。
+
+        Args:
+            questions: 已驗證的題目。
+
+        Returns:
+            cells[i][j] 是第 i 題在 RETRIEVAL_MODES[j] 的結果；單格失敗記在該格的 error。
+
+        Raises:
+            SessionError: Session 已關閉，或從不允許的執行緒／環境呼叫。
+            EndpointError: LLM 或 embedding 端點在開始前就不可達。
+        """
+        self._check_usable()
+        return self._runner.run(_evaluate(self._rag, questions, self._settings))
+
+    def close(self) -> None:
+        """寫回儲存、關閉限流 worker、重置 LightRAG 共用狀態並釋放 event loop；重複呼叫不做事。
+
+        Raises:
+            SessionError: 建立它的執行緒還在執行，卻從其他執行緒呼叫。
+        """
+        if self._closed:
+            return
+        if threading.current_thread() is not self._owner and self._owner.is_alive():
+            raise SessionError("Session 只能在建立它的執行緒使用（建立它的執行緒結束後，其他執行緒才能 close）")
+        atexit.unregister(self._close_at_exit)
+        self._release()
+
+    def _check_usable(self) -> None:
+        """確認可以在目前的執行緒呼叫。
+
+        Raises:
+            SessionClosedError: 已關閉。
+            SessionError: 不是建立它的執行緒，或目前執行緒已有執行中的 event loop。
+        """
+        if self._closed:
+            raise SessionClosedError("Session 已關閉，請開一個新的 Session")
+        if threading.current_thread() is not self._owner:
+            raise SessionError("Session 只能在建立它的執行緒使用")
+        _reject_running_loop()
+
+    def _close_at_exit(self) -> None:
+        """process 結束時收尾忘了關閉的 Session，並在 stderr 警告。"""
+        if self._closed:
+            return
+        print("警告：Session 沒有呼叫 close()，在 process 結束時自動收尾。", file=sys.stderr)
+        self._release()
+
+    def _release(self) -> None:
+        """在同一個 event loop 上收尾 RAGAnything，再關閉 event loop、釋放 process 層級的鎖。"""
+        try:
+            if self._rag is not None:
+                self._runner.run(_close(self._rag))
+        finally:
+            self._rag = None
+            self._closed = True
+            try:
+                self._runner.close()
+            finally:
+                # 關 event loop 時被中斷（Ctrl-C）也要釋放：否則這個 process 再也開不了 Session
+                _session_lock.release()

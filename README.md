@@ -4,7 +4,7 @@
 
 三個模型（LLM、VLM、embedding）都經由 OpenAI 相容的 HTTP 端點呼叫，端點與模型名稱全部寫在 `.env`。本機用 MLX server 提供；換機器或換模型時只改 `.env`。
 
-規格與實測紀錄在 `.scratch/rag-anything-lab/`（`spec.md` 與 `issues/`）。
+規格與實測紀錄在 `.scratch/rag-anything-lab/`（`spec.md` 與 `issues/`）。每個目錄與程式的用途見 [`docs/architecture.md`](docs/architecture.md)。
 
 ## 1. 建立環境
 
@@ -85,7 +85,7 @@ VLM 與 embedding（同一個 server，port 8081）：
 .venv/bin/python -m rag_lab ingest data/papers/2410.05779.pdf
 ```
 
-匯入整個資料夾（逐篇處理，資料夾內的非 PDF 會略過；已完整匯入的論文會略過）。目前的知識庫是下面這 3 篇。資料夾裡放的是指向 `data/papers/` 的 symlink：RAG-Anything 以 symlink 解析後的原檔路徑計算文件 ID，所以同一篇論文不會因為放在不同資料夾而被當成新文件。
+匯入整個資料夾（逐篇處理，資料夾內的非 PDF 會略過；已完整匯入的論文會略過）。目前的知識庫是下面這 3 篇。資料夾裡放的是指向 `data/papers/` 的 symlink：RAG-Anything 的文件 ID 是解析內容（文字、表格、公式與圖片路徑）的雜湊，而圖片所在的解析輸出資料夾名稱取自 symlink 解析後的原檔路徑，所以同一篇論文不會因為放在不同資料夾而被當成新文件。
 
 ```sh
 mkdir -p data/corpus
@@ -113,6 +113,17 @@ ln -sf ../papers/2410.05779.pdf ../papers/2404.16130.pdf ../papers/2510.12323.pd
 ```sh
 .venv/bin/python -m rag_lab eval eval/questions.example.jsonl
 ```
+
+在 Python 裡呼叫（設定一樣讀 `.env`）。在同一個 `Session` 裡問多題，知識庫只載入一次：
+
+```python
+from rag_lab.pipeline import Session
+
+with Session() as session:
+    answer = session.query("What are the two retrieval levels in LightRAG?", mode="mix")
+```
+
+只問一題也可以直接呼叫 `rag_lab.pipeline.query(question, mode="mix")`，它等於開一個 `Session`、問一題、關閉。完整範例在 `examples/query_from_python.py`，在 repo 根目錄用 `.venv/bin/python -m examples.query_from_python` 執行；`Session` 的規則與 `ingest`、`evaluate` 的說明見 `docs/architecture.md` 第 4 節。
 
 ## 5. 實測數據
 
@@ -150,7 +161,7 @@ ln -sf ../papers/2410.05779.pdf ../papers/2404.16130.pdf ../papers/2510.12323.pd
 | `EMBED_MODEL`、`EMBED_DIM` | **不能改**，除非重建索引 |
 
 - **embedding 模型與維度在建索引後鎖定。** 要換的話，`WORKING_DIR` 也要改到新的資料夾再重新 ingest：LightRAG 預設的向量檔名不含模型名稱或維度，沿用舊資料夾會讓新舊向量混在同一個庫。
-- **換成更大的 LLM** 只改 `LLM_BASE_URL` 與 `LLM_MODEL`。已建好的圖譜是舊 LLM 抽取的；要讓圖譜改由新 LLM 抽取，需刪除 `WORKING_DIR` 後重新 ingest。LightRAG 1.4.16 的文件建議 LLM 至少 32B 參數、context 至少 32K token（建議 64K），建圖階段不建議用推理模型；目前的 4B 模型與 `QUERY_MAX_TOTAL_TOKENS=12000` 都低於這個建議。
+- **換成更大的 LLM** 只改 `LLM_BASE_URL` 與 `LLM_MODEL`。已建好的圖譜是舊 LLM 抽取的；要讓圖譜改由新 LLM 抽取，需刪除 `WORKING_DIR` 後重新 ingest。LightRAG 1.4.16 的文件建議 LLM 至少 32B 參數、context length 至少 32KB（建議 64KB；文件原文的單位就是 KB），建圖階段不建議用推理模型；目前的 4B 模型與 `QUERY_MAX_TOTAL_TOKENS=12000` 都低於這個建議。
 - **文件 ID 含圖片的絕對路徑**：專案資料夾搬到別的路徑，或 `PARSER_OUTPUT_DIR` 改了，同一篇論文會被當成新文件。搬機器後從空的 `WORKING_DIR` 重新 ingest。
 
 ## 7. 測試
