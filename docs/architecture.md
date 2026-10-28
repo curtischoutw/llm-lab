@@ -21,6 +21,8 @@ rag_storage/   知識圖譜＋向量庫＋快取（＝知識庫本體）
 檢索（naive／local／global／hybrid／mix） → LLM 依檢索結果產生答案
 ```
 
+`ingest` 接受 PDF 與 8 種圖片格式（副檔名清單在 `rag_lab/formats.py`）。解析由 RAG-Anything 的 `parse_document` 依副檔名分派：圖片直接交給 MinerU；`.png`、`.jpg`、`.jpeg` 以外的圖片先由 RAG-Anything 用 Pillow 轉成 png。專案只決定放行哪些副檔名，不判斷怎麼解析。
+
 三個模型都經由 OpenAI 相容的 HTTP 端點呼叫，端點寫在 `.env`：
 
 | 用途 | 本機的 server | 什麼時候會呼叫 |
@@ -80,6 +82,7 @@ rag_storage/   知識圖譜＋向量庫＋快取（＝知識庫本體）
 
 ```
 __main__ ──► config
+   │  ├────► formats
    │  ├────► evaluation
    │  ├────► pipeline ──► models ──► config
    │  │         ├───────► config
@@ -87,12 +90,13 @@ __main__ ──► config
    │  └────► graph_report
 ```
 
-`__main__` 只在執行對應子命令時才 import `pipeline`、`graph_report`，所以設定錯誤、題目檔格式錯誤能在載入 LightRAG／torch 之前就回報。
+`__main__` 啟動時只 import `config`、`formats`、`evaluation`；只在執行對應子命令時才 import `pipeline`、`graph_report`，所以設定錯誤、題目檔格式錯誤能在載入 LightRAG／torch 之前就回報。
 
 | 檔案 | 職責 | 主要介面 |
 |---|---|---|
 | `__init__.py` | 套件根，刻意不 import 任何子模組 | — |
 | `__main__.py` | CLI 入口：解析參數、驗證輸入、呼叫 `pipeline`／`graph_report`、格式化輸出、決定結束碼（0 成功、1 執行失敗、2 用法或輸入錯誤、3 設定錯誤） | `main(argv)`；子命令 `ingest`、`query`、`graph`、`eval` |
+| `formats.py` | 支援的格式清單（PDF 與 8 種圖片副檔名），專案裡只定義這一次；CLI 的資料夾過濾與錯誤訊息都從這裡取值。只靠標準函式庫，所以輸入路徑驗證能在載入 LightRAG／torch 之前完成 | `FORMATS`、`SUPPORTED_EXTENSIONS`、`is_supported(path)`、`describe_supported()` |
 | `config.py` | 從 `.env` 與環境變數讀設定並驗證；必填欄位缺漏或格式錯就拋錯，不給預設值（只有 `EMBED_QUERY_PREFIX` 是選填，預設空字串） | `get_settings() -> Settings`、`ConfigError` |
 | `models.py` | 把三個 OpenAI 相容端點包成 RAG-Anything 需要的模型函式；失敗包成帶端點名稱與位址的錯誤；計數圖、表、公式描述的失敗（RAG-Anything 自己會吞掉） | `llm_model_func`、`vision_model_func`、`build_embedding_func()`、`check_reachable(...)`、`EndpointError` |
 | `pipeline.py` | 核心流程：建立 RAGAnything 實例、匯入（解析、建圖、多模態描述）、查詢、批次比較；把 LightRAG 會吞掉的錯誤轉成可偵測的失敗；`Session` 讓同一個 process 只初始化一次、依序呼叫 | `Session`（`ingest`、`query`、`evaluate`、`close`）、模組函式 `ingest(documents) -> IngestSummary`、`query(question, mode, vlm_enhanced=False) -> str`、`evaluate(questions) -> list[list[Cell]]`、`PipelineError`、`SessionError`、`SessionClosedError` |
@@ -120,13 +124,13 @@ __main__ ──► config
 |---|---|
 | `__init__.py` | 測試套件的說明：測試從子行程進入、模型用假 server |
 | `fake_openai_server.py` | 假的 OpenAI 相容 server：chat、vision、embedding 都回固定且合法的內容，並記錄收到的請求 |
-| `fake_mineru.py` | 假的 `mineru` 指令：依檔名寫出固定的解析結果（文字、一張圖、一個表、一條公式）；設了 `FAKE_MINERU_VERSION_LOG` 時記錄每次 `--version`，用來計算初始化次數 |
+| `fake_mineru.py` | 假的 `mineru` 指令：依主檔名寫出固定的解析結果（PDF 與圖片相同）（文字、一張圖、一個表、一條公式）；設了 `FAKE_MINERU_VERSION_LOG` 時記錄每次 `--version`，用來計算初始化次數 |
 | `test_cli.py` | 設定驗證、子命令註冊、結束碼；提供其他測試共用的 `run_cli`、`valid_env` |
 | `test_fake_server.py` | 以 `scripts/smoke_test.py` 當客戶端對假 server 執行，確認假 server 符合同一份介面（smoke test 曾對真 server 通過，所以把它當作介面的定義）；不連真 server |
-| `test_pipeline.py` | `ingest`、`query` 的完整流程（含重複匯入、失敗重試、端點不可達、查詢 token 上限）；提供共用的 `PipelineCase` |
+| `test_pipeline.py` | `ingest`、`query` 的完整流程（含各種圖片格式、資料夾挑選與略過、不支援格式的錯誤、重複匯入、失敗重試、端點不可達、查詢 token 上限）；提供共用的 `PipelineCase` 與產生各格式小圖的 `write_image`（用 Pillow） |
 | `test_graph.py` | `graph` 指令的抽樣與可重現性 |
 | `test_eval.py` | `eval` 指令的題目檔驗證與結果表 |
-| `test_python_api.py` | 在同一個 process 裡依序呼叫 `rag_lab.pipeline` 的模組函式與 `Session`：連續呼叫、每次 ingest 的統計獨立、同一個 `Session` 只初始化一次並在關閉後釋放實例、誤用時的 `SessionError`、開 `Session` 失敗後不留狀態、忘了 `close()` 時的收尾 |
+| `test_python_api.py` | 在同一個 process 裡依序呼叫 `rag_lab.pipeline` 的模組函式與 `Session`：連續呼叫、每次 ingest 的統計獨立、同一個 `Session` 只初始化一次並在關閉後釋放實例、誤用時的 `SessionError`、開 `Session` 失敗後不留狀態、忘了 `close()` 時的收尾、匯入圖片 |
 | `test_examples.py` | 實際執行 `examples/` 的範例，確認在一個 `Session` 裡連續提問能跑完 |
 
 ### 3.4 `examples/`：範例

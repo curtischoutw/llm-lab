@@ -9,9 +9,11 @@
   彼此不汙染，也不碰 repo 內的 rag_storage／output。
 - 假 mineru 以 PATH 上的可執行檔提供（tests/fake_mineru.py），讓 RAG-Anything 走它真實的
   subprocess 路徑；PDF 內容不重要，只要檔案存在。
+- 圖片文件要用 Pillow 讀得動的真圖片：假 mineru 不讀內容，但 RAG-Anything 會先用 Pillow 把
+  非 png／jpg 的圖片轉成 png 才交給 mineru，所以 `write_image` 用 Pillow 產生各格式的小圖。
 - 「端點不可達」用一個已關閉的本機埠模擬。
 
-Dependencies: 僅標準函式庫。
+Dependencies: 標準函式庫；Pillow（RAG-Anything 的依賴，只用來產生測試用的小圖）。
 """
 
 import json
@@ -25,10 +27,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from PIL import Image
+
 from tests.fake_openai_server import CHAT_REPLY, VISION_REPLY, FakeOpenAIServer
 from tests.test_cli import REPO_ROOT, SECRET, run_cli, valid_env
 
 INGEST_TIMEOUT = 180
+# 支援的副檔名；刻意不從 rag_lab.formats 取值，測試的期望要有獨立的來源（spec 的「支援的格式」）
+SUPPORTED_EXTENSIONS = (".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".gif", ".webp")
 # 端點失敗後應在這個秒數內結束（正常約 10 秒，含 LightRAG 限流器 shutdown 最多等 5 秒）
 HANG_TIMEOUT = 60
 # .env 內以字面 \n 表示換行；CLI 讀進來後是真正的換行
@@ -49,6 +55,19 @@ def closed_port_url() -> str:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     return f"http://127.0.0.1:{port}/v1"
+
+
+def write_image(path: Path) -> Path:
+    """在 path 寫出一張 Pillow 讀得動的小圖，格式由副檔名決定。
+
+    Args:
+        path: 圖片路徑；副檔名決定格式（大小寫不分）。
+
+    Returns:
+        path 本身。
+    """
+    Image.new("RGB", (8, 8), "red").save(path)
+    return path
 
 
 class PipelineCase(unittest.TestCase):
@@ -182,18 +201,23 @@ class IngestTest(PipelineCase):
         self.assertIn("b.pdf", result.stdout)
         self.assertIn("processed=2", result.stdout)
 
-    def test_non_pdf_files_in_a_folder_are_skipped_and_reported_without_failing(self):
+    def test_a_folder_ingests_supported_formats_in_name_order_and_reports_skipped_files_without_failing(self):
         folder = self.tmp / "papers"
         folder.mkdir()
-        (folder / "a.pdf").write_bytes(b"%PDF-1.4 a")
-        (folder / "notes.txt").write_text("not a pdf")
-        (folder / "figure.png").write_bytes(b"png")
+        (folder / "b.pdf").write_bytes(b"%PDF-1.4 b")
+        write_image(folder / "a.png")
+        (folder / "notes.txt").write_text("not supported")
+        (folder / "data.csv").write_text("x,y")
+        (folder / "sub").mkdir()
+        (folder / "sub" / "c.pdf").write_bytes(b"%PDF-1.4 c")
         result = self.ingest(folder)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        for name in ("notes.txt", "figure.png"):
-            self.assertRegex(result.stdout, rf"略過非 PDF.*{name}")
+        self.assertIn("略過不支援的格式：notes.txt", result.stdout)
+        self.assertIn("略過不支援的格式：data.csv", result.stdout)
+        self.assertNotIn("c.pdf", result.stdout)
         self.assertNotIn("notes.txt", result.stderr)
-        self.assertIn("processed=1", result.stdout)
+        self.assertIn("processed=2", result.stdout, "子資料夾裡的 c.pdf 不該被匯入（不遞迴）")
+        self.assertLess(result.stdout.index("[1/2] a.png"), result.stdout.index("[2/2] b.pdf"))
 
     def test_each_document_in_a_folder_reports_its_own_total_elapsed_time(self):
         folder = self.tmp / "papers"
@@ -276,16 +300,38 @@ class IngestTest(PipelineCase):
         self.assertIn(self.server.base_url, result.stderr)
         self.assertIn("injected chat failure", result.stderr)
 
-    def test_rejects_missing_or_non_pdf_paths(self):
+    def test_rejects_a_missing_path(self):
+        result = self.ingest(self.tmp / "nope.pdf")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("輸入錯誤", result.stderr)
+        self.assertIn("路徑不存在", result.stderr)
+        self.assertEqual(self.server.requests, [])
+
+    def test_rejects_a_single_file_in_an_unsupported_format_and_lists_the_supported_formats(self):
         text_file = self.tmp / "notes.txt"
         text_file.write_text("hello")
+        result = self.ingest(text_file)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("輸入錯誤", result.stderr)
+        self.assertIn("不支援的格式：notes.txt", result.stderr)
+        for extension in SUPPORTED_EXTENSIONS:
+            self.assertIn(extension, result.stderr)
+        self.assertEqual(self.server.requests, [])
+
+    def test_rejects_a_folder_without_any_supported_document_and_lists_the_supported_formats(self):
         empty_dir = self.tmp / "empty"
         empty_dir.mkdir()
-        for path in (self.tmp / "nope.pdf", text_file, empty_dir):
-            with self.subTest(path=path.name):
-                result = self.ingest(path)
+        only_unsupported = self.tmp / "only_unsupported"
+        only_unsupported.mkdir()
+        (only_unsupported / "notes.txt").write_text("hello")
+        for folder in (empty_dir, only_unsupported):
+            with self.subTest(folder=folder.name):
+                result = self.ingest(folder)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("輸入錯誤", result.stderr)
+                self.assertIn("資料夾內沒有支援的文件", result.stderr)
+                for extension in SUPPORTED_EXTENSIONS:
+                    self.assertIn(extension, result.stderr)
                 self.assertEqual(self.server.requests, [])
 
     def test_mineru_is_called_with_the_chosen_backend(self):
@@ -334,6 +380,72 @@ class IngestTest(PipelineCase):
         parallel = self.ingest(EMBED_MAX_ASYNC="4")
         self.assertEqual(parallel.returncode, 0, parallel.stdout + parallel.stderr)
         self.assertGreater(self.server.max_inflight_embed, 1)
+
+
+# ==============================
+# ingest：圖片
+# ==============================
+
+
+class IngestImageTest(PipelineCase):
+    def test_ingests_a_png_and_its_parsed_content_reaches_the_answer_prompt(self):
+        image = write_image(self.tmp / "diagram.png")
+        result = self.ingest(image)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("diagram.png", result.stdout)
+        self.assertIn("processed=1", result.stdout)
+        self.assertIn("failed=0", result.stdout)
+
+        before = len(self.server.requests)
+        answer = self.query("What is Fake Entity Alpha?", "--mode", "naive")
+        self.assertEqual(answer.returncode, 0, answer.stdout + answer.stderr)
+        self.assertEqual(answer.stdout.strip(), CHAT_REPLY)
+        prompts = [str(r["payload"]["messages"]) for r in self.server.requests[before:] if r["path"] == "/v1/chat/completions"]
+        self.assertTrue(
+            any("A Study of Fake Entities in diagram" in prompt for prompt in prompts),
+            "圖片解析出的文字應該進入回答時的 context",
+        )
+
+    def test_reingesting_the_same_image_skips_it_and_calls_no_model(self):
+        # .webp 要先轉成 png：每次轉出來的暫存檔路徑不同，重複匯入仍要認得是同一張
+        for name in ("scan.png", "scan.webp"):
+            with self.subTest(name=name):
+                image = write_image(self.tmp / name)
+                first = self.ingest(image)
+                self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+                requests_after_first = len(self.server.requests)
+
+                second = self.ingest(image)
+                self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+                self.assertIn("已完整處理過，略過", second.stdout)
+                self.assertEqual(len(self.server.requests), requests_after_first, "重複匯入不該再呼叫任何模型")
+
+    def test_retrying_a_failed_image_processes_it_without_a_dup_record(self):
+        image = write_image(self.tmp / "retry.webp")
+        self.server.fail_chat = True
+        failed = self.ingest(image)
+        self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+
+        self.server.fail_chat = False
+        retried = self.ingest(image)
+        self.assertEqual(retried.returncode, 0, retried.stdout + retried.stderr)
+        self.assertIn("processed=1", retried.stdout)
+        self.assertIn("failed=0", retried.stdout)
+        statuses = json.loads((self.working_dir / "kv_store_doc_status.json").read_text())
+        self.assertEqual(len(statuses), 1)
+        self.assertEqual([doc_id for doc_id in statuses if doc_id.startswith("dup-")], [])
+
+    def test_every_other_image_format_can_be_ingested_including_those_converted_to_png(self):
+        # .jpg／.jpeg 直接交給 mineru；其餘由 RAG-Anything 先用 Pillow 轉成 png。副檔名大小寫不分
+        names = [f"pic_{ext[1:]}{ext}" for ext in (".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".gif", ".webp")]
+        names += ["UPPER.PNG", "UPPER_WEBP.WEBP"]
+        for name in names:
+            with self.subTest(name=name):
+                result = self.ingest(write_image(self.tmp / name))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f"[1/1] {name}", result.stdout)
+                self.assertIn("failed=0", result.stdout)
+                self.assertNotIn("輸入錯誤", result.stderr)
 
 
 # ==============================
