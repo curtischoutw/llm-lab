@@ -11,7 +11,7 @@ process 內呼叫好幾次。CLI 每次只呼叫一次就結束 process，碰不
   測試只看結束碼與 stdout，不在測試 process 裡 import rag_lab（避免載入 lightrag 與跨測試共用狀態）。
 - 子行程在 repo 根目錄執行、環境變數組法與 CLI 測試相同，指向假 OpenAI server 與暫存資料夾。
 
-Dependencies: 僅標準函式庫。
+Dependencies: 僅標準函式庫（圖片夾具用的 Pillow 由 tests.test_pipeline 的 write_image 提供）。
 """
 
 import json
@@ -23,11 +23,12 @@ import unittest
 
 from tests.fake_openai_server import CHAT_REPLY
 from tests.test_cli import OPTIONAL_FIELDS, REPO_ROOT, REQUIRED_FIELDS
-from tests.test_pipeline import INGEST_TIMEOUT, PipelineCase
+from tests.test_pipeline import INGEST_TIMEOUT, PipelineCase, write_image
 
 # 依 argv 的步驟依序呼叫公開函式；每一步印一行結果。
 # argv[1] 是文件路徑，argv[2] 是題目檔，argv[3] 是 functions（模組函式）或 session（同一個 Session），其餘是步驟。
 # 步驟 stats:<檔名> 匯入文件旁邊的另一個檔案，印出這一次的 VLM 與描述統計；
+# 步驟 doc:<檔名> 匯入文件旁邊的另一個檔案，每份報告印出 report.document 的檔名、略過與錯誤；
 # 步驟 instances 印出存活的 RAGAnything 實例數，並在最後（Session 已關閉）再印一次；
 # 步驟 second／closed／thread／loop／bad_mode 各做一種誤用並印出例外類別；orphan 讓建立 session 的執行緒
 # 沒關閉就結束，再由主執行緒關閉；init_fail 讓開 session 失敗一次；
@@ -99,6 +100,10 @@ with pipeline.Session() if use_session else contextlib.nullcontext(pipeline) as 
                 f"stats {name} vlm_ok={summary.vlm_ok} vlm_failed={summary.vlm_failed} "
                 f"description_failed={failed} description_error={summary.description_error is not None}"
             )
+        elif step.startswith("doc:"):
+            summary = api.ingest([document.parent / step.removeprefix("doc:")])
+            for report in summary.reports:
+                print(f"doc {report.document.name} skipped={report.skipped} error={report.error}")
         elif step == "query":
             print(f"query {api.query('What is Fake Entity Alpha?', mode='mix')}")
         elif step == "evaluate":
@@ -167,7 +172,7 @@ class PythonApiCase(PipelineCase):
         """以子行程在同一個 process 內依序執行步驟。
 
         Args:
-            *steps: ingest、stats:<檔名>、query、evaluate、instances、second、closed、thread、loop、
+            *steps: ingest、stats:<檔名>、doc:<檔名>、query、evaluate、instances、second、closed、thread、loop、
                 bad_mode、orphan、init_fail、forget 的任意序列。
             mode: functions 呼叫模組函式；session 在同一個 Session 裡呼叫。
 
@@ -313,6 +318,35 @@ class SessionMisuseTest(PythonApiCase):
         self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
         chats = [r for r in self.server.requests[before:] if r["path"] == "/v1/chat/completions"]
         self.assertEqual(chats, [], "收尾時沒有寫回 LLM 快取，同一題又呼叫了 LLM")
+
+
+class IngestImageTest(PythonApiCase):
+    """Session.ingest 與模組函式 ingest 都接受圖片，報告用 document 欄位。"""
+
+    def setUp(self):
+        super().setUp()
+        write_image(self.tmp / "shot.png")
+        write_image(self.tmp / "scan.webp")
+
+    def test_module_function_ingests_images_and_reports_the_document(self):
+        result = self.run_api("doc:shot.png", "doc:scan.webp")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["doc shot.png skipped=False error=None", "doc scan.webp skipped=False error=None"],
+        )
+
+    def test_session_ingests_images_and_skips_a_repeated_one(self):
+        result = self.run_api("doc:shot.png", "doc:scan.webp", "doc:shot.png", mode="session")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "doc shot.png skipped=False error=None",
+                "doc scan.webp skipped=False error=None",
+                "doc shot.png skipped=True error=None",
+            ],
+        )
 
 
 class IngestStatsTest(PythonApiCase):
