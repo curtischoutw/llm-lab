@@ -41,6 +41,26 @@ cp .env.example .env
 
 下載 5 篇 RAG 主題的 arXiv 論文到 `data/papers/`，每篇都會先比對 arXiv 上的標題。已存在的完整檔案會略過。只下載部分論文：`--ids 2410.05779 2510.12323`。
 
+### 下載其他格式的文件
+
+```sh
+.venv/bin/python scripts/fetch_documents.py
+```
+
+下載 11 份公開文件：6 份 RAG 主題的文件（PPT 2、Word 2、圖片 2）放進 `data/documents/`，5 份只用來確認格式能用的文件（Excel 2，舊格式 .ppt、.doc、.xls 各 1）放進 `data/format_check/`。每份都核對 SHA-256，來源檔案被更換時以非零碼結束並指出是哪一份。已存在而且雜湊正確的檔案會略過；已存在但雜湊不符時不覆蓋，也以非零碼結束。只下載一組：`--group documents` 或 `--group format_check`。`--out` 改下載的根資料夾（預設 `data/`）。
+
+這些文件各自屬於所在的 repo，授權是該 repo 的 LICENSE：
+
+| 組 | 來源 repo | 授權 | 份數 |
+|---|---|---|---|
+| `data/documents/` | microsoft/RAG_Hack、microsoft/graphrag | MIT | 3 |
+| `data/documents/` | docling-project/docling | MIT | 1 |
+| `data/documents/` | neo4j-labs/llm-graph-builder | Apache-2.0 | 2 |
+| `data/format_check/` | docling-project/docling | MIT | 4 |
+| `data/format_check/` | Unstructured-IO/unstructured | Apache-2.0 | 1 |
+
+每份文件的 URL、格式與授權寫在 `scripts/fetch_documents.py` 的 `DOCUMENTS`。文件內的第三方素材（RAG Hack 投影片裡的 Microsoft 商標、Nestlé 財報的數字）沒有逐項查證授權，所以這些文件只在本地研究使用，不要重新散布，也不要推上 GitHub（`data/` 不進版本控管）。URL 指向各 repo 的 `main` 分支，不是固定的 commit。
+
 ## 3. 啟動本地模型 server
 
 兩個 server 各開一個終端機，在 repo 根目錄執行。
@@ -170,4 +190,10 @@ with Session() as session:
 
 ```sh
 .venv/bin/python -m unittest
+```
+
+下載腳本的測試對本機假 HTTP server 執行，不連網路，不在上面的 `unittest` 範圍內，要另外執行：
+
+```sh
+.venv/bin/python -m unittest scripts/test_fetch_papers.py scripts/test_fetch_documents.py
 ```

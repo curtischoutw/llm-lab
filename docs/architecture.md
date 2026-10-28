@@ -37,7 +37,7 @@ rag_storage/   知識圖譜＋向量庫＋快取（＝知識庫本體）
 |---|---|---|---|---|
 | `rag_lab/` | 主程式（Python 套件），見第 3 節 | 是 | — | 不能 |
 | `examples/` | 從 Python 呼叫 `rag_lab` 的範例 | 是 | — | 不能 |
-| `scripts/` | 維運工具：下載論文、啟動 VLM server、檢查端點 | 是 | — | 不能 |
+| `scripts/` | 維運工具：下載論文與其他格式的文件、啟動 VLM server、檢查端點 | 是 | — | 不能 |
 | `tests/` | 自動測試與測試用的假 server、假 MinerU | 是 | — | 不能 |
 | `eval/` | `eval` 指令的題目檔（JSONL）；目前只有範例 `questions.example.jsonl` | 是 | 手寫 | 範例檔被測試引用，不能刪 |
 | `docs/` | 這份架構文件；`docs/agents/` 是給 Claude Code 技能讀的設定（issue tracker 位置、triage 標籤、domain 文件的讀法） | 是 | 手寫 | 不能 |
@@ -49,6 +49,8 @@ rag_storage/   知識圖譜＋向量庫＋快取（＝知識庫本體）
 | `.env` | 實際使用的設定（含 API 金鑰欄位） | 否 | 從 `.env.example` 複製後修改 | 刪了所有指令都會因缺設定而失敗 |
 | `.venv/` | 專案的 Python 3.12 虛擬環境 | 否 | `python -m venv` ＋ `pip install -r requirements.txt` | 可以，照 README 第 1 節重建 |
 | `data/papers/` | 下載的 5 篇 arXiv PDF | 否 | `scripts/fetch_papers.py` | 可以，重新下載即可 |
+| `data/documents/` | 下載的 6 份主知識庫用文件：PPT 2、Word 2、圖片 2 | 否 | `scripts/fetch_documents.py` | 可以，重新下載即可 |
+| `data/format_check/` | 下載的 5 份格式驗證用文件：Excel 2，舊格式 .ppt、.doc、.xls 各 1。和 `data/documents/` 分開，用資料夾匯入時不會混在一起 | 否 | `scripts/fetch_documents.py --group format_check` | 可以，重新下載即可 |
 | `data/corpus/` | 指向 `data/papers/` 其中 3 篇的 symlink，是目前知識庫匯入的資料夾 | 否 | README 第 4 節的 `ln -sf` | 可以，不影響已建好的知識庫 |
 | `rag_storage/` | **知識庫本體**：知識圖譜、向量庫、文件狀態、LLM 快取（路徑由 `.env` 的 `WORKING_DIR` 決定） | 否 | `ingest` | 刪了就要重新 `ingest`（3 篇約 1.7 小時） |
 | `output/<論文>_<雜湊>/` | MinerU 的解析結果：Markdown、content list、切出來的圖片（路徑由 `PARSER_OUTPUT_DIR` 決定） | 否 | `ingest` | 不建議：知識庫記錄的是這裡圖片的絕對路徑，`--vlm-enhanced` 查詢要讀這些圖片 |
@@ -104,9 +106,11 @@ __main__ ──► config
 | 檔案 | 用途 | 用哪個 Python 執行 |
 |---|---|---|
 | `fetch_papers.py` | 下載 5 篇 RAG 論文到 `data/papers/`，先比對 arXiv 標題，已存在的完整檔案會略過 | 專案 venv 或系統 python3（只用標準函式庫） |
+| `fetch_documents.py` | 下載 11 份公開文件（PPT、Word、Excel、圖片）：6 份到 `data/documents/`，5 份到 `data/format_check/`；先寫 `.part`，SHA-256 相符才改名，已存在且雜湊正確的檔案會略過，可用 `--group` 只下載一組 | 專案 venv 或系統 python3（只用標準函式庫） |
 | `vlm_server.py` | 啟動 VLM＋embedding 的 `mlx_vlm.server`，先把 MLX 的 GPU cache 上限設為 1 GB，避免 ingest 時記憶體不足 | pipx 安裝的 mlx-vlm 的 python |
 | `smoke_test.py` | 確認三個端點都能用：chat、看 base64 圖片、embedding 維度 | 專案 venv |
 | `test_fetch_papers.py` | `fetch_papers.py` 的離線測試（對本機假 arXiv server） | `python -m unittest scripts.test_fetch_papers` |
+| `test_fetch_documents.py` | `fetch_documents.py` 的離線測試（對本機假 HTTP server）：雜湊核對、斷線與 HTTP 失敗、略過已存在的檔案、`--group`、清單與 spec 表格的對照 | `python -m unittest scripts/test_fetch_documents.py` |
 
 ### 3.3 `tests/`：自動測試
 
