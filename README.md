@@ -25,6 +25,14 @@ pipx install mlx-lm==0.32.0
 pipx install mlx-vlm==0.7.10
 ```
 
+LibreOffice（只有匯入 PPT、Word、Excel 時需要，PDF 與圖片不需要）。RAG-Anything 先用 LibreOffice 把 Office 文件轉成 PDF，再交給 MinerU：
+
+```sh
+brew install --cask libreoffice
+```
+
+RAG-Anything 依序嘗試 PATH 上的 `libreoffice`、`soffice`。轉檔逾時由環境變數 `LIBREOFFICE_CONVERT_TIMEOUT` 控制，預設 600 秒；大型文件逾時時，錯誤訊息會指出這個變數。這個專案不改這兩點。
+
 設定檔：
 
 ```sh
@@ -104,6 +112,9 @@ VLM 與 embedding（同一個 server，port 8081）：
 | 格式 | 副檔名 |
 |---|---|
 | PDF | `.pdf` |
+| PPT | `.ppt` `.pptx` |
+| Word | `.doc` `.docx` |
+| Excel | `.xls` `.xlsx` |
 | 圖片 | `.png` `.jpg` `.jpeg` `.bmp` `.tiff` `.tif` `.gif` `.webp` |
 
 - 單一檔案的格式不支援時，`ingest` 以結束碼 2 結束，訊息列出支援的格式。
@@ -111,6 +122,9 @@ VLM 與 embedding（同一個 server，port 8081）：
 - 圖片：`.png`、`.jpg`、`.jpeg` 直接交給 MinerU；其他格式先由 RAG-Anything 用 Pillow 轉成 png 再交給 MinerU。轉檔用的暫存檔不會留在來源資料夾。
 - 圖片的已知限制：沒有文字的圖片，MinerU 能抽出的內容很少。單張圖片實際能問到多少，還沒有實機驗證。
 - 重複匯入同一張圖片會略過，不呼叫模型；匯入中斷後重新執行會重試，不會留下重複的紀錄。行為和 PDF 相同。
+- Office 文件（PPT、Word、Excel，含舊格式 .ppt .doc .xls）：RAG-Anything 呼叫 LibreOffice 轉成 PDF，再交給 MinerU。轉出的 PDF 寫在 `PARSER_OUTPUT_DIR` 底下，不會留在來源資料夾，所以下次匯入同一個資料夾時不會被當成新文件。需要先安裝 LibreOffice（第 1 節）。匯入報告的解析階段標籤是「解析（含 Office 轉 PDF）」，轉檔時間包含在裡面，沒有另外計時。
+- 沒有安裝 LibreOffice 時，那份文件匯入失敗，`stderr` 的訊息是 RAG-Anything 的原始錯誤，包含「LibreOffice」與各平台的安裝方式（macOS：`brew install --cask libreoffice`）；結束碼 1。資料夾裡其他文件照常匯入。Office 文件轉檔失敗（LibreOffice 以非零碼結束）時，訊息相同，因為 RAG-Anything 無法區分兩者；逾時時訊息改為指出 `LIBREOFFICE_CONVERT_TIMEOUT`。
+- Office 文件的已知限制：Excel 轉成 PDF 頁面後，可能遺失多工作表、公式與合併儲存格的結構，寬表格會被切成多頁；PPT 轉檔可能要好幾分鐘（RAG-Anything 原始碼的註解記錄 7.4 MB 的 PPTX 要 4 分鐘）。各格式實際能問到多少，還沒有實機驗證。
 
 匯入單篇文件：
 
@@ -199,7 +213,7 @@ with Session() as session:
 
 ## 7. 測試
 
-快速測試對假的 OpenAI 相容 server 與假的 `mineru` 執行，不需要模型 server：
+快速測試對假的 OpenAI 相容 server、假的 `mineru` 與假的 LibreOffice 執行，不需要模型 server，也不需要安裝 LibreOffice。假 LibreOffice 以 `libreoffice` 與 `soffice` 兩個名稱放在測試 PATH 的最前面，所以機器上裝了真的 LibreOffice 時，測試也不會用到它：
 
 ```sh
 .venv/bin/python -m unittest

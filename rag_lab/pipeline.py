@@ -229,7 +229,7 @@ class IngestReport:
     Attributes:
         document: 文件路徑。
         skipped: True 表示已完整處理過，沒有重新匯入。
-        parse_seconds: MinerU 解析耗時（skipped 時為快取查詢時間）。
+        parse_seconds: 解析耗時，Office 文件含 LibreOffice 轉 PDF（skipped 時為快取查詢時間）。
         graph_seconds: 文字建圖耗時（含 LLM 實體抽取）。
         multimodal_seconds: 圖／表／公式描述耗時。
         multimodal_items: 處理的圖／表／公式數。

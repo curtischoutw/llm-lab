@@ -20,6 +20,9 @@ from pathlib import Path
 # 格式名稱（見 GLOSSARY.md）對應的副檔名；順序就是錯誤訊息裡列出的順序
 FORMATS: dict[str, tuple[str, ...]] = {
     "PDF": (".pdf",),
+    "PPT": (".ppt", ".pptx"),
+    "Word": (".doc", ".docx"),
+    "Excel": (".xls", ".xlsx"),
     "圖片": (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".gif", ".webp"),
 }
 

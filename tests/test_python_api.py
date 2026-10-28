@@ -23,7 +23,7 @@ import unittest
 
 from tests.fake_openai_server import CHAT_REPLY
 from tests.test_cli import OPTIONAL_FIELDS, REPO_ROOT, REQUIRED_FIELDS
-from tests.test_pipeline import INGEST_TIMEOUT, PipelineCase, write_image
+from tests.test_pipeline import INGEST_TIMEOUT, PipelineCase, write_image, write_office
 
 # 依 argv 的步驟依序呼叫公開函式；每一步印一行結果。
 # argv[1] 是文件路徑，argv[2] 是題目檔，argv[3] 是 functions（模組函式）或 session（同一個 Session），其餘是步驟。
@@ -347,6 +347,34 @@ class IngestImageTest(PythonApiCase):
                 "doc shot.png skipped=True error=None",
             ],
         )
+
+
+class IngestOfficeTest(PythonApiCase):
+    """Session.ingest 與模組函式 ingest 都接受 Office 文件，轉檔失敗記在該份報告的 error。"""
+
+    def setUp(self):
+        super().setUp()
+        write_office(self.tmp / "deck.pptx")
+        write_office(self.tmp / "legacy.doc")
+        write_office(self.tmp / "broken.xlsx")
+
+    def test_module_function_ingests_office_documents_and_reports_the_document(self):
+        result = self.run_api("doc:deck.pptx", "doc:legacy.doc")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["doc deck.pptx skipped=False error=None", "doc legacy.doc skipped=False error=None"],
+        )
+
+    def test_session_ingests_office_documents_skips_a_repeated_one_and_reports_a_failed_conversion(self):
+        result = self.run_api("doc:deck.pptx", "doc:broken.xlsx", "doc:deck.pptx", "doc:legacy.doc", mode="session")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # 轉檔失敗的錯誤訊息有多行（含各平台的安裝方式），只取每份報告的第一行
+        lines = [line for line in result.stdout.splitlines() if line.startswith("doc ")]
+        self.assertEqual(len(lines), 4, result.stdout)
+        self.assertEqual(lines[0], "doc deck.pptx skipped=False error=None")
+        self.assertRegex(lines[1], r"^doc broken\.xlsx skipped=False error=RuntimeError: LibreOffice conversion failed")
+        self.assertEqual(lines[2:], ["doc deck.pptx skipped=True error=None", "doc legacy.doc skipped=False error=None"])
 
 
 class IngestStatsTest(PythonApiCase):

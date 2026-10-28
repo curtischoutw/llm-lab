@@ -10,7 +10,7 @@
 - `--version` 要成功：RAG-Anything 的安裝檢查就是跑它（每個 RAGAnything 實例初始化時一次）。環境變數
   `FAKE_MINERU_VERSION_LOG` 有設定時，每次 `--version` 在該檔附加一行，測試據此數初始化次數。
 - 依參數寫入 `argv.json` 旁證，測試可確認 RAG-Anything 實際傳了哪些參數。
-- 內容只依輸入檔的主檔名決定，同一個檔案每次輸出相同；PDF 與圖片（method 為 ocr）輸出相同的內容。圖片若不是 png／jpg，
+- 內容只依輸入檔的主檔名決定，同一個檔案每次輸出相同；PDF、圖片（method 為 ocr）與假 LibreOffice 轉出的 PDF（tests/fake_libreoffice.py，主檔名與原 Office 文件相同）輸出相同的內容。圖片若不是 png／jpg，
   RAG-Anything 會先轉成 `<主檔名>_converted.png` 再交給 mineru，所以主檔名會多一個 `_converted`。
 - 主檔名以 `broken` 開頭時以非零碼結束，模擬解析失敗。主檔名以 `multichunk` 開頭時
   多輸出 8 段長文字，讓 LightRAG 切出多個 chunk，測試能觀察多個 LLM 請求同時進行的情境。
