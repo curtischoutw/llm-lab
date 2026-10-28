@@ -171,7 +171,7 @@ def _run_ingest(raw_path: str) -> int:
         if report.skipped:
             print(f"  已完整處理過，略過（查快取 {report.parse_seconds:.1f} s）")
             continue
-        print(f"  MinerU 解析：{report.parse_seconds:.1f} s（backend={pipeline.MINERU_BACKEND}）")
+        print(f"  解析（含 Office 轉 PDF）：{report.parse_seconds:.1f} s（MinerU backend={pipeline.MINERU_BACKEND}）")
         print(f"  建圖（文字切塊、實體抽取、向量）：{report.graph_seconds:.1f} s")
         print(f"  多模態（圖／表／公式描述）：{report.multimodal_seconds:.1f} s，{report.multimodal_items} 項")
         if report.description_failed:

@@ -9,6 +9,8 @@
   彼此不汙染，也不碰 repo 內的 rag_storage／output。
 - 假 mineru 以 PATH 上的可執行檔提供（tests/fake_mineru.py），讓 RAG-Anything 走它真實的
   subprocess 路徑；PDF 內容不重要，只要檔案存在。
+- 假 LibreOffice（tests/fake_libreoffice.py）以 `libreoffice` 與 `soffice` 兩個名稱放在 PATH 最前面，
+  Office 文件的內容不重要（假 LibreOffice 與假 mineru 都不讀內容），所以 Office 測試檔寫的是文字，不是真的 Office 檔。
 - 圖片文件要用 Pillow 讀得動的真圖片：假 mineru 不讀內容，但 RAG-Anything 會先用 Pillow 把
   非 png／jpg 的圖片轉成 png 才交給 mineru，所以 `write_image` 用 Pillow 產生各格式的小圖。
 - 「端點不可達」用一個已關閉的本機埠模擬。
@@ -34,7 +36,23 @@ from tests.test_cli import REPO_ROOT, SECRET, run_cli, valid_env
 
 INGEST_TIMEOUT = 180
 # 支援的副檔名；刻意不從 rag_lab.formats 取值，測試的期望要有獨立的來源（spec 的「支援的格式」）
-SUPPORTED_EXTENSIONS = (".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".gif", ".webp")
+SUPPORTED_EXTENSIONS = (
+    ".pdf",
+    ".ppt",
+    ".pptx",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".bmp",
+    ".tiff",
+    ".tif",
+    ".gif",
+    ".webp",
+)
 # 端點失敗後應在這個秒數內結束（正常約 10 秒，含 LightRAG 限流器 shutdown 最多等 5 秒）
 HANG_TIMEOUT = 60
 # .env 內以字面 \n 表示換行；CLI 讀進來後是真正的換行
@@ -70,6 +88,21 @@ def write_image(path: Path) -> Path:
     return path
 
 
+def write_office(path: Path) -> Path:
+    """在 path 寫出一個 Office 文件的替身。
+
+    假 LibreOffice 與假 mineru 都不讀內容，只看副檔名與主檔名，所以內容是一行文字，不是真的 Office 檔。
+
+    Args:
+        path: 文件路徑；副檔名決定格式。
+
+    Returns:
+        path 本身。
+    """
+    path.write_text(f"fake office document: {path.name}\n", encoding="utf-8")
+    return path
+
+
 class PipelineCase(unittest.TestCase):
     """提供假 server、假 mineru、暫存資料夾與 CLI 執行輔助的測試基底。"""
 
@@ -87,6 +120,16 @@ class PipelineCase(unittest.TestCase):
         mineru.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{REPO_ROOT}/tests/fake_mineru.py" "$@"\n')
         mineru.chmod(mineru.stat().st_mode | stat.S_IXUSR)
         self.bin_dir = bin_dir
+
+        # 假 LibreOffice 以兩個名稱放在另一個資料夾，PATH 最前面：RAG-Anything 先找 libreoffice 再找 soffice，
+        # 兩個名稱都放，機器上裝了真的 LibreOffice 時測試也不會用到它。「沒有 LibreOffice」的測試把 PATH 改成只有 bin_dir
+        office_bin = self.tmp / "office_bin"
+        office_bin.mkdir()
+        for name in ("libreoffice", "soffice"):
+            wrapper = office_bin / name
+            wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{REPO_ROOT}/tests/fake_libreoffice.py" "$@"\n')
+            wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+        self.office_bin = office_bin
 
         self.working_dir = self.tmp / "rag_storage"
         self.output_dir = self.tmp / "output"
@@ -107,7 +150,7 @@ class PipelineCase(unittest.TestCase):
             WORKING_DIR=str(self.working_dir),
             PARSER_OUTPUT_DIR=str(self.output_dir),
             EMBED_QUERY_PREFIX=QUERY_PREFIX_ENV,
-            PATH=f"{self.bin_dir}{os.pathsep}{os.environ['PATH']}",
+            PATH=os.pathsep.join([str(self.office_bin), str(self.bin_dir), os.environ["PATH"]]),
         )
         env.update(overrides)
         return env
@@ -446,6 +489,104 @@ class IngestImageTest(PipelineCase):
                 self.assertIn(f"[1/1] {name}", result.stdout)
                 self.assertIn("failed=0", result.stdout)
                 self.assertNotIn("輸入錯誤", result.stderr)
+
+
+# ==============================
+# ingest：Office 文件
+# ==============================
+
+
+class IngestOfficeTest(PipelineCase):
+    def test_ingests_a_pptx_and_its_parsed_content_reaches_the_answer_prompt(self):
+        deck = write_office(self.tmp / "slides.pptx")
+        result = self.ingest(deck)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("slides.pptx", result.stdout)
+        self.assertIn("processed=1", result.stdout)
+        self.assertIn("failed=0", result.stdout)
+
+        before = len(self.server.requests)
+        answer = self.query("What is Fake Entity Alpha?", "--mode", "naive")
+        self.assertEqual(answer.returncode, 0, answer.stdout + answer.stderr)
+        self.assertEqual(answer.stdout.strip(), CHAT_REPLY)
+        prompts = [str(r["payload"]["messages"]) for r in self.server.requests[before:] if r["path"] == "/v1/chat/completions"]
+        self.assertTrue(
+            any("A Study of Fake Entities in slides" in prompt for prompt in prompts),
+            "Office 文件轉成 PDF 再解析出的文字應該進入回答時的 context",
+        )
+
+    def test_every_office_format_can_be_ingested_and_its_extension_is_case_insensitive(self):
+        names = ["old.ppt", "new.pptx", "old.doc", "new.docx", "old.xls", "new.xlsx", "UPPER.DOCX"]
+        for name in names:
+            with self.subTest(name=name):
+                result = self.ingest(write_office(self.tmp / name))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f"[1/1] {name}", result.stdout)
+                self.assertIn("failed=0", result.stdout)
+                self.assertNotIn("輸入錯誤", result.stderr)
+
+    def test_report_labels_the_parse_stage_as_including_the_office_to_pdf_conversion(self):
+        result = self.ingest(write_office(self.tmp / "slides.pptx"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r"解析（含 Office 轉 PDF）：\d+\.\d s")
+        self.assertNotIn("轉檔：", result.stdout, "不另外計算轉檔時間")
+
+    def test_without_libreoffice_the_document_fails_and_the_error_says_how_to_install_it(self):
+        # PATH 只放假 mineru：shutil.which 找不到 libreoffice 與 soffice，機器上有沒有裝真的都一樣
+        result = self.ingest(write_office(self.tmp / "slides.pptx"), PATH=str(self.bin_dir))
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stderr, r"匯入失敗：slides\.pptx：.*LibreOffice")
+        self.assertIn("brew install --cask libreoffice", result.stderr)
+        self.assertIn("slides.pptx", result.stdout)
+
+    def test_a_failed_office_conversion_is_named_and_the_other_documents_in_the_folder_are_kept(self):
+        folder = self.tmp / "mixed"
+        folder.mkdir()
+        write_office(folder / "a.docx")
+        write_office(folder / "broken.pptx")
+        (folder / "c.pdf").write_bytes(b"%PDF-1.4 c")
+        result = self.ingest(folder)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertRegex(result.stderr, r"匯入失敗：broken\.pptx：.*LibreOffice")
+        self.assertNotRegex(result.stderr, r"匯入失敗：[ac]\.")
+        self.assertIn("[2/3] broken.pptx", result.stdout)
+        self.assertIn("processed=2", result.stdout)
+        statuses = json.loads((self.working_dir / "kv_store_doc_status.json").read_text())
+        self.assertEqual(sorted(v["status"] for v in statuses.values()), ["processed", "processed"])
+
+    def test_reingesting_the_same_office_document_skips_it_and_calls_no_model(self):
+        # 轉檔輸出每次都是新的 PDF；重複匯入仍要認得是同一份文件
+        for name in ("deck.pptx", "legacy.doc"):
+            with self.subTest(name=name):
+                document = write_office(self.tmp / name)
+                first = self.ingest(document)
+                self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+                requests_after_first = len(self.server.requests)
+
+                second = self.ingest(document)
+                self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+                self.assertIn("已完整處理過，略過", second.stdout)
+                self.assertEqual(len(self.server.requests), requests_after_first, "重複匯入不該再呼叫任何模型")
+
+    def test_the_converted_pdf_is_written_to_the_parser_output_folder_not_next_to_the_source(self):
+        folder = self.tmp / "office_folder"
+        folder.mkdir()
+        write_office(folder / "deck.pptx")
+        write_office(folder / "report.docx")
+        before = sorted(path.name for path in folder.iterdir())
+        first = self.ingest(folder)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+
+        self.assertEqual(sorted(path.name for path in folder.iterdir()), before, "來源資料夾不該多出轉檔結果")
+        converted = sorted(path.name for path in self.output_dir.rglob("*.pdf"))
+        self.assertEqual(converted, ["deck.pdf", "report.pdf"], "轉出的 PDF 應該在 PARSER_OUTPUT_DIR 底下")
+
+        second = self.ingest(folder)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertIn("[1/2] deck.pptx", second.stdout)
+        self.assertIn("[2/2] report.docx", second.stdout)
+        self.assertNotIn("/3]", second.stdout, "再次匯入資料夾時，轉出的 PDF 不該被當成新文件")
+        self.assertEqual(second.stdout.count("已完整處理過，略過"), 2)
 
 
 # ==============================
