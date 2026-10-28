@@ -124,7 +124,10 @@ VLM 與 embedding（同一個 server，port 8081）：
 - 重複匯入同一張圖片會略過，不呼叫模型；匯入中斷後重新執行會重試，不會留下重複的紀錄。行為和 PDF 相同。
 - Office 文件（PPT、Word、Excel，含舊格式 .ppt .doc .xls）：RAG-Anything 呼叫 LibreOffice 轉成 PDF，再交給 MinerU。轉出的 PDF 寫在 `PARSER_OUTPUT_DIR` 底下，不會留在來源資料夾，所以下次匯入同一個資料夾時不會被當成新文件。需要先安裝 LibreOffice（第 1 節）。匯入報告的解析階段標籤是「解析（含 Office 轉 PDF）」，轉檔時間包含在裡面，沒有另外計時。
 - 沒有安裝 LibreOffice 時，那份文件匯入失敗，`stderr` 的訊息是 RAG-Anything 的原始錯誤，包含「LibreOffice」與各平台的安裝方式（macOS：`brew install --cask libreoffice`）；結束碼 1。資料夾裡其他文件照常匯入。Office 文件轉檔失敗（LibreOffice 以非零碼結束）時，訊息相同，因為 RAG-Anything 無法區分兩者；逾時時訊息改為指出 `LIBREOFFICE_CONVERT_TIMEOUT`。
-- Office 文件的已知限制：Excel 轉成 PDF 頁面後，可能遺失多工作表、公式與合併儲存格的結構，寬表格會被切成多頁；PPT 轉檔可能要好幾分鐘（RAG-Anything 原始碼的註解記錄 7.4 MB 的 PPTX 要 4 分鐘）。各格式實際能問到多少，還沒有實機驗證。
+- Office 文件的已知限制（Excel 與舊格式的實測見第 5 節）：
+  - Excel 轉成 PDF 頁面後由 MinerU 做表格辨識，不讀儲存格。實測時，旋轉的欄位標題被 OCR 成無法辨識的文字（例如 Underlying Trading operating profit 變成 `Undeng Tedng peong pnyh`）；表格上方的「January–June 2023」這類標題沒有進入任何內容項目，同一頁的兩張表分不出年份；同一個工作表裡並排的兩張表被合併成一張、欄位錯位。所以問表格裡的特定數字時，常常答成同一張表的其他欄或其他年份。每個工作表都有被解析；寬的工作表會被切成多頁。
+  - 主檔名相同的 Office 文件（例如同一個資料夾裡的 `report.docx` 與 `report.pptx`，或不同資料夾裡的兩份 `report.docx`）會轉成同一個 `PARSER_OUTPUT_DIR/<主檔名>.pdf`，解析結果也寫進同一個資料夾，後匯入的會覆蓋先匯入的轉檔 PDF 與內容清單。文件是逐份匯入的，每份的內容在被覆蓋前就已寫入知識庫；圖片以雜湊命名，不會被覆蓋。實測 `legacy_sample.ppt`／`.doc`／`.xls` 時發生，三份都問得到。重新解析被覆蓋的文件時會重新轉檔。PDF 與圖片沒有這個問題，它們的解析資料夾名稱含原檔路徑的雜湊。
+  - PPT 轉檔可能要好幾分鐘：RAG-Anything 原始碼的註解記錄 7.4 MB 的 PPTX 要 4 分鐘。
 
 匯入單篇文件：
 
@@ -185,6 +188,19 @@ with Session() as session:
 - 3 篇匯入後的圖譜：實體 1358，關係 1835（其中 735 條是 RAG-Anything 加的 belongs_to 邊）。ingest 期間 wired 記憶體最高 18 GB。
 - 查詢（3 篇的知識庫，五種模式各 1 題）每題 52–66 s；`eval` 2 題 × 5 種模式 522 s。同一個問題再問一次會命中 LightRAG 的 LLM 快取，查詢 4 s、同一份題目檔的 `eval` 3 s。
 - MinerU 後端比較（LightRAG 論文、server 關閉時）：pipeline 51 s、hybrid-engine 140 s、vlm-engine 711 s（transformers 推論）。pipeline 與 hybrid-engine 抽出的圖、表、公式數量相同。
+
+Excel 與舊格式（格式驗證知識庫，2026-10-29 量測，LibreOffice 26.8.1.1；紀錄在 `output/formats_check_run/` 與 `.scratch/multi-format-documents/issues/05-*.md`）：
+
+| 文件 | 解析（含 Office 轉 PDF） | 其中 LibreOffice 轉檔 | 建圖 | 圖／表描述 | 合計 |
+|---|---|---|---|---|---|
+| Nestlé 財報 `.xlsx`（5 個工作表） | 24 s | 約 1 s | 19 s | 487 s（7 項） | 529 s |
+| `legacy_sample.doc` | 19 s | 約 1 s | 24 s | 70 s（2 項） | 113 s |
+| `legacy_sample.ppt` | 17 s | 約 1 s | 34 s | 58 s（1 項） | 108 s |
+| `legacy_sample.xls` | 14 s | 約 1 s | 0 s | 52 s（1 項） | 66 s |
+| `xlsx_01.xlsx`（4 個工作表） | 17 s | 不到 1 s | 0 s | 296 s（8 項） | 313 s |
+
+- 轉檔時間是從 log 的時間戳記讀出的（精度 1 秒）。整張表都被辨識成表格的文件，沒有文字切塊，所以建圖是 0 s。匯入期間 wired 記憶體最高 15 GB。
+- `eval/questions.format_check.jsonl` 6 題 × 5 種模式（1176 s）。答對的格數：舊 Excel `.xls` 5／5，舊 Word `.doc` 5／5，舊 PPT `.ppt` 只有 local 完全答對、hybrid 答對一半，Excel `.xlsx` 3 題共 15 格只有 1 格答對（local 答出 PetCare 的 9,373）。`.xlsx` 答錯的原因見第 4 節 Office 文件的已知限制。
 
 圖譜品質（LightRAG 論文單篇，詳見 `.scratch/rag-anything-lab/issues/04-graph-quality-report.md`）：
 
