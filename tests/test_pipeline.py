@@ -20,6 +20,7 @@ Dependencies: 標準函式庫；Pillow（RAG-Anything 的依賴，只用來產�
 
 import json
 import os
+import re
 import shutil
 import socket
 import stat
@@ -272,6 +273,42 @@ class IngestTest(PipelineCase):
         self.assertRegex(result.stdout, r"\[1/2\] a\.pdf.*耗時 \d+\.\d s")
         self.assertRegex(result.stdout, r"\[2/2\] b\.pdf.*耗時 \d+\.\d s")
 
+    def test_a_folder_does_not_treat_lock_files_and_hidden_files_as_documents(self):
+        # Word 開檔時產生的 ~$ 鎖定檔、macOS 在非 HFS 磁碟上寫的 ._ AppleDouble 檔、.DS_Store：
+        # 不是文件，不匯入（匯入會在轉檔或解析時失敗），也不印成「略過不支援的格式」
+        folder = self.tmp / "papers"
+        folder.mkdir()
+        (folder / "a.pdf").write_bytes(b"%PDF-1.4 a")
+        write_office(folder / "report.docx")
+        write_office(folder / "~$report.docx")
+        (folder / "._a.pdf").write_bytes(b"\x00\x05\x16\x07 appledouble")
+        (folder / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+        (folder / "notes.txt").write_text("not supported")
+        result = self.ingest(folder)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("[1/2] a.pdf", result.stdout)
+        self.assertIn("[2/2] report.docx", result.stdout)
+        self.assertIn("processed=2", result.stdout)
+        self.assertIn("略過不支援的格式：notes.txt", result.stdout, "一般的不支援檔案照舊列出")
+        for name in ("~$report.docx", "._a.pdf", ".DS_Store"):
+            self.assertNotIn(name, result.stdout)
+            self.assertNotIn(name, result.stderr)
+
+    def test_a_folder_with_only_lock_and_hidden_files_has_no_documents(self):
+        folder = self.tmp / "papers"
+        folder.mkdir()
+        write_office(folder / "~$report.docx")
+        (folder / "._a.pdf").write_bytes(b"\x00\x05\x16\x07 appledouble")
+        result = self.ingest(folder)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("資料夾內沒有支援的文件", result.stderr)
+
+    def test_a_file_given_directly_is_ingested_even_if_its_name_starts_with_a_dot(self):
+        result = self.ingest((self.tmp / "paper.pdf").rename(self.tmp / ".hidden.pdf"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("[1/1] .hidden.pdf", result.stdout)
+        self.assertIn("processed=1", result.stdout)
+
     def test_one_failing_document_is_named_others_are_kept_and_exit_code_is_nonzero(self):
         folder = self.tmp / "papers"
         folder.mkdir()
@@ -516,20 +553,42 @@ class IngestOfficeTest(PipelineCase):
         )
 
     def test_every_office_format_can_be_ingested_and_its_extension_is_case_insensitive(self):
-        names = ["old.ppt", "new.pptx", "old.doc", "new.docx", "old.xls", "new.xlsx", "UPPER.DOCX"]
+        # 主檔名各不相同：同主檔名的文件共用轉檔 PDF 與解析資料夾，會被當成已處理過（README 已知限制）
+        names = ["slides_old.ppt", "slides_new.pptx", "text_old.doc", "text_new.docx", "sheet_old.xls", "sheet_new.xlsx", "UPPER.DOCX"]
         for name in names:
             with self.subTest(name=name):
+                requests_before = len(self.server.requests)
                 result = self.ingest(write_office(self.tmp / name))
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn(f"[1/1] {name}", result.stdout)
                 self.assertIn("failed=0", result.stdout)
                 self.assertNotIn("輸入錯誤", result.stderr)
+                self.assertNotIn("已完整處理過，略過", result.stdout, "這份文件沒有真的走完建圖")
+                self.assertIn("建圖", result.stdout)
+                self.assertGreater(len(self.server.requests), requests_before, "這份文件沒有呼叫任何模型")
 
     def test_report_labels_the_parse_stage_as_including_the_office_to_pdf_conversion(self):
         result = self.ingest(write_office(self.tmp / "slides.pptx"))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertRegex(result.stdout, r"解析（含 Office 轉 PDF）：\d+\.\d s")
         self.assertNotIn("轉檔：", result.stdout, "不另外計算轉檔時間")
+
+    def test_report_labels_the_parse_stage_without_office_wording_for_pdf_and_images(self):
+        folder = self.tmp / "no_office"
+        folder.mkdir()
+        (folder / "a.pdf").write_bytes(b"%PDF-1.4 a")
+        write_image(folder / "b.png")
+        write_office(folder / "c.docx")
+        result = self.ingest(folder)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # 每份文件的報告以「[i/n] 檔名」開頭，下一行是解析階段；只有 Office 文件的標籤提到轉 PDF
+        lines = result.stdout.splitlines()
+        labels = {}
+        for index, line in enumerate(lines):
+            match = re.match(r"\[\d+/\d+\] (.+?)：耗時", line)
+            if match:
+                labels[match.group(1)] = lines[index + 1].split("：")[0].strip()
+        self.assertEqual(labels, {"a.pdf": "解析", "b.png": "解析", "c.docx": "解析（含 Office 轉 PDF）"})
 
     def test_without_libreoffice_the_document_fails_and_the_error_says_how_to_install_it(self):
         # PATH 只放假 mineru：shutil.which 找不到 libreoffice 與 soffice，機器上有沒有裝真的都一樣

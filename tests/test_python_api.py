@@ -29,6 +29,7 @@ from tests.test_pipeline import INGEST_TIMEOUT, PipelineCase, write_image, write
 # argv[1] 是文件路徑，argv[2] 是題目檔，argv[3] 是 functions（模組函式）或 session（同一個 Session），其餘是步驟。
 # 步驟 stats:<檔名> 匯入文件旁邊的另一個檔案，印出這一次的 VLM 與描述統計；
 # 步驟 doc:<檔名> 匯入文件旁邊的另一個檔案，每份報告印出 report.document 的檔名、略過與錯誤；
+# 步驟 reject:<檔名>,<檔名>… 一次匯入這些文件，印出拋出的例外類別與訊息（預期不支援的格式整批被拒絕）；
 # 步驟 instances 印出存活的 RAGAnything 實例數，並在最後（Session 已關閉）再印一次；
 # 步驟 second／closed／thread／loop／bad_mode 各做一種誤用並印出例外類別；orphan 讓建立 session 的執行緒
 # 沒關閉就結束，再由主執行緒關閉；init_fail 讓開 session 失敗一次；
@@ -104,6 +105,10 @@ with pipeline.Session() if use_session else contextlib.nullcontext(pipeline) as 
             summary = api.ingest([document.parent / step.removeprefix("doc:")])
             for report in summary.reports:
                 print(f"doc {report.document.name} skipped={report.skipped} error={report.error}")
+        elif step.startswith("reject:"):
+            names = step.removeprefix("reject:").split(",")
+            name, message = error_name(lambda: api.ingest([document.parent / n for n in names]))
+            print(f"reject {name} {message}")
         elif step == "query":
             print(f"query {api.query('What is Fake Entity Alpha?', mode='mix')}")
         elif step == "evaluate":
@@ -172,7 +177,7 @@ class PythonApiCase(PipelineCase):
         """以子行程在同一個 process 內依序執行步驟。
 
         Args:
-            *steps: ingest、stats:<檔名>、doc:<檔名>、query、evaluate、instances、second、closed、thread、loop、
+            *steps: ingest、stats:<檔名>、doc:<檔名>、reject:<檔名>,…、query、evaluate、instances、second、closed、thread、loop、
                 bad_mode、orphan、init_fail、forget 的任意序列。
             mode: functions 呼叫模組函式；session 在同一個 Session 裡呼叫。
 
@@ -375,6 +380,38 @@ class IngestOfficeTest(PythonApiCase):
         self.assertEqual(lines[0], "doc deck.pptx skipped=False error=None")
         self.assertRegex(lines[1], r"^doc broken\.xlsx skipped=False error=RuntimeError: LibreOffice conversion failed")
         self.assertEqual(lines[2:], ["doc deck.pptx skipped=True error=None", "doc legacy.doc skipped=False error=None"])
+
+
+class IngestUnsupportedFormatTest(PythonApiCase):
+    """Python API 和 CLI 一樣只接受支援的格式：有不支援的文件就整批拒絕，不呼叫模型、不解析。"""
+
+    def setUp(self):
+        super().setUp()
+        (self.tmp / "notes.md").write_text("# notes\n", encoding="utf-8")
+        (self.tmp / "song.mp3").write_bytes(b"ID3 fake")
+        (self.tmp / "good.pdf").write_bytes(b"%PDF-1.4 good")
+
+    def assert_rejected_before_any_work(self, result, name):
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        line = result.stdout.splitlines()[0]
+        self.assertTrue(line.startswith(f"reject PipelineError 不支援的格式：{name}（支援的格式：.pdf "), line)
+        self.assertEqual(self.server.requests, [], "不支援的格式應該在呼叫任何模型之前就被拒絕")
+        self.assertFalse(self.working_dir.exists(), "不該建立知識庫")
+        self.assertFalse(self.output_dir.exists(), "不該解析任何文件")
+
+    def test_module_function_rejects_an_unsupported_format_before_any_work(self):
+        for name in ("notes.md", "song.mp3"):
+            with self.subTest(name=name):
+                self.assert_rejected_before_any_work(self.run_api(f"reject:{name}"), name)
+
+    def test_session_rejects_the_whole_batch_when_one_document_is_unsupported(self):
+        # good.pdf 在前面：整批都不匯入，所以 good.pdf 也不該被解析，也不該建立資料
+        result = self.run_api("reject:good.pdf,notes.md", mode="session")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        line = result.stdout.splitlines()[0]
+        self.assertTrue(line.startswith("reject PipelineError 不支援的格式：notes.md（支援的格式：.pdf "), line)
+        self.assertFalse(self.output_dir.exists(), "good.pdf 不該被解析")
+        self.assertEqual(self.server.requests, [], "整批被拒絕，不該呼叫任何模型")
 
 
 class IngestStatsTest(PythonApiCase):

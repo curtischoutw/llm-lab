@@ -290,6 +290,26 @@ class ExistingFileTests(ServerTestCase):
         self.assertEqual(self.files_under_out(), ["documents/a.pptx"])
         self.assertEqual((self.out / "documents" / SLIDES.name).read_bytes(), SLIDES.body)
 
+class FileSystemFailureTests(ServerTestCase):
+    def test_a_destination_folder_that_is_a_regular_file_names_the_document_and_exits_nonzero(self) -> None:
+        self.out.mkdir(parents=True)
+        (self.out / "documents").write_text("not a folder")
+        result = self.run_fetch([f.entry() for f in ALL])
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f"ERROR {SLIDES.name}:", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(self.files_under_out(), ["documents"], "不該寫出任何文件")
+
+    def test_a_destination_that_is_a_folder_names_the_document_and_exits_nonzero(self) -> None:
+        (self.out / "documents" / REPORT.name).mkdir(parents=True)
+        result = self.run_fetch([f.entry() for f in ALL])
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f"ERROR {REPORT.name}:", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual((self.out / "documents" / SLIDES.name).read_bytes(), SLIDES.body, "失敗前的文件保留")
+        self.assertNotIn(SHEET.server_path, [path for path, _ in self.server.requests], "失敗後不再下載後面的文件")
+
+
 class GroupTests(ServerTestCase):
     def test_group_documents_downloads_only_that_folder(self) -> None:
         result = self.run_fetch([f.entry() for f in ALL], "--group", "documents")

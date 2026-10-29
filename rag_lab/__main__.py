@@ -13,7 +13,9 @@ rag_lab.graph_report 後格式化輸出。
 - 執行期失敗（端點錯誤、MinerU 失敗、查詢失敗）在這裡統一轉成「型別：原例外文字」
   印到 stderr 並以 1 結束；這是 CLI 邊界的回報，不是吞掉錯誤。
 - ingest 資料夾時只處理支援格式的文件（見 rag_lab.formats；不遞迴），其他檔案在 stdout 說明
-  「略過不支援的格式：<檔名>」，不算錯誤；
+  「略過不支援的格式：<檔名>」，不算錯誤；檔名以 `.` 或 `~$` 開頭的檔案（.DS_Store、macOS 的 ._ 檔、
+  Word 的鎖定檔）不算文件，不匯入也不列出；
+- 匯入報告的解析階段標籤：Office 格式（rag_lab.formats.is_office）寫「解析（含 Office 轉 PDF）」，其餘寫「解析」；
   某一篇失敗時其餘照常匯入，失敗的篇名與原因印到 stderr，整體以 1 結束。
 - eval 的結果檔寫到 --output-dir（預設 ./eval_results，已在 .gitignore），檔名含時間戳記
   （eval_YYYYMMDD-HHMMSS.md），在查詢開始前就以獨佔模式建立（撞名時加 -1、-2 序號），所以不會
@@ -34,7 +36,7 @@ from pathlib import Path
 
 from rag_lab.config import ConfigError, get_settings
 from rag_lab.evaluation import RETRIEVAL_MODES, QuestionFileError, load_questions, render_report
-from rag_lab.formats import describe_supported, is_supported
+from rag_lab.formats import describe_supported, is_office, is_supported
 
 # ==============================
 # 常數
@@ -44,6 +46,10 @@ QUERY_MODES = RETRIEVAL_MODES
 DEFAULT_EVAL_OUTPUT_DIR = "eval_results"
 DEFAULT_GRAPH_SAMPLE = 10
 DEFAULT_GRAPH_SEED = 0
+
+# 資料夾內檔名以這些開頭的檔案不是文件：`.` 是隱藏檔（.DS_Store、macOS 的 ._ AppleDouble 檔），
+# `~$` 是 Office 開檔時產生的鎖定檔。它們可能帶著支援的副檔名，匯入只會在轉檔或解析時失敗
+NOT_A_DOCUMENT_PREFIXES = (".", "~$")
 
 EXIT_FAILURE = 1
 EXIT_USAGE = 2
@@ -121,7 +127,9 @@ def _collect_documents(raw: str) -> tuple[list[Path], list[Path]]:
     """把 ingest 的路徑參數展開成文件清單，並列出資料夾內被略過的不支援檔案。
 
     Args:
-        raw: 單一文件，或含文件的資料夾（不遞迴；ASSUMPTION：第一批語料是平的資料夾）。
+        raw: 單一文件，或含文件的資料夾（不遞迴；ASSUMPTION：第一批語料是平的資料夾）。資料夾內檔名以 `.` 或
+            `~$` 開頭的檔案（隱藏檔、Office 鎖定檔、AppleDouble 檔）不算文件，也不列入略過清單
+            （ASSUMPTION：這些檔案不是使用者想匯入的內容）；單一檔案直接指定時不受影響。
 
     Returns:
         (依檔名排序的文件絕對路徑, 依檔名排序的不支援檔案路徑)；單一檔案時後者為空。
@@ -131,11 +139,13 @@ def _collect_documents(raw: str) -> tuple[list[Path], list[Path]]:
     """
     path = Path(raw).expanduser().resolve()
     if path.is_dir():
-        files = sorted(p for p in path.iterdir() if p.is_file())
-        documents = [p for p in files if is_supported(p)]
+        documents: list[Path] = []
+        unsupported: list[Path] = []
+        for file in sorted(p for p in path.iterdir() if p.is_file() and not p.name.startswith(NOT_A_DOCUMENT_PREFIXES)):
+            (documents if is_supported(file) else unsupported).append(file)
         if not documents:
             raise ValueError(f"資料夾內沒有支援的文件：{path}（支援的格式：{describe_supported()}）")
-        return documents, [p for p in files if p not in documents]
+        return documents, unsupported
     if not path.is_file():
         raise ValueError(f"路徑不存在：{path}")
     if not is_supported(path):
@@ -171,7 +181,8 @@ def _run_ingest(raw_path: str) -> int:
         if report.skipped:
             print(f"  已完整處理過，略過（查快取 {report.parse_seconds:.1f} s）")
             continue
-        print(f"  解析（含 Office 轉 PDF）：{report.parse_seconds:.1f} s（MinerU backend={pipeline.MINERU_BACKEND}）")
+        parse_label = "解析（含 Office 轉 PDF）" if is_office(report.document) else "解析"
+        print(f"  {parse_label}：{report.parse_seconds:.1f} s（MinerU backend={pipeline.MINERU_BACKEND}）")
         print(f"  建圖（文字切塊、實體抽取、向量）：{report.graph_seconds:.1f} s")
         print(f"  多模態（圖／表／公式描述）：{report.multimodal_seconds:.1f} s，{report.multimodal_items} 項")
         if report.description_failed:
