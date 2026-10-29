@@ -5,10 +5,10 @@
 ## 1. 整體流程
 
 ```
-data/papers/*.pdf
+data/corpus/（論文）、data/documents/（PPT、Word、圖片）
       │  python -m rag_lab ingest
       ▼
-MinerU 解析（文字、圖、表、公式） ──► output/<論文>_<雜湊>/   解析結果與切出的圖片
+MinerU 解析（文字、圖、表、公式） ──► output/<文件>_<雜湊>/   解析結果與切出的圖片
       │
       ▼
 LightRAG 建圖：LLM 抽實體與關係，embedding 建向量
@@ -20,6 +20,8 @@ rag_storage/   知識圖譜＋向量庫＋快取（＝知識庫本體）
       ▼
 檢索（naive／local／global／hybrid／mix） → LLM 依檢索結果產生答案
 ```
+
+`ingest` 接受 PDF、PPT、Word、Excel 與 8 種圖片格式（副檔名清單在 `rag_lab/formats.py`）。解析由 RAG-Anything 的 `parse_document` 依副檔名分派：圖片直接交給 MinerU；`.png`、`.jpg`、`.jpeg` 以外的圖片先由 RAG-Anything 用 Pillow 轉成 png；Office 文件（.ppt .pptx .doc .docx .xls .xlsx）先由 RAG-Anything 呼叫 PATH 上的 LibreOffice（`libreoffice`，找不到再試 `soffice`）轉成 PDF，寫在 `PARSER_OUTPUT_DIR` 底下，再交給 MinerU。專案只決定放行哪些副檔名，不判斷怎麼解析。沒有安裝 LibreOffice 時，RAG-Anything 的原始錯誤（含安裝方式）成為那份文件的匯入失敗原因，專案沒有改寫它。
 
 三個模型都經由 OpenAI 相容的 HTTP 端點呼叫，端點寫在 `.env`：
 
@@ -37,22 +39,27 @@ rag_storage/   知識圖譜＋向量庫＋快取（＝知識庫本體）
 |---|---|---|---|---|
 | `rag_lab/` | 主程式（Python 套件），見第 3 節 | 是 | — | 不能 |
 | `examples/` | 從 Python 呼叫 `rag_lab` 的範例 | 是 | — | 不能 |
-| `scripts/` | 維運工具：下載論文、啟動 VLM server、檢查端點 | 是 | — | 不能 |
-| `tests/` | 自動測試與測試用的假 server、假 MinerU | 是 | — | 不能 |
-| `eval/` | `eval` 指令的題目檔（JSONL）；目前只有範例 `questions.example.jsonl` | 是 | 手寫 | 範例檔被測試引用，不能刪 |
+| `scripts/` | 維運工具：下載論文與其他格式的文件、啟動 VLM server、檢查端點 | 是 | — | 不能 |
+| `tests/` | 自動測試與測試用的假 server、假 MinerU、假 LibreOffice | 是 | — | 不能 |
+| `eval/` | `eval` 指令的題目檔（JSONL）：範例 `questions.example.jsonl`（論文）、`questions.formats.jsonl`（`data/documents/` 的 6 份文件，其中 2 題跨格式題同時問到論文）、`questions.format_check.jsonl`（`data/format_check/`，只用在暫時的知識庫） | 是 | 手寫 | 範例檔被測試引用，不能刪；另外兩份是 README 第 5 節實測數據的題目 |
 | `docs/` | 這份架構文件；`docs/agents/` 是給 Claude Code 技能讀的設定（issue tracker 位置、triage 標籤、domain 文件的讀法） | 是 | 手寫 | 不能 |
 | `.scratch/rag-anything-lab/` | 主程式的規格 `spec.md` 與 7 張 ticket（`issues/`）。ticket 03–07 末尾有實測結果段落，README 的數據出自這裡 | 是 | 手寫 | 不建議：設計決策與實測結果記錄在這裡 |
 | `.scratch/architecture-and-python-api/` | 這份架構文件、Python 範例、`Session` API 的規格與 5 張 ticket（01–05） | 是 | 手寫 | 不建議，理由同上 |
+| `.scratch/multi-format-documents/` | 支援 PPT、Word、Excel、圖片的規格與 6 張 ticket（01–06）；ticket 05、06 末尾有實測結果段落 | 是 | 手寫 | 不建議，理由同上 |
+| `GLOSSARY.md` | 專案用語（文件、格式、知識庫、格式驗證知識庫）的定義與要避免的說法 | 是 | 手寫 | 不建議：規格與 ticket 依這些用語撰寫 |
 | `.env.example` | 所有設定欄位與註解，預設值對應本機 MLX server | 是 | — | 不能 |
 | `requirements.txt` | 專案 venv 的相依套件：`raganything==1.4.3` 鎖定版本，`lightrag-hku<1.5` 與 `mineru[core]<4` 只限制上限，其餘由 raganything 帶入 | 是 | — | 不能 |
 | `CLAUDE.md` | 給 Claude Code 的專案說明 | 是 | — | 不能 |
 | `.env` | 實際使用的設定（含 API 金鑰欄位） | 否 | 從 `.env.example` 複製後修改 | 刪了所有指令都會因缺設定而失敗 |
 | `.venv/` | 專案的 Python 3.12 虛擬環境 | 否 | `python -m venv` ＋ `pip install -r requirements.txt` | 可以，照 README 第 1 節重建 |
 | `data/papers/` | 下載的 5 篇 arXiv PDF | 否 | `scripts/fetch_papers.py` | 可以，重新下載即可 |
-| `data/corpus/` | 指向 `data/papers/` 其中 3 篇的 symlink，是目前知識庫匯入的資料夾 | 否 | README 第 4 節的 `ln -sf` | 可以，不影響已建好的知識庫 |
-| `rag_storage/` | **知識庫本體**：知識圖譜、向量庫、文件狀態、LLM 快取（路徑由 `.env` 的 `WORKING_DIR` 決定） | 否 | `ingest` | 刪了就要重新 `ingest`（3 篇約 1.7 小時） |
-| `output/<論文>_<雜湊>/` | MinerU 的解析結果：Markdown、content list、切出來的圖片（路徑由 `PARSER_OUTPUT_DIR` 決定） | 否 | `ingest` | 不建議：知識庫記錄的是這裡圖片的絕對路徑，`--vlm-enhanced` 查詢要讀這些圖片 |
-| `output/` 其他子目錄 | 開發過程的量測紀錄與 log（`ticket03_run/`、`ticket05_run/`、`crash_repro/`、`backend_bench/` 等），ticket 的實測段落引用它們當證據；`crash_repro/tools/watchdog.sh` 是記憶體監控腳本 | 否 | 開發時手動產生 | 可以，但會失去原始證據 |
+| `data/documents/` | 下載的 6 份主知識庫用文件：PPT 2、Word 2、圖片 2 | 否 | `scripts/fetch_documents.py` | 可以，重新下載即可 |
+| `data/format_check/` | 下載的 5 份格式驗證用文件：Excel 2，舊格式 .ppt、.doc、.xls 各 1。和 `data/documents/` 分開，用資料夾匯入時不會混在一起 | 否 | `scripts/fetch_documents.py --group format_check` | 可以，重新下載即可 |
+| `data/corpus/` | 指向 `data/papers/` 其中 3 篇的 symlink，是知識庫匯入論文用的資料夾（`data/documents/` 另外直接匯入） | 否 | README 第 4 節的 `ln -sf` | 可以，不影響已建好的知識庫 |
+| `rag_storage/` | **知識庫本體**：知識圖譜、向量庫、文件狀態、LLM 快取（路徑由 `.env` 的 `WORKING_DIR` 決定） | 否 | `ingest` | 刪了就要重新 `ingest`（3 篇論文約 1.7 小時，6 份文件約 0.7 小時） |
+| `rag_storage.before-formats/` | 匯入 `data/documents/` 之前的知識庫備份（只有 3 篇論文） | 否 | ticket 06 手動複製 | 可以；要回到只有論文的知識庫時，用它取代 `rag_storage/` |
+| `output/<文件>_<雜湊>/`、`output/<主檔名>.pdf` | MinerU 的解析結果：Markdown、content list、切出來的圖片；Office 文件由 LibreOffice 轉出的 PDF（路徑由 `PARSER_OUTPUT_DIR` 決定） | 否 | `ingest` | 不建議：知識庫記錄的是這裡圖片的絕對路徑，`--vlm-enhanced` 查詢要讀這些圖片 |
+| `output/` 其他子目錄 | 開發過程的量測紀錄與 log（`ticket03_run/`、`ticket05_run/`、`formats_check_run/`、`formats_main_run/`、`crash_repro/`、`backend_bench/` 等），ticket 的實測段落引用它們當證據；`crash_repro/tools/watchdog.sh` 是記憶體監控腳本 | 否 | 開發時手動產生 | 可以，但會失去原始證據 |
 | `eval_results/` | `eval` 產生的 Markdown 對照表，檔名 `eval_<時間戳記>.md` | 否 | `eval` | 可以 |
 | `.claude/` | Claude Code 的本機設定與 subagent 用的 worktree | 否 | Claude Code | 不影響專案的程式 |
 
@@ -78,6 +85,7 @@ rag_storage/   知識圖譜＋向量庫＋快取（＝知識庫本體）
 
 ```
 __main__ ──► config
+   │  ├────► formats
    │  ├────► evaluation
    │  ├────► pipeline ──► models ──► config
    │  │         ├───────► config
@@ -85,15 +93,16 @@ __main__ ──► config
    │  └────► graph_report
 ```
 
-`__main__` 只在執行對應子命令時才 import `pipeline`、`graph_report`，所以設定錯誤、題目檔格式錯誤能在載入 LightRAG／torch 之前就回報。
+`__main__` 啟動時只 import `config`、`formats`、`evaluation`；只在執行對應子命令時才 import `pipeline`、`graph_report`，所以設定錯誤、題目檔格式錯誤能在載入 LightRAG／torch 之前就回報。
 
 | 檔案 | 職責 | 主要介面 |
 |---|---|---|
 | `__init__.py` | 套件根，刻意不 import 任何子模組 | — |
 | `__main__.py` | CLI 入口：解析參數、驗證輸入、呼叫 `pipeline`／`graph_report`、格式化輸出、決定結束碼（0 成功、1 執行失敗、2 用法或輸入錯誤、3 設定錯誤） | `main(argv)`；子命令 `ingest`、`query`、`graph`、`eval` |
+| `formats.py` | 支援的格式清單（PDF、PPT、Word、Excel 與 8 種圖片副檔名），專案裡只定義這一次；CLI 的資料夾過濾與錯誤訊息都從這裡取值。只靠標準函式庫，所以輸入路徑驗證能在載入 LightRAG／torch 之前完成 | `FORMATS`、`SUPPORTED_EXTENSIONS`、`is_supported(path)`、`describe_supported()` |
 | `config.py` | 從 `.env` 與環境變數讀設定並驗證；必填欄位缺漏或格式錯就拋錯，不給預設值（只有 `EMBED_QUERY_PREFIX` 是選填，預設空字串） | `get_settings() -> Settings`、`ConfigError` |
 | `models.py` | 把三個 OpenAI 相容端點包成 RAG-Anything 需要的模型函式；失敗包成帶端點名稱與位址的錯誤；計數圖、表、公式描述的失敗（RAG-Anything 自己會吞掉） | `llm_model_func`、`vision_model_func`、`build_embedding_func()`、`check_reachable(...)`、`EndpointError` |
-| `pipeline.py` | 核心流程：建立 RAGAnything 實例、匯入（解析、建圖、多模態描述）、查詢、批次比較；把 LightRAG 會吞掉的錯誤轉成可偵測的失敗；`Session` 讓同一個 process 只初始化一次、依序呼叫 | `Session`（`ingest`、`query`、`evaluate`、`close`）、模組函式 `ingest(pdfs) -> IngestSummary`、`query(question, mode, vlm_enhanced=False) -> str`、`evaluate(questions) -> list[list[Cell]]`、`PipelineError`、`SessionError`、`SessionClosedError` |
+| `pipeline.py` | 核心流程：建立 RAGAnything 實例、匯入（解析、建圖、多模態描述）、查詢、批次比較；把 LightRAG 會吞掉的錯誤轉成可偵測的失敗；`Session` 讓同一個 process 只初始化一次、依序呼叫 | `Session`（`ingest`、`query`、`evaluate`、`close`）、模組函式 `ingest(documents) -> IngestSummary`、`query(question, mode, vlm_enhanced=False) -> str`、`evaluate(questions) -> list[list[Cell]]`、`PipelineError`、`SessionError`、`SessionClosedError` |
 | `evaluation.py` | `eval` 的題目檔讀取驗證與 Markdown 對照表排版，不需要任何模型 | `load_questions(path)`、`render_report(...)`、`RETRIEVAL_MODES`、`QuestionFileError` |
 | `graph_report.py` | 直接讀 `rag_storage/` 的 graphml，抽樣列出實體與關係，不需要模型 server | `load_graph(working_dir)`、`format_report(graph, sample_size, seed)` |
 
@@ -104,9 +113,11 @@ __main__ ──► config
 | 檔案 | 用途 | 用哪個 Python 執行 |
 |---|---|---|
 | `fetch_papers.py` | 下載 5 篇 RAG 論文到 `data/papers/`，先比對 arXiv 標題，已存在的完整檔案會略過 | 專案 venv 或系統 python3（只用標準函式庫） |
+| `fetch_documents.py` | 下載 11 份公開文件（PPT、Word、Excel、圖片）：6 份到 `data/documents/`，5 份到 `data/format_check/`；先寫 `.part`，SHA-256 相符才改名，已存在且雜湊正確的檔案會略過，可用 `--group` 只下載一組 | 專案 venv 或系統 python3（只用標準函式庫） |
 | `vlm_server.py` | 啟動 VLM＋embedding 的 `mlx_vlm.server`，先把 MLX 的 GPU cache 上限設為 1 GB，避免 ingest 時記憶體不足 | pipx 安裝的 mlx-vlm 的 python |
 | `smoke_test.py` | 確認三個端點都能用：chat、看 base64 圖片、embedding 維度 | 專案 venv |
 | `test_fetch_papers.py` | `fetch_papers.py` 的離線測試（對本機假 arXiv server） | `python -m unittest scripts.test_fetch_papers` |
+| `test_fetch_documents.py` | `fetch_documents.py` 的離線測試（對本機假 HTTP server）：雜湊核對、斷線與 HTTP 失敗、本地檔案系統錯誤、略過已存在的檔案、`--group`、清單與 spec 表格的對照 | `python -m unittest scripts/test_fetch_documents.py` |
 
 ### 3.3 `tests/`：自動測試
 
@@ -116,13 +127,14 @@ __main__ ──► config
 |---|---|
 | `__init__.py` | 測試套件的說明：測試從子行程進入、模型用假 server |
 | `fake_openai_server.py` | 假的 OpenAI 相容 server：chat、vision、embedding 都回固定且合法的內容，並記錄收到的請求 |
-| `fake_mineru.py` | 假的 `mineru` 指令：依檔名寫出固定的解析結果（文字、一張圖、一個表、一條公式）；設了 `FAKE_MINERU_VERSION_LOG` 時記錄每次 `--version`，用來計算初始化次數 |
+| `fake_mineru.py` | 假的 `mineru` 指令：依主檔名寫出固定的解析結果（PDF、圖片與假 LibreOffice 轉出的 PDF 相同）（文字、一張圖、一個表、一條公式）；設了 `FAKE_MINERU_VERSION_LOG` 時記錄每次 `--version`，用來計算初始化次數 |
+| `fake_libreoffice.py` | 假的 `libreoffice`／`soffice` 指令：收到 `--headless --convert-to pdf --outdir <dir> <檔案>` 時在 `<dir>` 寫出 `<主檔名>.pdf`；引數形式不符時以非零碼結束；主檔名以 `broken` 開頭時以非零碼結束，模擬轉檔失敗。`test_pipeline.py` 的 `PipelineCase` 以兩個名稱放在 PATH 最前面；「沒有 LibreOffice」的測試把 PATH 改成只有假 mineru 的資料夾 |
 | `test_cli.py` | 設定驗證、子命令註冊、結束碼；提供其他測試共用的 `run_cli`、`valid_env` |
 | `test_fake_server.py` | 以 `scripts/smoke_test.py` 當客戶端對假 server 執行，確認假 server 符合同一份介面（smoke test 曾對真 server 通過，所以把它當作介面的定義）；不連真 server |
-| `test_pipeline.py` | `ingest`、`query` 的完整流程（含重複匯入、失敗重試、端點不可達、查詢 token 上限）；提供共用的 `PipelineCase` |
+| `test_pipeline.py` | `ingest`、`query` 的完整流程（含各種圖片與 Office 格式、資料夾挑選與略過、不支援格式的錯誤、沒有 LibreOffice 的錯誤、轉檔失敗、重複匯入、失敗重試、端點不可達、查詢 token 上限）；提供共用的 `PipelineCase`、產生各格式小圖的 `write_image`（用 Pillow）與寫出 Office 替身檔的 `write_office`（內容是一行文字，不是真的 Office 檔：假 LibreOffice 與假 mineru 都不讀內容） |
 | `test_graph.py` | `graph` 指令的抽樣與可重現性 |
 | `test_eval.py` | `eval` 指令的題目檔驗證與結果表 |
-| `test_python_api.py` | 在同一個 process 裡依序呼叫 `rag_lab.pipeline` 的模組函式與 `Session`：連續呼叫、每次 ingest 的統計獨立、同一個 `Session` 只初始化一次並在關閉後釋放實例、誤用時的 `SessionError`、開 `Session` 失敗後不留狀態、忘了 `close()` 時的收尾 |
+| `test_python_api.py` | 在同一個 process 裡依序呼叫 `rag_lab.pipeline` 的模組函式與 `Session`：連續呼叫、每次 ingest 的統計獨立、同一個 `Session` 只初始化一次並在關閉後釋放實例、誤用時的 `SessionError`、開 `Session` 失敗後不留狀態、忘了 `close()` 時的收尾、匯入圖片與 Office 文件、不支援的格式整批被拒絕 |
 | `test_examples.py` | 實際執行 `examples/` 的範例，確認在一個 `Session` 裡連續提問能跑完 |
 
 ### 3.4 `examples/`：範例
@@ -174,7 +186,7 @@ with Session() as session:
 | 方法 | 回傳 | 失敗時 |
 |---|---|---|
 | `query(question, mode, vlm_enhanced=False)` | 答案字串 | `mode` 不是五種檢索模式之一拋 `ValueError`（LightRAG 另外接受的 `bypass` 不檢索，這裡不允許）；開始前端點不可達拋 `EndpointError`；查詢失敗（含查詢途中 LLM 失敗）或沒有答案拋 `PipelineError`；`vlm_enhanced=True` 時 VLM 呼叫失敗拋 `EndpointError` |
-| `ingest(pdfs: list[Path])` | `IngestSummary`：每篇的耗時與錯誤、圖譜統計、這一次的 VLM 與描述統計 | 單篇失敗記在該篇的 `error`、圖表公式描述失敗記在 `description_error`，都不拋例外；開始前端點不可達拋 `EndpointError` |
+| `ingest(documents: list[Path])` | `IngestSummary`：每篇的耗時與錯誤、圖譜統計、這一次的 VLM 與描述統計 | 單篇失敗記在該篇的 `error`、圖表公式描述失敗記在 `description_error`，都不拋例外；`documents` 裡有任何一份不是支援的格式（`rag_lab/formats.py`），在呼叫任何模型或解析之前拋 `PipelineError`，整批都不匯入；開始前端點不可達拋 `EndpointError` |
 | `evaluate(questions: list[Question])` | `cells[i][j]`：第 i 題在第 j 種模式的答案或錯誤 | 單格失敗記在該格的 `error`，不拋例外；開始前 LLM 或 embedding 端點不可達拋 `EndpointError` |
 | `close()` | — | 離開 `with` 時自動呼叫；重複呼叫不做事 |
 

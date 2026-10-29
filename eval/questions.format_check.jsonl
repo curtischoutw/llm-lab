@@ -1,0 +1,6 @@
+{"id": "fc-xlsx-01", "question": "Nestlé 2023 年 1–6 月 PetCare 產品類別的銷售額（Sales）是多少百萬瑞士法郎？", "reference": "9,373 百萬瑞士法郎（CHF）。2022 年同期是 8,589。", "type": "table", "source": "2023-half-year-analyses-by-segment.xlsx"}
+{"id": "fc-xlsx-02", "question": "Nestlé 2023 年 1–6 月 Zone NA 的 Underlying Trading operating profit 是多少百萬瑞士法郎？", "reference": "2,713 百萬瑞士法郎（CHF）；同期 Zone NA 的 Sales 是 12,553，Trading operating profit 是 2,632。", "type": "table", "source": "2023-half-year-analyses-by-segment.xlsx"}
+{"id": "fc-xlsx-03", "question": "在欄位為 col-1、col-2、col-3、col-4 的表格裡，col-1 是 8 的那一列，col-4 是多少？", "reference": "32（該列為 col-1=8、col-2=16、col-3=24、col-4=32）。", "type": "table", "source": "xlsx_01.xlsx"}
+{"id": "fc-xls-01", "question": "根據 Number of freshwater ducks per year 這張表，2022 年的淡水鴨（Freshwater Ducks）數量是多少？", "reference": "170。表中 2019–2024 年依序為 120、135、150、170、160、180。", "type": "table", "source": "legacy_sample.xls"}
+{"id": "fc-doc-01", "question": "在 Swimming in the lake 這份文件的食物表裡，Grain 每份的熱量（Calories per portion）是多少？包含哪些穀物？", "reference": "200；包含 Corn、Buckwheat、Barley。", "type": "table", "source": "legacy_sample.doc"}
+{"id": "fc-ppt-01", "question": "投影片 Second slide title 裡的長方形寫了什麼文字？這張投影片的清單有哪幾項？", "reference": "長方形裡的文字是「A rectangle shape with this text inside.」；清單是 With foo、Bar、And baz things。", "type": "text", "source": "legacy_sample.ppt"}

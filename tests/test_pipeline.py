@@ -1,6 +1,6 @@
 """ingest／query 的 CLI 行為測試：對假 OpenAI server 與假 mineru 跑完整流程。
 
-為什麼存在：ticket 03 的第一條完整路徑（匯入一篇 PDF、再問答）需要快速、不依賴
+為什麼存在：ticket 03 的第一條完整路徑（匯入一篇文件、再問答）需要快速、不依賴
 真實模型的回歸保護。spec 的測試縫只有 CLI，所以這裡全部從 `python -m rag_lab` 進入，
 只觀察結束碼、stdout／stderr、產生的檔案，以及假 server 在 HTTP 邊界收到的請求。
 
@@ -9,13 +9,18 @@
   彼此不汙染，也不碰 repo 內的 rag_storage／output。
 - 假 mineru 以 PATH 上的可執行檔提供（tests/fake_mineru.py），讓 RAG-Anything 走它真實的
   subprocess 路徑；PDF 內容不重要，只要檔案存在。
+- 假 LibreOffice（tests/fake_libreoffice.py）以 `libreoffice` 與 `soffice` 兩個名稱放在 PATH 最前面，
+  Office 文件的內容不重要（假 LibreOffice 與假 mineru 都不讀內容），所以 Office 測試檔寫的是文字，不是真的 Office 檔。
+- 圖片文件要用 Pillow 讀得動的真圖片：假 mineru 不讀內容，但 RAG-Anything 會先用 Pillow 把
+  非 png／jpg 的圖片轉成 png 才交給 mineru，所以 `write_image` 用 Pillow 產生各格式的小圖。
 - 「端點不可達」用一個已關閉的本機埠模擬。
 
-Dependencies: 僅標準函式庫。
+Dependencies: 標準函式庫；Pillow（RAG-Anything 的依賴，只用來產生測試用的小圖）。
 """
 
 import json
 import os
+import re
 import shutil
 import socket
 import stat
@@ -25,10 +30,30 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from PIL import Image
+
 from tests.fake_openai_server import CHAT_REPLY, VISION_REPLY, FakeOpenAIServer
 from tests.test_cli import REPO_ROOT, SECRET, run_cli, valid_env
 
 INGEST_TIMEOUT = 180
+# 支援的副檔名；刻意不從 rag_lab.formats 取值，測試的期望要有獨立的來源（spec 的「支援的格式」）
+SUPPORTED_EXTENSIONS = (
+    ".pdf",
+    ".ppt",
+    ".pptx",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".bmp",
+    ".tiff",
+    ".tif",
+    ".gif",
+    ".webp",
+)
 # 端點失敗後應在這個秒數內結束（正常約 10 秒，含 LightRAG 限流器 shutdown 最多等 5 秒）
 HANG_TIMEOUT = 60
 # .env 內以字面 \n 表示換行；CLI 讀進來後是真正的換行
@@ -51,6 +76,34 @@ def closed_port_url() -> str:
     return f"http://127.0.0.1:{port}/v1"
 
 
+def write_image(path: Path) -> Path:
+    """在 path 寫出一張 Pillow 讀得動的小圖，格式由副檔名決定。
+
+    Args:
+        path: 圖片路徑；副檔名決定格式（大小寫不分）。
+
+    Returns:
+        path 本身。
+    """
+    Image.new("RGB", (8, 8), "red").save(path)
+    return path
+
+
+def write_office(path: Path) -> Path:
+    """在 path 寫出一個 Office 文件的替身。
+
+    假 LibreOffice 與假 mineru 都不讀內容，只看副檔名與主檔名，所以內容是一行文字，不是真的 Office 檔。
+
+    Args:
+        path: 文件路徑；副檔名決定格式。
+
+    Returns:
+        path 本身。
+    """
+    path.write_text(f"fake office document: {path.name}\n", encoding="utf-8")
+    return path
+
+
 class PipelineCase(unittest.TestCase):
     """提供假 server、假 mineru、暫存資料夾與 CLI 執行輔助的測試基底。"""
 
@@ -69,10 +122,20 @@ class PipelineCase(unittest.TestCase):
         mineru.chmod(mineru.stat().st_mode | stat.S_IXUSR)
         self.bin_dir = bin_dir
 
+        # 假 LibreOffice 以兩個名稱放在另一個資料夾，PATH 最前面：RAG-Anything 先找 libreoffice 再找 soffice，
+        # 兩個名稱都放，機器上裝了真的 LibreOffice 時測試也不會用到它。「沒有 LibreOffice」的測試把 PATH 改成只有 bin_dir
+        office_bin = self.tmp / "office_bin"
+        office_bin.mkdir()
+        for name in ("libreoffice", "soffice"):
+            wrapper = office_bin / name
+            wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{REPO_ROOT}/tests/fake_libreoffice.py" "$@"\n')
+            wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+        self.office_bin = office_bin
+
         self.working_dir = self.tmp / "rag_storage"
         self.output_dir = self.tmp / "output"
-        self.pdf = self.tmp / "paper.pdf"
-        self.pdf.write_bytes(b"%PDF-1.4 fake")
+        self.document = self.tmp / "paper.pdf"
+        self.document.write_bytes(b"%PDF-1.4 fake")
 
     def env(self, **overrides: str) -> dict[str, str]:
         """組出指向假 server 與暫存資料夾的環境變數。
@@ -88,14 +151,14 @@ class PipelineCase(unittest.TestCase):
             WORKING_DIR=str(self.working_dir),
             PARSER_OUTPUT_DIR=str(self.output_dir),
             EMBED_QUERY_PREFIX=QUERY_PREFIX_ENV,
-            PATH=f"{self.bin_dir}{os.pathsep}{os.environ['PATH']}",
+            PATH=os.pathsep.join([str(self.office_bin), str(self.bin_dir), os.environ["PATH"]]),
         )
         env.update(overrides)
         return env
 
     def ingest(self, path: Path | None = None, **overrides: str):
         """執行 `ingest`。"""
-        return run_cli(["ingest", str(path or self.pdf)], self.env(**overrides), timeout=INGEST_TIMEOUT)
+        return run_cli(["ingest", str(path or self.document)], self.env(**overrides), timeout=INGEST_TIMEOUT)
 
     def query(self, question: str = "What is Fake Entity Alpha?", *extra: str, **overrides: str):
         """執行 `query`。"""
@@ -108,7 +171,7 @@ class PipelineCase(unittest.TestCase):
 
 
 class IngestTest(PipelineCase):
-    def test_ingests_one_pdf_and_reports_stage_timings(self):
+    def test_ingests_one_document_and_reports_stage_timings(self):
         result = self.ingest()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("paper.pdf", result.stdout)
@@ -142,7 +205,7 @@ class IngestTest(PipelineCase):
         self.assertIn("圖譜：實體 5，關係 7", result.stdout)
         self.assertIn("belongs_to 邊 6", result.stdout)
 
-    def test_reingesting_the_same_pdf_creates_nothing_and_calls_no_model(self):
+    def test_reingesting_the_same_document_creates_nothing_and_calls_no_model(self):
         first = self.ingest()
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         requests_after_first = len(self.server.requests)
@@ -156,7 +219,7 @@ class IngestTest(PipelineCase):
             self.assertIn("failed=0", result.stdout)
         self.assertIn("圖譜：實體 5，關係 7", second.stdout)
 
-    def test_retrying_a_failed_pdf_processes_it_without_a_dup_record(self):
+    def test_retrying_a_failed_document_processes_it_without_a_dup_record(self):
         self.server.fail_chat = True
         failed = self.ingest()
         self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
@@ -170,7 +233,7 @@ class IngestTest(PipelineCase):
         statuses = json.loads((self.working_dir / "kv_store_doc_status.json").read_text())
         self.assertEqual([doc_id for doc_id in statuses if doc_id.startswith("dup-")], [])
 
-    def test_ingests_every_pdf_in_a_folder(self):
+    def test_ingests_every_document_in_a_folder(self):
         folder = self.tmp / "papers"
         folder.mkdir()
         for name in ("a.pdf", "b.pdf"):
@@ -182,20 +245,25 @@ class IngestTest(PipelineCase):
         self.assertIn("b.pdf", result.stdout)
         self.assertIn("processed=2", result.stdout)
 
-    def test_non_pdf_files_in_a_folder_are_skipped_and_reported_without_failing(self):
+    def test_a_folder_ingests_supported_formats_in_name_order_and_reports_skipped_files_without_failing(self):
         folder = self.tmp / "papers"
         folder.mkdir()
-        (folder / "a.pdf").write_bytes(b"%PDF-1.4 a")
-        (folder / "notes.txt").write_text("not a pdf")
-        (folder / "figure.png").write_bytes(b"png")
+        (folder / "b.pdf").write_bytes(b"%PDF-1.4 b")
+        write_image(folder / "a.png")
+        (folder / "notes.txt").write_text("not supported")
+        (folder / "data.csv").write_text("x,y")
+        (folder / "sub").mkdir()
+        (folder / "sub" / "c.pdf").write_bytes(b"%PDF-1.4 c")
         result = self.ingest(folder)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        for name in ("notes.txt", "figure.png"):
-            self.assertRegex(result.stdout, rf"略過非 PDF.*{name}")
+        self.assertIn("略過不支援的格式：notes.txt", result.stdout)
+        self.assertIn("略過不支援的格式：data.csv", result.stdout)
+        self.assertNotIn("c.pdf", result.stdout)
         self.assertNotIn("notes.txt", result.stderr)
-        self.assertIn("processed=1", result.stdout)
+        self.assertIn("processed=2", result.stdout, "子資料夾裡的 c.pdf 不該被匯入（不遞迴）")
+        self.assertLess(result.stdout.index("[1/2] a.png"), result.stdout.index("[2/2] b.pdf"))
 
-    def test_each_pdf_in_a_folder_reports_its_own_total_elapsed_time(self):
+    def test_each_document_in_a_folder_reports_its_own_total_elapsed_time(self):
         folder = self.tmp / "papers"
         folder.mkdir()
         for name in ("a.pdf", "b.pdf"):
@@ -205,7 +273,43 @@ class IngestTest(PipelineCase):
         self.assertRegex(result.stdout, r"\[1/2\] a\.pdf.*耗時 \d+\.\d s")
         self.assertRegex(result.stdout, r"\[2/2\] b\.pdf.*耗時 \d+\.\d s")
 
-    def test_one_failing_pdf_is_named_others_are_kept_and_exit_code_is_nonzero(self):
+    def test_a_folder_does_not_treat_lock_files_and_hidden_files_as_documents(self):
+        # Word 開檔時產生的 ~$ 鎖定檔、macOS 在非 HFS 磁碟上寫的 ._ AppleDouble 檔、.DS_Store：
+        # 不是文件，不匯入（匯入會在轉檔或解析時失敗），也不印成「略過不支援的格式」
+        folder = self.tmp / "papers"
+        folder.mkdir()
+        (folder / "a.pdf").write_bytes(b"%PDF-1.4 a")
+        write_office(folder / "report.docx")
+        write_office(folder / "~$report.docx")
+        (folder / "._a.pdf").write_bytes(b"\x00\x05\x16\x07 appledouble")
+        (folder / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+        (folder / "notes.txt").write_text("not supported")
+        result = self.ingest(folder)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("[1/2] a.pdf", result.stdout)
+        self.assertIn("[2/2] report.docx", result.stdout)
+        self.assertIn("processed=2", result.stdout)
+        self.assertIn("略過不支援的格式：notes.txt", result.stdout, "一般的不支援檔案照舊列出")
+        for name in ("~$report.docx", "._a.pdf", ".DS_Store"):
+            self.assertNotIn(name, result.stdout)
+            self.assertNotIn(name, result.stderr)
+
+    def test_a_folder_with_only_lock_and_hidden_files_has_no_documents(self):
+        folder = self.tmp / "papers"
+        folder.mkdir()
+        write_office(folder / "~$report.docx")
+        (folder / "._a.pdf").write_bytes(b"\x00\x05\x16\x07 appledouble")
+        result = self.ingest(folder)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("資料夾內沒有支援的文件", result.stderr)
+
+    def test_a_file_given_directly_is_ingested_even_if_its_name_starts_with_a_dot(self):
+        result = self.ingest((self.tmp / "paper.pdf").rename(self.tmp / ".hidden.pdf"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("[1/1] .hidden.pdf", result.stdout)
+        self.assertIn("processed=1", result.stdout)
+
+    def test_one_failing_document_is_named_others_are_kept_and_exit_code_is_nonzero(self):
         folder = self.tmp / "papers"
         folder.mkdir()
         for name in ("a.pdf", "broken.pdf", "c.pdf"):
@@ -223,7 +327,7 @@ class IngestTest(PipelineCase):
 
     def test_document_stuck_in_handling_from_an_interrupted_run_is_reported_not_fatal(self):
         # 前一次 ingest 在多模態階段被中斷時，文件停在 RAG-Anything 的 handling 狀態；
-        # 之後 ingest 別的 PDF 不該在最後統計文件狀態時失敗
+        # 之後 ingest 別的文件不該在最後統計文件狀態時失敗
         first = self.ingest()
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         status_file = self.working_dir / "kv_store_doc_status.json"
@@ -241,7 +345,7 @@ class IngestTest(PipelineCase):
         self.assertIn("processed=1", result.stdout)
         self.assertRegex(result.stdout, r"1 篇文件停在 handling")
 
-    def test_vlm_failure_does_not_hide_the_per_pdf_report_or_other_pdfs_errors(self):
+    def test_vlm_failure_does_not_hide_the_per_document_report_or_other_documents_errors(self):
         folder = self.tmp / "papers"
         folder.mkdir()
         for name in ("a.pdf", "broken.pdf", "c.pdf"):
@@ -276,16 +380,38 @@ class IngestTest(PipelineCase):
         self.assertIn(self.server.base_url, result.stderr)
         self.assertIn("injected chat failure", result.stderr)
 
-    def test_rejects_missing_or_non_pdf_paths(self):
+    def test_rejects_a_missing_path(self):
+        result = self.ingest(self.tmp / "nope.pdf")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("輸入錯誤", result.stderr)
+        self.assertIn("路徑不存在", result.stderr)
+        self.assertEqual(self.server.requests, [])
+
+    def test_rejects_a_single_file_in_an_unsupported_format_and_lists_the_supported_formats(self):
         text_file = self.tmp / "notes.txt"
         text_file.write_text("hello")
+        result = self.ingest(text_file)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("輸入錯誤", result.stderr)
+        self.assertIn("不支援的格式：notes.txt", result.stderr)
+        for extension in SUPPORTED_EXTENSIONS:
+            self.assertIn(extension, result.stderr)
+        self.assertEqual(self.server.requests, [])
+
+    def test_rejects_a_folder_without_any_supported_document_and_lists_the_supported_formats(self):
         empty_dir = self.tmp / "empty"
         empty_dir.mkdir()
-        for path in (self.tmp / "nope.pdf", text_file, empty_dir):
-            with self.subTest(path=path.name):
-                result = self.ingest(path)
+        only_unsupported = self.tmp / "only_unsupported"
+        only_unsupported.mkdir()
+        (only_unsupported / "notes.txt").write_text("hello")
+        for folder in (empty_dir, only_unsupported):
+            with self.subTest(folder=folder.name):
+                result = self.ingest(folder)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("輸入錯誤", result.stderr)
+                self.assertIn("資料夾內沒有支援的文件", result.stderr)
+                for extension in SUPPORTED_EXTENSIONS:
+                    self.assertIn(extension, result.stderr)
                 self.assertEqual(self.server.requests, [])
 
     def test_mineru_is_called_with_the_chosen_backend(self):
@@ -313,10 +439,10 @@ class IngestTest(PipelineCase):
         # 曾因 LightRAG 的限流 worker 吞掉取消、asyncio.run 收尾時永遠等不到它結束而卡住。
         self.server.chat_delay = 0.2
         self.server.die_after_chat = 3
-        pdf = self.tmp / "multichunk.pdf"
-        pdf.write_bytes(b"%PDF-1.4 fake")
+        document = self.tmp / "multichunk.pdf"
+        document.write_bytes(b"%PDF-1.4 fake")
         try:
-            result = run_cli(["ingest", str(pdf)], self.env(LLM_MAX_ASYNC="2"), timeout=HANG_TIMEOUT)
+            result = run_cli(["ingest", str(document)], self.env(LLM_MAX_ASYNC="2"), timeout=HANG_TIMEOUT)
         except subprocess.TimeoutExpired:
             self.fail(f"LLM 端點失敗後 ingest 超過 {HANG_TIMEOUT} 秒沒有結束")
         self.assertNotEqual(result.returncode, 0)
@@ -334,6 +460,192 @@ class IngestTest(PipelineCase):
         parallel = self.ingest(EMBED_MAX_ASYNC="4")
         self.assertEqual(parallel.returncode, 0, parallel.stdout + parallel.stderr)
         self.assertGreater(self.server.max_inflight_embed, 1)
+
+
+# ==============================
+# ingest：圖片
+# ==============================
+
+
+class IngestImageTest(PipelineCase):
+    def test_ingests_a_png_and_its_parsed_content_reaches_the_answer_prompt(self):
+        image = write_image(self.tmp / "diagram.png")
+        result = self.ingest(image)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("diagram.png", result.stdout)
+        self.assertIn("processed=1", result.stdout)
+        self.assertIn("failed=0", result.stdout)
+
+        before = len(self.server.requests)
+        answer = self.query("What is Fake Entity Alpha?", "--mode", "naive")
+        self.assertEqual(answer.returncode, 0, answer.stdout + answer.stderr)
+        self.assertEqual(answer.stdout.strip(), CHAT_REPLY)
+        prompts = [str(r["payload"]["messages"]) for r in self.server.requests[before:] if r["path"] == "/v1/chat/completions"]
+        self.assertTrue(
+            any("A Study of Fake Entities in diagram" in prompt for prompt in prompts),
+            "圖片解析出的文字應該進入回答時的 context",
+        )
+
+    def test_reingesting_the_same_image_skips_it_and_calls_no_model(self):
+        # .webp 要先轉成 png：每次轉出來的暫存檔路徑不同，重複匯入仍要認得是同一張
+        for name in ("scan.png", "scan.webp"):
+            with self.subTest(name=name):
+                image = write_image(self.tmp / name)
+                first = self.ingest(image)
+                self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+                requests_after_first = len(self.server.requests)
+
+                second = self.ingest(image)
+                self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+                self.assertIn("已完整處理過，略過", second.stdout)
+                self.assertEqual(len(self.server.requests), requests_after_first, "重複匯入不該再呼叫任何模型")
+
+    def test_retrying_a_failed_image_processes_it_without_a_dup_record(self):
+        image = write_image(self.tmp / "retry.webp")
+        self.server.fail_chat = True
+        failed = self.ingest(image)
+        self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+
+        self.server.fail_chat = False
+        retried = self.ingest(image)
+        self.assertEqual(retried.returncode, 0, retried.stdout + retried.stderr)
+        self.assertIn("processed=1", retried.stdout)
+        self.assertIn("failed=0", retried.stdout)
+        statuses = json.loads((self.working_dir / "kv_store_doc_status.json").read_text())
+        self.assertEqual(len(statuses), 1)
+        self.assertEqual([doc_id for doc_id in statuses if doc_id.startswith("dup-")], [])
+
+    def test_every_other_image_format_can_be_ingested_including_those_converted_to_png(self):
+        # .jpg／.jpeg 直接交給 mineru；其餘由 RAG-Anything 先用 Pillow 轉成 png。副檔名大小寫不分
+        names = [f"pic_{ext[1:]}{ext}" for ext in (".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".gif", ".webp")]
+        names += ["UPPER.PNG", "UPPER_WEBP.WEBP"]
+        for name in names:
+            with self.subTest(name=name):
+                result = self.ingest(write_image(self.tmp / name))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f"[1/1] {name}", result.stdout)
+                self.assertIn("failed=0", result.stdout)
+                self.assertNotIn("輸入錯誤", result.stderr)
+
+
+# ==============================
+# ingest：Office 文件
+# ==============================
+
+
+class IngestOfficeTest(PipelineCase):
+    def test_ingests_a_pptx_and_its_parsed_content_reaches_the_answer_prompt(self):
+        deck = write_office(self.tmp / "slides.pptx")
+        result = self.ingest(deck)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("slides.pptx", result.stdout)
+        self.assertIn("processed=1", result.stdout)
+        self.assertIn("failed=0", result.stdout)
+
+        before = len(self.server.requests)
+        answer = self.query("What is Fake Entity Alpha?", "--mode", "naive")
+        self.assertEqual(answer.returncode, 0, answer.stdout + answer.stderr)
+        self.assertEqual(answer.stdout.strip(), CHAT_REPLY)
+        prompts = [str(r["payload"]["messages"]) for r in self.server.requests[before:] if r["path"] == "/v1/chat/completions"]
+        self.assertTrue(
+            any("A Study of Fake Entities in slides" in prompt for prompt in prompts),
+            "Office 文件轉成 PDF 再解析出的文字應該進入回答時的 context",
+        )
+
+    def test_every_office_format_can_be_ingested_and_its_extension_is_case_insensitive(self):
+        # 主檔名各不相同：同主檔名的文件共用轉檔 PDF 與解析資料夾，會被當成已處理過（README 已知限制）
+        names = ["slides_old.ppt", "slides_new.pptx", "text_old.doc", "text_new.docx", "sheet_old.xls", "sheet_new.xlsx", "UPPER.DOCX"]
+        for name in names:
+            with self.subTest(name=name):
+                requests_before = len(self.server.requests)
+                result = self.ingest(write_office(self.tmp / name))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f"[1/1] {name}", result.stdout)
+                self.assertIn("failed=0", result.stdout)
+                self.assertNotIn("輸入錯誤", result.stderr)
+                self.assertNotIn("已完整處理過，略過", result.stdout, "這份文件沒有真的走完建圖")
+                self.assertIn("建圖", result.stdout)
+                self.assertGreater(len(self.server.requests), requests_before, "這份文件沒有呼叫任何模型")
+
+    def test_report_labels_the_parse_stage_as_including_the_office_to_pdf_conversion(self):
+        result = self.ingest(write_office(self.tmp / "slides.pptx"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r"解析（含 Office 轉 PDF）：\d+\.\d s")
+        self.assertNotIn("轉檔：", result.stdout, "不另外計算轉檔時間")
+
+    def test_report_labels_the_parse_stage_without_office_wording_for_pdf_and_images(self):
+        folder = self.tmp / "no_office"
+        folder.mkdir()
+        (folder / "a.pdf").write_bytes(b"%PDF-1.4 a")
+        write_image(folder / "b.png")
+        write_office(folder / "c.docx")
+        result = self.ingest(folder)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # 每份文件的報告以「[i/n] 檔名」開頭，下一行是解析階段；只有 Office 文件的標籤提到轉 PDF
+        lines = result.stdout.splitlines()
+        labels = {}
+        for index, line in enumerate(lines):
+            match = re.match(r"\[\d+/\d+\] (.+?)：耗時", line)
+            if match:
+                labels[match.group(1)] = lines[index + 1].split("：")[0].strip()
+        self.assertEqual(labels, {"a.pdf": "解析", "b.png": "解析", "c.docx": "解析（含 Office 轉 PDF）"})
+
+    def test_without_libreoffice_the_document_fails_and_the_error_says_how_to_install_it(self):
+        # PATH 只放假 mineru：shutil.which 找不到 libreoffice 與 soffice，機器上有沒有裝真的都一樣
+        result = self.ingest(write_office(self.tmp / "slides.pptx"), PATH=str(self.bin_dir))
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stderr, r"匯入失敗：slides\.pptx：.*LibreOffice")
+        self.assertIn("brew install --cask libreoffice", result.stderr)
+        self.assertIn("slides.pptx", result.stdout)
+
+    def test_a_failed_office_conversion_is_named_and_the_other_documents_in_the_folder_are_kept(self):
+        folder = self.tmp / "mixed"
+        folder.mkdir()
+        write_office(folder / "a.docx")
+        write_office(folder / "broken.pptx")
+        (folder / "c.pdf").write_bytes(b"%PDF-1.4 c")
+        result = self.ingest(folder)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertRegex(result.stderr, r"匯入失敗：broken\.pptx：.*LibreOffice")
+        self.assertNotRegex(result.stderr, r"匯入失敗：[ac]\.")
+        self.assertIn("[2/3] broken.pptx", result.stdout)
+        self.assertIn("processed=2", result.stdout)
+        statuses = json.loads((self.working_dir / "kv_store_doc_status.json").read_text())
+        self.assertEqual(sorted(v["status"] for v in statuses.values()), ["processed", "processed"])
+
+    def test_reingesting_the_same_office_document_skips_it_and_calls_no_model(self):
+        # 轉檔輸出每次都是新的 PDF；重複匯入仍要認得是同一份文件
+        for name in ("deck.pptx", "legacy.doc"):
+            with self.subTest(name=name):
+                document = write_office(self.tmp / name)
+                first = self.ingest(document)
+                self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+                requests_after_first = len(self.server.requests)
+
+                second = self.ingest(document)
+                self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+                self.assertIn("已完整處理過，略過", second.stdout)
+                self.assertEqual(len(self.server.requests), requests_after_first, "重複匯入不該再呼叫任何模型")
+
+    def test_the_converted_pdf_is_written_to_the_parser_output_folder_not_next_to_the_source(self):
+        folder = self.tmp / "office_folder"
+        folder.mkdir()
+        write_office(folder / "deck.pptx")
+        write_office(folder / "report.docx")
+        before = sorted(path.name for path in folder.iterdir())
+        first = self.ingest(folder)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+
+        self.assertEqual(sorted(path.name for path in folder.iterdir()), before, "來源資料夾不該多出轉檔結果")
+        converted = sorted(path.name for path in self.output_dir.rglob("*.pdf"))
+        self.assertEqual(converted, ["deck.pdf", "report.pdf"], "轉出的 PDF 應該在 PARSER_OUTPUT_DIR 底下")
+
+        second = self.ingest(folder)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertIn("[1/2] deck.pptx", second.stdout)
+        self.assertIn("[2/2] report.docx", second.stdout)
+        self.assertNotIn("/3]", second.stdout, "再次匯入資料夾時，轉出的 PDF 不該被當成新文件")
+        self.assertEqual(second.stdout.count("已完整處理過，略過"), 2)
 
 
 # ==============================
@@ -452,8 +764,8 @@ class QueryBudgetTest(PipelineCase):
     def setUp(self):
         super().setUp()
         # multichunk 會切出約 20 個 chunk，naive 模式全部檢索得到，預設 30k 的上限放得下大部分
-        self.pdf = self.tmp / "multichunk.pdf"
-        self.pdf.write_bytes(b"%PDF-1.4 fake")
+        self.document = self.tmp / "multichunk.pdf"
+        self.document.write_bytes(b"%PDF-1.4 fake")
         ingested = self.ingest()
         self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
 

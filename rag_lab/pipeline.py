@@ -49,6 +49,9 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   收尾最後呼叫 finalize_share_data() 重置共用狀態，下一個 Session 初始化時會重建並綁到它自己的 loop。
   共用狀態是 process 層級，所以同一時間只允許一個開啟中的 Session（模組層級的鎖），也只能在建立它的
   執行緒、沒有執行中 event loop 的地方使用；誤用拋 SessionError（不繼承 PipelineError：誤用是程式錯誤）。
+- ingest 只接受 rag_lab.formats 列出的格式：整批先檢查，有任何一份不支援就拋 PipelineError、整批都不匯入。
+  CLI 自己的檢查只負責資料夾裡「略過」與單檔的使用錯誤（結束碼 2）；Python API 沒有 CLI 擋在前面，
+  不檢查的話 `.md`、`.mp3` 會直接進 RAG-Anything 的 parse_document，錯誤要到很深處才出現。
 - 模組函式 ingest／query／evaluate 是「開 Session、呼叫一次、關閉」，CLI 經由它們使用 Session。
   開 Session 之前先檢查端點：端點不可達時不建立 WORKING_DIR、不跑 mineru。
 - RAG-Anything 在建構時註冊 atexit(self.close)：實例會被留到 process 結束，結束時又用新的 event loop
@@ -98,6 +101,7 @@ from raganything.callbacks import ProcessingCallback
 from rag_lab import models
 from rag_lab.config import Settings, get_settings
 from rag_lab.evaluation import RETRIEVAL_MODES, Cell, Question
+from rag_lab.formats import describe_supported, is_supported
 
 # ==============================
 # 常數與例外
@@ -224,12 +228,12 @@ class StageTimer(ProcessingCallback):
 
 @dataclass
 class IngestReport:
-    """單篇 PDF 匯入結果。
+    """單篇文件匯入結果。
 
     Attributes:
-        pdf: PDF 路徑。
+        document: 文件路徑。
         skipped: True 表示已完整處理過，沒有重新匯入。
-        parse_seconds: MinerU 解析耗時（skipped 時為快取查詢時間）。
+        parse_seconds: 解析耗時，Office 文件含 LibreOffice 轉 PDF（skipped 時為快取查詢時間）。
         graph_seconds: 文字建圖耗時（含 LLM 實體抽取）。
         multimodal_seconds: 圖／表／公式描述耗時。
         multimodal_items: 處理的圖／表／公式數。
@@ -238,7 +242,7 @@ class IngestReport:
         description_failed: 這一篇的圖／表／公式描述失敗次數。
     """
 
-    pdf: Path
+    document: Path
     skipped: bool
     parse_seconds: float
     graph_seconds: float = 0.0
@@ -254,7 +258,7 @@ class IngestSummary:
     """一次 ingest 的整體結果。
 
     Attributes:
-        reports: 每篇 PDF 的報告。
+        reports: 每篇文件的報告。
         entities: 圖譜實體（節點）數。
         relations: 圖譜關係（邊）數，含 belongs_to。
         belongs_to: 其中 RAG-Anything 加的 belongs_to 邊數。
@@ -276,12 +280,12 @@ class IngestSummary:
     description_error: str | None = None
 
 
-async def _ingest_one(rag: RAGAnything, pdf: Path) -> IngestReport:
-    """匯入單篇 PDF；已完整處理就略過，先前未完成的先清掉舊紀錄再重匯。
+async def _ingest_one(rag: RAGAnything, document: Path) -> IngestReport:
+    """匯入單篇文件；已完整處理就略過，先前未完成的先清掉舊紀錄再重匯。
 
     Args:
         rag: 已初始化的 RAGAnything。
-        pdf: PDF 路徑。
+        document: 文件路徑。
 
     Returns:
         這一篇的 IngestReport（total_seconds 與 description_failed 由呼叫端填入）。
@@ -294,22 +298,22 @@ async def _ingest_one(rag: RAGAnything, pdf: Path) -> IngestReport:
     rag.callback_manager.register(timer)
     try:
         parse_kwargs = {"backend": MINERU_BACKEND}
-        content_list, doc_id = await rag.parse_document(str(pdf), **parse_kwargs)
+        content_list, doc_id = await rag.parse_document(str(document), **parse_kwargs)
         if not content_list:
-            raise PipelineError(f"MinerU 沒有從 {pdf.name} 解析出任何內容（輸出資料夾：{rag.config.parser_output_dir}）")
+            raise PipelineError(f"MinerU 沒有從 {document.name} 解析出任何內容（輸出資料夾：{rag.config.parser_output_dir}）")
         if await rag.is_document_fully_processed(doc_id):
-            return IngestReport(pdf, skipped=True, parse_seconds=timer.parse_seconds or 0.0)
+            return IngestReport(document, skipped=True, parse_seconds=timer.parse_seconds or 0.0)
         if await rag.lightrag.doc_status.get_by_id(doc_id) is not None:
             deletion = await rag.lightrag.adelete_by_doc_id(doc_id)
             if deletion.status != "success":
                 raise PipelineError(
-                    f"{pdf.name} 先前的匯入沒有完成，清除舊紀錄 {doc_id} 失敗（{deletion.status}）：{deletion.message}"
+                    f"{document.name} 先前的匯入沒有完成，清除舊紀錄 {doc_id} 失敗（{deletion.status}）：{deletion.message}"
                 )
-        await rag.process_document_complete(str(pdf), **parse_kwargs)
+        await rag.process_document_complete(str(document), **parse_kwargs)
     finally:
         rag.callback_manager.unregister(timer)
     return IngestReport(
-        pdf,
+        document,
         skipped=False,
         parse_seconds=timer.parse_seconds or 0.0,
         graph_seconds=timer.text_insert_seconds,
@@ -371,12 +375,26 @@ def _count_description_failures(rag: RAGAnything) -> None:
         processor.modal_caption_func = models.count_description_failures(processor.modal_caption_func)
 
 
-async def _ingest(rag: RAGAnything, pdfs: list[Path], settings: Settings) -> IngestSummary:
-    """在已初始化的 RAGAnything 上匯入一批 PDF 並彙整結果。
+def _require_supported(documents: list[Path]) -> None:
+    """確認整批文件的格式都支援；有任何一份不支援就拒絕整批。
+
+    Args:
+        documents: 要匯入的文件路徑。
+
+    Raises:
+        PipelineError: 有文件的格式不支援（只報第一份）；訊息格式與 CLI 的單檔錯誤相同。
+    """
+    for document in documents:
+        if not is_supported(document):
+            raise PipelineError(f"不支援的格式：{document.name}（支援的格式：{describe_supported()}）")
+
+
+async def _ingest(rag: RAGAnything, documents: list[Path], settings: Settings) -> IngestSummary:
+    """在已初始化的 RAGAnything 上匯入一批文件並彙整結果。
 
     Args:
         rag: 已完成 _initialize 的實例。
-        pdfs: 要匯入的 PDF 路徑。
+        documents: 要匯入的文件路徑。
         settings: 已驗證的設定。
 
     Returns:
@@ -388,14 +406,14 @@ async def _ingest(rag: RAGAnything, pdfs: list[Path], settings: Settings) -> Ing
     models.check_reachable("LLM", "VLM", "Embedding")
     models.reset_stats()
     summary = IngestSummary()
-    for pdf in pdfs:
+    for document in documents:
         failed_before = models.description_stats.failed
         started = time.perf_counter()
         try:
-            report = await _ingest_one(rag, pdf)
+            report = await _ingest_one(rag, document)
         except Exception as exc:
             # 單篇失敗不中斷整批：記下是哪一篇、為什麼，CLI 據此印出並以非零碼結束
-            report = IngestReport(pdf, skipped=False, parse_seconds=0.0, error=f"{type(exc).__name__}: {exc}")
+            report = IngestReport(document, skipped=False, parse_seconds=0.0, error=f"{type(exc).__name__}: {exc}")
         report.total_seconds = time.perf_counter() - started
         report.description_failed = models.description_stats.failed - failed_before
         summary.reports.append(report)
@@ -414,24 +432,25 @@ async def _ingest(rag: RAGAnything, pdfs: list[Path], settings: Settings) -> Ing
     return summary
 
 
-def ingest(pdfs: list[Path]) -> IngestSummary:
-    """匯入一批 PDF：開一個 Session、匯入一次、關閉。
+def ingest(documents: list[Path]) -> IngestSummary:
+    """匯入一批文件：開一個 Session、匯入一次、關閉。
 
     Args:
-        pdfs: 要匯入的 PDF 路徑。
+        documents: 要匯入的文件路徑。
 
     Returns:
         IngestSummary；單篇失敗與描述失敗記在裡面（reports[].error、description_error），由呼叫端決定結束碼。
 
     Raises:
-        PipelineError: 初始化失敗等整批層級的可預期失敗。
+        PipelineError: 有文件的格式不支援（整批都不匯入，且在開 Session 之前檢查），或初始化失敗等整批層級的可預期失敗。
         EndpointError: 開始前有端點不可達。
         SessionError: 已有開啟中的 Session，或在不允許的環境呼叫（見 Session）。
     """
+    _require_supported(documents)
     # Session 建構時只檢查 LLM 與 embedding；VLM 在開 Session 之前先檢查，不可達時不建立 WORKING_DIR、不跑 mineru
     models.check_reachable("VLM")
     with Session() as session:
-        return session.ingest(pdfs)
+        return session.ingest(documents)
 
 
 # ==============================
@@ -716,21 +735,23 @@ class Session:
         """
         return self._closed
 
-    def ingest(self, pdfs: list[Path]) -> IngestSummary:
-        """匯入一批 PDF（見模組函式 ingest）。
+    def ingest(self, documents: list[Path]) -> IngestSummary:
+        """匯入一批文件（見模組函式 ingest）。
 
         Args:
-            pdfs: 要匯入的 PDF 路徑。
+            documents: 要匯入的文件路徑。
 
         Returns:
             這一次匯入的 IngestSummary；VLM 與描述統計只計這一次。
 
         Raises:
+            PipelineError: 有文件的格式不支援；整批都不匯入。
             SessionError: Session 已關閉，或從不允許的執行緒／環境呼叫。
             EndpointError: 開始前有端點不可達。
         """
         self._check_usable()
-        return self._runner.run(_ingest(self._rag, pdfs, self._settings))
+        _require_supported(documents)
+        return self._runner.run(_ingest(self._rag, documents, self._settings))
 
     def query(self, question: str, mode: str, vlm_enhanced: bool = False) -> str:
         """以指定檢索模式回答問題（見模組函式 query）。

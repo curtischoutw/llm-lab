@@ -5,7 +5,7 @@
 
 關鍵設計決策：
 - 與其他測試一樣只從子行程進入（`python -m examples.<name>`），只看結束碼與 stdout，不 import 範例。
-- 先 ingest 一份假 PDF 建出索引，再跑範例；假 server 的 chat 回應固定，所以只驗證流程跑完、
+- 先 ingest 一份假文件建出索引，再跑範例；假 server 的 chat 回應固定，所以只驗證流程跑完、
   每題都有問答輸出，不驗證答案內容。
 
 Dependencies: 僅標準函式庫。

@@ -11,7 +11,7 @@ process 內呼叫好幾次。CLI 每次只呼叫一次就結束 process，碰不
   測試只看結束碼與 stdout，不在測試 process 裡 import rag_lab（避免載入 lightrag 與跨測試共用狀態）。
 - 子行程在 repo 根目錄執行、環境變數組法與 CLI 測試相同，指向假 OpenAI server 與暫存資料夾。
 
-Dependencies: 僅標準函式庫。
+Dependencies: 僅標準函式庫（圖片夾具用的 Pillow 由 tests.test_pipeline 的 write_image 提供）。
 """
 
 import json
@@ -23,11 +23,13 @@ import unittest
 
 from tests.fake_openai_server import CHAT_REPLY
 from tests.test_cli import OPTIONAL_FIELDS, REPO_ROOT, REQUIRED_FIELDS
-from tests.test_pipeline import INGEST_TIMEOUT, PipelineCase
+from tests.test_pipeline import INGEST_TIMEOUT, PipelineCase, write_image, write_office
 
 # 依 argv 的步驟依序呼叫公開函式；每一步印一行結果。
-# argv[1] 是 PDF 路徑，argv[2] 是題目檔，argv[3] 是 functions（模組函式）或 session（同一個 Session），其餘是步驟。
-# 步驟 stats:<檔名> 匯入 PDF 旁邊的另一個檔案，印出這一次的 VLM 與描述統計；
+# argv[1] 是文件路徑，argv[2] 是題目檔，argv[3] 是 functions（模組函式）或 session（同一個 Session），其餘是步驟。
+# 步驟 stats:<檔名> 匯入文件旁邊的另一個檔案，印出這一次的 VLM 與描述統計；
+# 步驟 doc:<檔名> 匯入文件旁邊的另一個檔案，每份報告印出 report.document 的檔名、略過與錯誤；
+# 步驟 reject:<檔名>,<檔名>… 一次匯入這些文件，印出拋出的例外類別與訊息（預期不支援的格式整批被拒絕）；
 # 步驟 instances 印出存活的 RAGAnything 實例數，並在最後（Session 已關閉）再印一次；
 # 步驟 second／closed／thread／loop／bad_mode 各做一種誤用並印出例外類別；orphan 讓建立 session 的執行緒
 # 沒關閉就結束，再由主執行緒關閉；init_fail 讓開 session 失敗一次；
@@ -82,23 +84,31 @@ async def construct_inside_running_loop():
 
 forgotten = []
 
-pdf = Path(sys.argv[1])
+document = Path(sys.argv[1])
 questions = Path(sys.argv[2])
 use_session = sys.argv[3] == "session"
 with pipeline.Session() if use_session else contextlib.nullcontext(pipeline) as api:
     for step in sys.argv[4:]:
         if step == "ingest":
-            summary = api.ingest([pdf])
+            summary = api.ingest([document])
             for report in summary.reports:
                 print(f"ingest skipped={report.skipped} error={report.error}")
         elif step.startswith("stats:"):
             name = step.removeprefix("stats:")
-            summary = api.ingest([pdf.parent / name])
+            summary = api.ingest([document.parent / name])
             failed = sum(report.description_failed for report in summary.reports)
             print(
                 f"stats {name} vlm_ok={summary.vlm_ok} vlm_failed={summary.vlm_failed} "
                 f"description_failed={failed} description_error={summary.description_error is not None}"
             )
+        elif step.startswith("doc:"):
+            summary = api.ingest([document.parent / step.removeprefix("doc:")])
+            for report in summary.reports:
+                print(f"doc {report.document.name} skipped={report.skipped} error={report.error}")
+        elif step.startswith("reject:"):
+            names = step.removeprefix("reject:").split(",")
+            name, message = error_name(lambda: api.ingest([document.parent / n for n in names]))
+            print(f"reject {name} {message}")
         elif step == "query":
             print(f"query {api.query('What is Fake Entity Alpha?', mode='mix')}")
         elif step == "evaluate":
@@ -167,7 +177,7 @@ class PythonApiCase(PipelineCase):
         """以子行程在同一個 process 內依序執行步驟。
 
         Args:
-            *steps: ingest、stats:<檔名>、query、evaluate、instances、second、closed、thread、loop、
+            *steps: ingest、stats:<檔名>、doc:<檔名>、reject:<檔名>,…、query、evaluate、instances、second、closed、thread、loop、
                 bad_mode、orphan、init_fail、forget 的任意序列。
             mode: functions 呼叫模組函式；session 在同一個 Session 裡呼叫。
 
@@ -187,7 +197,7 @@ class PythonApiCase(PipelineCase):
         env = {k: v for k, v in os.environ.items() if k not in REQUIRED_FIELDS + OPTIONAL_FIELDS}
         env.update(self.env(FAKE_MINERU_VERSION_LOG=str(self.version_log)))
         return subprocess.run(
-            [sys.executable, "-c", DRIVER, str(self.pdf), str(questions), mode, *steps],
+            [sys.executable, "-c", DRIVER, str(self.document), str(questions), mode, *steps],
             cwd=REPO_ROOT,
             env=env,
             capture_output=True,
@@ -224,7 +234,7 @@ class EmptyIndexTest(PythonApiCase):
             ["ingest skipped=False error=None", f"query {CHAT_REPLY}"],
         )
 
-    def test_ingesting_the_same_pdf_twice_skips_the_second_time(self):
+    def test_ingesting_the_same_document_twice_skips_the_second_time(self):
         result = self.run_api("ingest", "ingest")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(
@@ -315,6 +325,95 @@ class SessionMisuseTest(PythonApiCase):
         self.assertEqual(chats, [], "收尾時沒有寫回 LLM 快取，同一題又呼叫了 LLM")
 
 
+class IngestImageTest(PythonApiCase):
+    """Session.ingest 與模組函式 ingest 都接受圖片，報告用 document 欄位。"""
+
+    def setUp(self):
+        super().setUp()
+        write_image(self.tmp / "shot.png")
+        write_image(self.tmp / "scan.webp")
+
+    def test_module_function_ingests_images_and_reports_the_document(self):
+        result = self.run_api("doc:shot.png", "doc:scan.webp")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["doc shot.png skipped=False error=None", "doc scan.webp skipped=False error=None"],
+        )
+
+    def test_session_ingests_images_and_skips_a_repeated_one(self):
+        result = self.run_api("doc:shot.png", "doc:scan.webp", "doc:shot.png", mode="session")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "doc shot.png skipped=False error=None",
+                "doc scan.webp skipped=False error=None",
+                "doc shot.png skipped=True error=None",
+            ],
+        )
+
+
+class IngestOfficeTest(PythonApiCase):
+    """Session.ingest 與模組函式 ingest 都接受 Office 文件，轉檔失敗記在該份報告的 error。"""
+
+    def setUp(self):
+        super().setUp()
+        write_office(self.tmp / "deck.pptx")
+        write_office(self.tmp / "legacy.doc")
+        write_office(self.tmp / "broken.xlsx")
+
+    def test_module_function_ingests_office_documents_and_reports_the_document(self):
+        result = self.run_api("doc:deck.pptx", "doc:legacy.doc")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["doc deck.pptx skipped=False error=None", "doc legacy.doc skipped=False error=None"],
+        )
+
+    def test_session_ingests_office_documents_skips_a_repeated_one_and_reports_a_failed_conversion(self):
+        result = self.run_api("doc:deck.pptx", "doc:broken.xlsx", "doc:deck.pptx", "doc:legacy.doc", mode="session")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # 轉檔失敗的錯誤訊息有多行（含各平台的安裝方式），只取每份報告的第一行
+        lines = [line for line in result.stdout.splitlines() if line.startswith("doc ")]
+        self.assertEqual(len(lines), 4, result.stdout)
+        self.assertEqual(lines[0], "doc deck.pptx skipped=False error=None")
+        self.assertRegex(lines[1], r"^doc broken\.xlsx skipped=False error=RuntimeError: LibreOffice conversion failed")
+        self.assertEqual(lines[2:], ["doc deck.pptx skipped=True error=None", "doc legacy.doc skipped=False error=None"])
+
+
+class IngestUnsupportedFormatTest(PythonApiCase):
+    """Python API 和 CLI 一樣只接受支援的格式：有不支援的文件就整批拒絕，不呼叫模型、不解析。"""
+
+    def setUp(self):
+        super().setUp()
+        (self.tmp / "notes.md").write_text("# notes\n", encoding="utf-8")
+        (self.tmp / "song.mp3").write_bytes(b"ID3 fake")
+        (self.tmp / "good.pdf").write_bytes(b"%PDF-1.4 good")
+
+    def assert_rejected_before_any_work(self, result, name):
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        line = result.stdout.splitlines()[0]
+        self.assertTrue(line.startswith(f"reject PipelineError 不支援的格式：{name}（支援的格式：.pdf "), line)
+        self.assertEqual(self.server.requests, [], "不支援的格式應該在呼叫任何模型之前就被拒絕")
+        self.assertFalse(self.working_dir.exists(), "不該建立知識庫")
+        self.assertFalse(self.output_dir.exists(), "不該解析任何文件")
+
+    def test_module_function_rejects_an_unsupported_format_before_any_work(self):
+        for name in ("notes.md", "song.mp3"):
+            with self.subTest(name=name):
+                self.assert_rejected_before_any_work(self.run_api(f"reject:{name}"), name)
+
+    def test_session_rejects_the_whole_batch_when_one_document_is_unsupported(self):
+        # good.pdf 在前面：整批都不匯入，所以 good.pdf 也不該被解析，也不該建立資料
+        result = self.run_api("reject:good.pdf,notes.md", mode="session")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        line = result.stdout.splitlines()[0]
+        self.assertTrue(line.startswith("reject PipelineError 不支援的格式：notes.md（支援的格式：.pdf "), line)
+        self.assertFalse(self.output_dir.exists(), "good.pdf 不該被解析")
+        self.assertEqual(self.server.requests, [], "整批被拒絕，不該呼叫任何模型")
+
+
 class IngestStatsTest(PythonApiCase):
     """每次 ingest 的統計只算那一次，不累加前一次呼叫的數字。"""
 
@@ -338,7 +437,7 @@ class IngestStatsTest(PythonApiCase):
         self.server.fail_vision = True
         result = self.run_api("stats:a.pdf", "stats:b.pdf", mode="session")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        # 假 mineru 每份 PDF 有一張圖：VLM 失敗 1 次，圖片描述失敗 1 次
+        # 假 mineru 每份文件有一張圖：VLM 失敗 1 次，圖片描述失敗 1 次
         self.assertEqual(
             result.stdout.splitlines(),
             [

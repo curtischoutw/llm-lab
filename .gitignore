@@ -14,3 +14,4 @@ __pycache__/
 
 # subagent worktrees
 /.claude/worktrees/
+/rag_storage.before-formats/

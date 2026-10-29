@@ -12,7 +12,10 @@ rag_lab.graph_report 後格式化輸出。
   端點之前完成，錯誤能立即回報；題目檔有任何一行不合法就整批拒絕。
 - 執行期失敗（端點錯誤、MinerU 失敗、查詢失敗）在這裡統一轉成「型別：原例外文字」
   印到 stderr 並以 1 結束；這是 CLI 邊界的回報，不是吞掉錯誤。
-- ingest 資料夾時只處理 PDF（不遞迴），其他檔案在 stdout 說明「略過非 PDF」，不算錯誤；
+- ingest 資料夾時只處理支援格式的文件（見 rag_lab.formats；不遞迴），其他檔案在 stdout 說明
+  「略過不支援的格式：<檔名>」，不算錯誤；檔名以 `.` 或 `~$` 開頭的檔案（.DS_Store、macOS 的 ._ 檔、
+  Word 的鎖定檔）不算文件，不匯入也不列出；
+- 匯入報告的解析階段標籤：Office 格式（rag_lab.formats.is_office）寫「解析（含 Office 轉 PDF）」，其餘寫「解析」；
   某一篇失敗時其餘照常匯入，失敗的篇名與原因印到 stderr，整體以 1 結束。
 - eval 的結果檔寫到 --output-dir（預設 ./eval_results，已在 .gitignore），檔名含時間戳記
   （eval_YYYYMMDD-HHMMSS.md），在查詢開始前就以獨佔模式建立（撞名時加 -1、-2 序號），所以不會
@@ -33,6 +36,7 @@ from pathlib import Path
 
 from rag_lab.config import ConfigError, get_settings
 from rag_lab.evaluation import RETRIEVAL_MODES, QuestionFileError, load_questions, render_report
+from rag_lab.formats import describe_supported, is_office, is_supported
 
 # ==============================
 # 常數
@@ -42,6 +46,10 @@ QUERY_MODES = RETRIEVAL_MODES
 DEFAULT_EVAL_OUTPUT_DIR = "eval_results"
 DEFAULT_GRAPH_SAMPLE = 10
 DEFAULT_GRAPH_SEED = 0
+
+# 資料夾內檔名以這些開頭的檔案不是文件：`.` 是隱藏檔（.DS_Store、macOS 的 ._ AppleDouble 檔），
+# `~$` 是 Office 開檔時產生的鎖定檔。它們可能帶著支援的副檔名，匯入只會在轉檔或解析時失敗
+NOT_A_DOCUMENT_PREFIXES = (".", "~$")
 
 EXIT_FAILURE = 1
 EXIT_USAGE = 2
@@ -83,8 +91,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="rag_lab", description="RAG-Anything 本地實驗 CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    ingest = sub.add_parser("ingest", help="匯入單一 PDF 或整個資料夾（資料夾內非 PDF 會略過）")
-    ingest.add_argument("path", help="PDF 檔或資料夾路徑")
+    ingest = sub.add_parser("ingest", help="匯入單一文件或整個資料夾（資料夾內不支援的格式會略過）")
+    ingest.add_argument("path", help="文件或資料夾路徑")
 
     query = sub.add_parser("query", help="以指定檢索模式提問")
     query.add_argument("question", help="問題文字")
@@ -115,29 +123,33 @@ def build_parser() -> argparse.ArgumentParser:
 # ==============================
 
 
-def _collect_pdfs(raw: str) -> tuple[list[Path], list[Path]]:
-    """把 ingest 的路徑參數展開成 PDF 清單，並列出資料夾內被略過的非 PDF 檔。
+def _collect_documents(raw: str) -> tuple[list[Path], list[Path]]:
+    """把 ingest 的路徑參數展開成文件清單，並列出資料夾內被略過的不支援檔案。
 
     Args:
-        raw: 單一 PDF 檔，或含 PDF 的資料夾（不遞迴；ASSUMPTION：第一批語料是平的資料夾）。
+        raw: 單一文件，或含文件的資料夾（不遞迴；ASSUMPTION：第一批語料是平的資料夾）。資料夾內檔名以 `.` 或
+            `~$` 開頭的檔案（隱藏檔、Office 鎖定檔、AppleDouble 檔）不算文件，也不列入略過清單
+            （ASSUMPTION：這些檔案不是使用者想匯入的內容）；單一檔案直接指定時不受影響。
 
     Returns:
-        (依檔名排序的 PDF 絕對路徑, 依檔名排序的非 PDF 檔路徑)；單一檔案時後者為空。
+        (依檔名排序的文件絕對路徑, 依檔名排序的不支援檔案路徑)；單一檔案時後者為空。
 
     Raises:
-        ValueError: 路徑不存在、不是 PDF、或資料夾內沒有 PDF。
+        ValueError: 路徑不存在、單一檔案的格式不支援、或資料夾內沒有支援格式的文件。
     """
     path = Path(raw).expanduser().resolve()
     if path.is_dir():
-        files = sorted(p for p in path.iterdir() if p.is_file())
-        pdfs = [p for p in files if p.suffix.lower() == ".pdf"]
-        if not pdfs:
-            raise ValueError(f"資料夾內沒有 PDF：{path}")
-        return pdfs, [p for p in files if p not in pdfs]
+        documents: list[Path] = []
+        unsupported: list[Path] = []
+        for file in sorted(p for p in path.iterdir() if p.is_file() and not p.name.startswith(NOT_A_DOCUMENT_PREFIXES)):
+            (documents if is_supported(file) else unsupported).append(file)
+        if not documents:
+            raise ValueError(f"資料夾內沒有支援的文件：{path}（支援的格式：{describe_supported()}）")
+        return documents, unsupported
     if not path.is_file():
         raise ValueError(f"路徑不存在：{path}")
-    if path.suffix.lower() != ".pdf":
-        raise ValueError(f"不是 PDF 檔：{path}")
+    if not is_supported(path):
+        raise ValueError(f"不支援的格式：{path.name}（支援的格式：{describe_supported()}）")
     return [path], []
 
 
@@ -145,31 +157,32 @@ def _run_ingest(raw_path: str) -> int:
     """執行 ingest 並印出各階段耗時、圖譜與 VLM 統計。
 
     Args:
-        raw_path: 命令列的 PDF 檔或資料夾路徑。
+        raw_path: 命令列的文件或資料夾路徑。
 
     Returns:
         結束碼：0 成功；EXIT_USAGE 輸入路徑不合法；EXIT_FAILURE 有任何一篇匯入失敗或有描述失敗。
     """
     try:
-        pdfs, non_pdfs = _collect_pdfs(raw_path)
+        documents, unsupported = _collect_documents(raw_path)
     except ValueError as exc:
         print(f"輸入錯誤：{exc}", file=sys.stderr)
         return EXIT_USAGE
-    for other in non_pdfs:
-        print(f"略過非 PDF：{other.name}")
+    for other in unsupported:
+        print(f"略過不支援的格式：{other.name}")
 
     from rag_lab import pipeline
 
-    summary = pipeline.ingest(pdfs)
+    summary = pipeline.ingest(documents)
     for index, report in enumerate(summary.reports, start=1):
-        print(f"[{index}/{len(summary.reports)}] {report.pdf.name}：耗時 {report.total_seconds:.1f} s")
+        print(f"[{index}/{len(summary.reports)}] {report.document.name}：耗時 {report.total_seconds:.1f} s")
         if report.error:
             print("  失敗（詳見 stderr）")
             continue
         if report.skipped:
             print(f"  已完整處理過，略過（查快取 {report.parse_seconds:.1f} s）")
             continue
-        print(f"  MinerU 解析：{report.parse_seconds:.1f} s（backend={pipeline.MINERU_BACKEND}）")
+        parse_label = "解析（含 Office 轉 PDF）" if is_office(report.document) else "解析"
+        print(f"  {parse_label}：{report.parse_seconds:.1f} s（MinerU backend={pipeline.MINERU_BACKEND}）")
         print(f"  建圖（文字切塊、實體抽取、向量）：{report.graph_seconds:.1f} s")
         print(f"  多模態（圖／表／公式描述）：{report.multimodal_seconds:.1f} s，{report.multimodal_items} 項")
         if report.description_failed:
@@ -185,9 +198,9 @@ def _run_ingest(raw_path: str) -> int:
     print("文件狀態：" + "，".join(f"{status}={count}" for status, count in sorted(summary.status_counts.items())))
     stuck = summary.status_counts.get("handling", 0)
     if stuck:
-        print(f"注意：{stuck} 篇文件停在 handling（先前匯入在多模態階段被中斷）；對該 PDF 重新執行 ingest 會重試")
+        print(f"注意：{stuck} 篇文件停在 handling（先前匯入在多模態階段被中斷）；對該文件重新執行 ingest 會重試")
     for report in failures:
-        print(f"匯入失敗：{report.pdf.name}：{report.error}", file=sys.stderr)
+        print(f"匯入失敗：{report.document.name}：{report.error}", file=sys.stderr)
     if summary.description_error:
         print(summary.description_error, file=sys.stderr)
     if failures:
