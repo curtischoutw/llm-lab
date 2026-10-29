@@ -5,10 +5,10 @@
 ## 1. 整體流程
 
 ```
-data/papers/*.pdf
+data/corpus/（論文）、data/documents/（PPT、Word、圖片）
       │  python -m rag_lab ingest
       ▼
-MinerU 解析（文字、圖、表、公式） ──► output/<論文>_<雜湊>/   解析結果與切出的圖片
+MinerU 解析（文字、圖、表、公式） ──► output/<文件>_<雜湊>/   解析結果與切出的圖片
       │
       ▼
 LightRAG 建圖：LLM 抽實體與關係，embedding 建向量
@@ -41,10 +41,12 @@ rag_storage/   知識圖譜＋向量庫＋快取（＝知識庫本體）
 | `examples/` | 從 Python 呼叫 `rag_lab` 的範例 | 是 | — | 不能 |
 | `scripts/` | 維運工具：下載論文與其他格式的文件、啟動 VLM server、檢查端點 | 是 | — | 不能 |
 | `tests/` | 自動測試與測試用的假 server、假 MinerU、假 LibreOffice | 是 | — | 不能 |
-| `eval/` | `eval` 指令的題目檔（JSONL）；目前只有範例 `questions.example.jsonl` | 是 | 手寫 | 範例檔被測試引用，不能刪 |
+| `eval/` | `eval` 指令的題目檔（JSONL）：範例 `questions.example.jsonl`（論文）、`questions.formats.jsonl`（`data/documents/` 的 6 份文件，其中 2 題跨格式題同時問到論文）、`questions.format_check.jsonl`（`data/format_check/`，只用在暫時的知識庫） | 是 | 手寫 | 範例檔被測試引用，不能刪；另外兩份是 README 第 5 節實測數據的題目 |
 | `docs/` | 這份架構文件；`docs/agents/` 是給 Claude Code 技能讀的設定（issue tracker 位置、triage 標籤、domain 文件的讀法） | 是 | 手寫 | 不能 |
 | `.scratch/rag-anything-lab/` | 主程式的規格 `spec.md` 與 7 張 ticket（`issues/`）。ticket 03–07 末尾有實測結果段落，README 的數據出自這裡 | 是 | 手寫 | 不建議：設計決策與實測結果記錄在這裡 |
 | `.scratch/architecture-and-python-api/` | 這份架構文件、Python 範例、`Session` API 的規格與 5 張 ticket（01–05） | 是 | 手寫 | 不建議，理由同上 |
+| `.scratch/multi-format-documents/` | 支援 PPT、Word、Excel、圖片的規格與 6 張 ticket（01–06）；ticket 05、06 末尾有實測結果段落 | 是 | 手寫 | 不建議，理由同上 |
+| `GLOSSARY.md` | 專案用語（文件、格式、知識庫、格式驗證知識庫）的定義與要避免的說法 | 是 | 手寫 | 不建議：規格與 ticket 依這些用語撰寫 |
 | `.env.example` | 所有設定欄位與註解，預設值對應本機 MLX server | 是 | — | 不能 |
 | `requirements.txt` | 專案 venv 的相依套件：`raganything==1.4.3` 鎖定版本，`lightrag-hku<1.5` 與 `mineru[core]<4` 只限制上限，其餘由 raganything 帶入 | 是 | — | 不能 |
 | `CLAUDE.md` | 給 Claude Code 的專案說明 | 是 | — | 不能 |
@@ -53,10 +55,11 @@ rag_storage/   知識圖譜＋向量庫＋快取（＝知識庫本體）
 | `data/papers/` | 下載的 5 篇 arXiv PDF | 否 | `scripts/fetch_papers.py` | 可以，重新下載即可 |
 | `data/documents/` | 下載的 6 份主知識庫用文件：PPT 2、Word 2、圖片 2 | 否 | `scripts/fetch_documents.py` | 可以，重新下載即可 |
 | `data/format_check/` | 下載的 5 份格式驗證用文件：Excel 2，舊格式 .ppt、.doc、.xls 各 1。和 `data/documents/` 分開，用資料夾匯入時不會混在一起 | 否 | `scripts/fetch_documents.py --group format_check` | 可以，重新下載即可 |
-| `data/corpus/` | 指向 `data/papers/` 其中 3 篇的 symlink，是目前知識庫匯入的資料夾 | 否 | README 第 4 節的 `ln -sf` | 可以，不影響已建好的知識庫 |
-| `rag_storage/` | **知識庫本體**：知識圖譜、向量庫、文件狀態、LLM 快取（路徑由 `.env` 的 `WORKING_DIR` 決定） | 否 | `ingest` | 刪了就要重新 `ingest`（3 篇約 1.7 小時） |
-| `output/<論文>_<雜湊>/` | MinerU 的解析結果：Markdown、content list、切出來的圖片（路徑由 `PARSER_OUTPUT_DIR` 決定） | 否 | `ingest` | 不建議：知識庫記錄的是這裡圖片的絕對路徑，`--vlm-enhanced` 查詢要讀這些圖片 |
-| `output/` 其他子目錄 | 開發過程的量測紀錄與 log（`ticket03_run/`、`ticket05_run/`、`crash_repro/`、`backend_bench/` 等），ticket 的實測段落引用它們當證據；`crash_repro/tools/watchdog.sh` 是記憶體監控腳本 | 否 | 開發時手動產生 | 可以，但會失去原始證據 |
+| `data/corpus/` | 指向 `data/papers/` 其中 3 篇的 symlink，是知識庫匯入論文用的資料夾（`data/documents/` 另外直接匯入） | 否 | README 第 4 節的 `ln -sf` | 可以，不影響已建好的知識庫 |
+| `rag_storage/` | **知識庫本體**：知識圖譜、向量庫、文件狀態、LLM 快取（路徑由 `.env` 的 `WORKING_DIR` 決定） | 否 | `ingest` | 刪了就要重新 `ingest`（3 篇論文約 1.7 小時，6 份文件約 0.7 小時） |
+| `rag_storage.before-formats/` | 匯入 `data/documents/` 之前的知識庫備份（只有 3 篇論文） | 否 | ticket 06 手動複製 | 可以；要回到只有論文的知識庫時，用它取代 `rag_storage/` |
+| `output/<文件>_<雜湊>/`、`output/<主檔名>.pdf` | MinerU 的解析結果：Markdown、content list、切出來的圖片；Office 文件由 LibreOffice 轉出的 PDF（路徑由 `PARSER_OUTPUT_DIR` 決定） | 否 | `ingest` | 不建議：知識庫記錄的是這裡圖片的絕對路徑，`--vlm-enhanced` 查詢要讀這些圖片 |
+| `output/` 其他子目錄 | 開發過程的量測紀錄與 log（`ticket03_run/`、`ticket05_run/`、`formats_check_run/`、`formats_main_run/`、`crash_repro/`、`backend_bench/` 等），ticket 的實測段落引用它們當證據；`crash_repro/tools/watchdog.sh` 是記憶體監控腳本 | 否 | 開發時手動產生 | 可以，但會失去原始證據 |
 | `eval_results/` | `eval` 產生的 Markdown 對照表，檔名 `eval_<時間戳記>.md` | 否 | `eval` | 可以 |
 | `.claude/` | Claude Code 的本機設定與 subagent 用的 worktree | 否 | Claude Code | 不影響專案的程式 |
 
