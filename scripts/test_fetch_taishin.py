@@ -5,14 +5,18 @@ stdout／stderr、輸出資料夾的檔案、下載清單的內容、假 server 
 不 import 腳本的函式。
 
 關鍵設計決策：
-- 網址前綴（TAISHIN_WWW_BASE）、Chrome 路徑（TAISHIN_CHROME）與請求間隔
-  （TAISHIN_REQUEST_INTERVAL_SEC）都用環境變數指到假的版本。
+- 網址前綴（TAISHIN_WWW_BASE、TAISHIN_MKPCARD_BASE、TAISHIN_MKP_BASE）、Chrome 路徑（TAISHIN_CHROME）與請求間隔
+  （TAISHIN_REQUEST_INTERVAL_SEC）都用環境變數指到假的版本。www 與 mkpcard 指到同一個假 server（self.server），
+  mkp 指到另一個（self.mkp_server），所以測試能看出活動詳情頁與主視覺是向 mkp 的前綴請求，不是向 mkpcard。
 - 假 Chrome 是 tests/fake_chrome.py；測試在暫存資料夾寫一個 shell wrapper 呼叫它，
   腳本拿到的 Chrome 路徑就是這個 wrapper。
 - 假頁面依官網結構筆記的最小結構製作：主內容區含預設收合的區塊與彈窗，主內容區外有導覽選單，
   頁面裡有 script 與 style。
 - 假 server 記錄每個請求的路徑、收到的時間與 User-Agent。沒有登記的路徑交給 fallback（預設 404）；
-  文件下載頁用 fallback 模擬官網「超過最後一頁時回 200 並重複最後一頁」。
+  文件下載頁用 fallback 模擬官網「超過最後一頁時回 200 並重複最後一頁」，刷卡優惠列表用 fallback 模擬
+  「超過最後一頁時回 200、沒有活動、含查無資料」。
+- 活動詳情頁的連結有相對路徑與指向不存在網域（.invalid）的絕對網址兩種：腳本若照絕對網址發請求，
+  請求會失敗，測試就會變紅，不會對真的官網發請求。
 
 執行方式：python3 -m unittest scripts/test_fetch_taishin.py
 
@@ -22,6 +26,8 @@ Dependencies: 僅標準函式庫。
 import hashlib
 import json
 import os
+import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -30,6 +36,7 @@ import threading
 import time
 import unittest
 from collections.abc import Callable
+from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
@@ -46,6 +53,10 @@ RIGHTS_PATH_FORMAT = "/TSB/personal/credit/intro/rights/{group}/{page}/"
 DOWNLOAD_LIST_PATH = "/TSB/personal/common/download/index.html"
 DOWNLOAD_QUERY = "?nav1=credit&nav2=file-download"
 FILES_DIR = "/TSB/export/sites/TSB/files/creditcard/"
+OFFER_LIST_PREFIX = "/tscccms/promotion/offerList/"
+OFFER_CATEGORIES = "ABCDEFGHI"
+DETAIL_PREFIX = "/tscccms/promotion/detail/"
+UPLOAD_PREFIX = "/tscccms/campaignPromotions/upload/2026/"
 FAST_INTERVAL = "0.02"
 
 
@@ -175,6 +186,101 @@ def card_html_without_main_content() -> str:
     return "<html><body><div id='other'>NO-MAIN-CONTENT-HERE</div></body></html>"
 
 
+def offer_list_html(hrefs: list[str]) -> str:
+    """產生刷卡優惠列表的一頁：每筆活動一個 a.card-holder，外加不該收的干擾連結。
+
+    干擾：<script> 內的 JS 字串樣板（含 card-holder 與假連結）、頁頂輪播的絕對網址連結、分類導覽連結。
+    沒有活動時和官網一樣顯示「查無資料」。
+
+    Args:
+        hrefs: 這一頁各筆活動的詳情頁連結（相對路徑或絕對網址）。
+
+    Returns:
+        列表頁的 HTML。
+    """
+    boxes = "".join(
+        f'<div class="offer-box col-xl-4"><a class="card-holder" href="{href}" title="x"><img src="t.jpg">'
+        "<li>活動期間：2026-09-22~2026-12-31</li></a></div>"
+        for href in hrefs
+    )
+    body = boxes or '<div class="alert alert-danger"><p class="mb-0">查無資料</p></div>'
+    return (
+        "<html><body>"
+        + "".join(f'<a href="{OFFER_LIST_PREFIX}{letter}" title="x">分類 {letter}</a>' for letter in OFFER_CATEGORIES)
+        + f'<ul class="slides"><a target="_blank" href="https://mkpcard.example.invalid{CAROUSEL_ONLY}" class="btn btn-sm btn-slide">輪播</a></ul>'
+        + f'<div class="offer-container offer-list-container">{body}</div>'
+        + "<script>var tpl = '<a class=\"card-holder\" href=\"" + DETAIL_PREFIX
+        + "'+encodeHTML(proObj.promotionId)+'\" title=\"x\">';</script>"
+        "</body></html>"
+    )
+
+
+def offer_detail_html(
+    label: str, *, period: str | None = "2099-01-01~2099-12-31", banner: str | None = None
+) -> str:
+    """產生活動詳情頁：主內容區是 class 含 page-content 的 div，導覽與頁尾在主內容區外。
+
+    頁面還有兩個干擾：主內容區裡的分享圖示（不是主視覺），以及正文自由文字裡的另一種活動期間寫法（已過期）。
+
+    Args:
+        label: 放進主內容區的活動名稱，讓各頁內容不同。
+        period: <h5 class="subtitle">活動期間</h5> 後面 <p> 的文字；None 表示整個區塊不存在。
+        banner: div.banner-image 裡的圖片網址；None 表示頁面沒有這個元素。
+
+    Returns:
+        活動詳情頁的 HTML。
+    """
+    banner_block = (
+        f'<div class="page-banner page-banner-inner"><div class="page-banner-combo">'
+        f'<div class="banner-image"><img src="{banner}" class="img-fluid" alt="x"/></div></div></div>'
+        if banner is not None
+        else ""
+    )
+    period_block = f'<h5 class="subtitle">活動期間</h5>\n<p>{period}</p>' if period is not None else ""
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>{label} ： 台新銀行</title>
+<style>.site{{color:red}} SITE-STYLE-TEXT</style>
+<script>var SITE_SCRIPT_TEXT = "<div class='page-content'>";</script></head>
+<body>
+<div id="topnav"><ul><li>NAV-MENU-TEXT</li></ul></div>
+{banner_block}
+<div class="page-content extra"><div class="offer-container">
+  <div class="sharelist"><a target="_blank" id="lineShare" href=""><img src="/tscccms/img/round-default.png"></a></div>
+  <h1 class="content-title">{label}</h1>
+  <h5 class="subtitle">優惠內容</h5>
+  <p>FREE-TEXT 活動期間：2020/1/1-2020/1/31</p>
+  {period_block}
+  <div id="offer-accordion"><div class="collapse"><p>COLLAPSED-TEXT</p></div></div>
+  <script>var INNER_SCRIPT_TEXT = 1;</script>
+  <style>INNER-STYLE-TEXT</style>
+  <ul><li>未關閉項目一<li>未關閉項目二</ul>
+</div></div>
+<footer>FOOTER-TEXT</footer>
+</body></html>"""
+
+
+def detail_path(number: int) -> str:
+    """第 number 個假活動的詳情頁路徑（官網的編號是 WM_ 加 17 位數字）。"""
+    return f"{DETAIL_PREFIX}WM_2026090314180{number:04d}"
+
+
+def banner_path(number: int, extension: str = "png") -> str:
+    """第 number 個假活動的主視覺路徑（和官網一樣放在 upload/<年>/<WM 編號>/ 底下）。"""
+    return f"{UPLOAD_PREFIX}WM_2026090314180{number:04d}/WM_2026090314180{number:04d}_banner_image.{extension}"
+
+
+def period_from_today(start_offset_days: int, end_offset_days: int) -> str:
+    """產生以下載當天為基準的活動期間文字，格式和官網一樣：2026-09-22~2026-12-31。"""
+    today = date.today()
+    return f"{today + timedelta(days=start_offset_days)}~{today + timedelta(days=end_offset_days)}"
+
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake png body"
+JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"fake jpeg body"
+# 沒有被任何列表的 card-holder 列出、只出現在輪播的活動
+CAROUSEL_ONLY = detail_path(999)
+
+
 # ==============================
 # 工具：假 server、假 Chrome、執行腳本
 # ==============================
@@ -275,10 +381,26 @@ class ScriptTestCase(unittest.TestCase):
         self.server = FakeServer(self.routes)
         self.server.start()
         self.addCleanup(self.server.stop)
+        # mkp（活動詳情頁與主視覺）是另一個假 server，和 www、mkpcard 分開
+        self.mkp_routes: dict[str, tuple[int, bytes]] = {}
+        self.mkp_server = FakeServer(self.mkp_routes)
+        self.mkp_server.start()
+        self.addCleanup(self.mkp_server.stop)
+        self.list_handlers: dict[str, Callable[[str], tuple[int, bytes] | None]] = {}
+        self.server.fallback = self._answer_with_list_handlers
         # 沒有任何子頁的總覽頁與權益頁；案例需要子頁時用 serve_cards、serve_rights 覆蓋
         self.serve_cards({})
         self.serve_rights({})
         self.serve_downloads([[]])
+        self.serve_offers({})
+
+    def _answer_with_list_handlers(self, request_path: str) -> tuple[int, bytes]:
+        """依序問各個列表的處理函式，第一個認得這個路徑的回答；都不認得時回 404。"""
+        for handler in self.list_handlers.values():
+            answer = handler(request_path)
+            if answer is not None:
+                return answer
+        return 404, b"not found"
 
     def serve_cards(self, cards: dict[str, str]) -> None:
         """登記總覽頁與各卡片頁。
@@ -310,15 +432,52 @@ class ScriptTestCase(unittest.TestCase):
             for path in paths:
                 self.routes[path] = (200, pdf_bytes(path))
 
-        def page_response(request_path: str) -> tuple[int, bytes]:
+        def page_response(request_path: str) -> tuple[int, bytes] | None:
             parsed = urlparse(request_path)
             number = parse_qs(parsed.query).get("page", [""])[0]
             if parsed.path != DOWNLOAD_LIST_PATH or not number.isdigit() or int(number) < 1:
-                return 404, b"not found"
+                return None
             shown = min(int(number), len(pages))
             return 200, download_page_html(pages[shown - 1], len(pages)).encode()
 
-        self.server.fallback = page_response
+        self.list_handlers["downloads"] = page_response
+
+    def serve_offers(self, categories: dict[str, list[list[str]]]) -> None:
+        """登記刷卡優惠列表（GET ?page=N）；page 超過最後一頁時回 200、沒有活動、含查無資料，和官網一樣。
+
+        Args:
+            categories: 分類字母對各頁的活動詳情頁連結清單；沒有列出的分類沒有任何活動。
+        """
+
+        def page_response(request_path: str) -> tuple[int, bytes] | None:
+            parsed = urlparse(request_path)
+            match = re.fullmatch(re.escape(OFFER_LIST_PREFIX) + r"([A-I])", parsed.path)
+            number = parse_qs(parsed.query).get("page", [""])[0]
+            if match is None or not number.isdigit() or int(number) < 1:
+                return None
+            pages = categories.get(match.group(1), [])
+            hrefs = pages[int(number) - 1] if int(number) <= len(pages) else []
+            return 200, offer_list_html(hrefs).encode()
+
+        self.list_handlers["offers"] = page_response
+
+    def serve_images(self, images: dict[str, bytes]) -> None:
+        """在 mkp 登記各主視覺圖片。
+
+        Args:
+            images: 圖片路徑對檔案內容。
+        """
+        for path, data in images.items():
+            self.mkp_routes[path] = (200, data)
+
+    def serve_details(self, details: dict[str, str]) -> None:
+        """在 mkp 登記各活動詳情頁。
+
+        Args:
+            details: 詳情頁路徑對頁面 HTML。
+        """
+        for path, html in details.items():
+            self.mkp_routes[path] = (200, html.encode())
 
     def run_script(
         self, *, chrome: str | None = None, interval: str = FAST_INTERVAL, path: str | None = None
@@ -336,6 +495,8 @@ class ScriptTestCase(unittest.TestCase):
         env = {
             **os.environ,
             "TAISHIN_WWW_BASE": self.server.base_url,
+            "TAISHIN_MKPCARD_BASE": self.server.base_url,
+            "TAISHIN_MKP_BASE": self.mkp_server.base_url,
             "TAISHIN_CHROME": chrome if chrome is not None else str(self.chrome),
             "TAISHIN_REQUEST_INTERVAL_SEC": interval,
             "PATH": path if path is not None else f"{self.office_bin}{os.pathsep}{os.environ['PATH']}",
@@ -522,7 +683,7 @@ class CardPageTests(ScriptTestCase):
         self.serve_cards({RICHART: card_html("RICHART")})
         self.run_script()
         # 總覽頁 1 次；卡片頁 1 次（3 個錨點指向同一頁）；權益連結、申辦連結、總覽頁自己的連結都不下載；權益頁 1 次；下載頁 1 次
-        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RICHART, RIGHTS_LIST_PATH, DOWNLOAD_PAGE_1])
+        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RICHART, RIGHTS_LIST_PATH, DOWNLOAD_PAGE_1, *EMPTY_OFFER_REQUESTS])
 
 
 class RightsPageTests(ScriptTestCase):
@@ -554,7 +715,7 @@ class RightsPageTests(ScriptTestCase):
         self.serve_rights({INSURANCE: card_html("INSURANCE")})
         self.run_script()
         # 權益頁的選單連結（權益頁自己、總覽、繳費）、PDF 連結、卡片頁連結都不下載；重複的錨點只抓一次
-        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, INSURANCE, DOWNLOAD_PAGE_1])
+        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, INSURANCE, DOWNLOAD_PAGE_1, *EMPTY_OFFER_REQUESTS])
 
     def test_cards_and_rights_are_downloaded_in_one_run_into_separate_folders(self) -> None:
         self.serve_cards({RICHART: card_html("RICHART")})
@@ -647,8 +808,8 @@ class DownloadAreaTests(ScriptTestCase):
         interval = 0.3
         self.assertEqual(self.run_script(interval=str(interval)).returncode, 0)
         times = [t for _path, t, _ua in self.server.requests]
-        # 總覽頁、權益頁、下載頁 3 頁、PDF 2 份
-        self.assertEqual(len(times), 7)
+        # 總覽頁、權益頁、下載頁 3 頁、PDF 2 份、刷卡優惠列表 9 個分類各 1 頁
+        self.assertEqual(len(times), 16)
         for earlier, later in zip(times, times[1:]):
             self.assertGreaterEqual(later - earlier, interval - 0.02)
 
@@ -767,6 +928,434 @@ class DownloadAreaRerunTests(ScriptTestCase):
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual([r["result"] for r in self.manifest() if r["category"] == "下載"], ["已下載"])
+
+
+def offer_list_path(letter: str, number: int) -> str:
+    """刷卡優惠列表某分類第 number 頁的請求路徑（含 query）。"""
+    return f"{OFFER_LIST_PREFIX}{letter}?page={number}"
+
+
+# 預設的刷卡優惠列表沒有任何活動：九個分類各請求第 1 頁就停
+EMPTY_OFFER_REQUESTS = [offer_list_path(letter, 1) for letter in OFFER_CATEGORIES]
+
+
+def wm(number: int) -> str:
+    """第 number 個假活動的 WM 編號。"""
+    return detail_path(number).removeprefix(DETAIL_PREFIX)
+
+
+class OfferListTests(ScriptTestCase):
+    def test_walks_every_category_and_page_until_no_new_link_and_fetches_each_detail_page_once(self) -> None:
+        absolute = f"https://mkp.example.invalid{detail_path(5)}"
+        self.serve_offers(
+            {
+                "A": [[detail_path(1), detail_path(2)], [detail_path(3)]],
+                "B": [[detail_path(4), detail_path(1)]],
+                "I": [[absolute], [detail_path(6)]],
+            }
+        )
+        self.serve_details({detail_path(n): offer_detail_html(f"OFFER{n}") for n in range(1, 7)})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        offer_requests = [p for p in self.server.paths() if p.startswith(OFFER_LIST_PREFIX)]
+        self.assertEqual(
+            offer_requests,
+            [offer_list_path("A", n) for n in (1, 2, 3)]
+            + [offer_list_path("B", n) for n in (1, 2)]
+            + [offer_list_path(letter, 1) for letter in "CDEFGH"]
+            + [offer_list_path("I", n) for n in (1, 2, 3)],
+        )
+        # 詳情頁只向 mkp 請求，依發現順序各一次；絕對網址改用 mkp 的前綴；輪播連結與 JS 樣板的假連結不收
+        self.assertEqual(self.mkp_server.paths(), [detail_path(n) for n in (1, 2, 3, 4, 5, 6)])
+        self.assertFalse([p for p in self.server.paths() if p.startswith(DETAIL_PREFIX)])
+
+    def test_prints_each_activity_page_to_pdf_named_by_wm_number_and_keeps_raw_html(self) -> None:
+        self.serve_offers({"A": [[detail_path(1), detail_path(2)]]})
+        self.serve_details({detail_path(1): offer_detail_html("OFFER1"), detail_path(2): offer_detail_html("OFFER2")})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            self.files_under_out(),
+            [
+                f"_meta/html/offer_{wm(1)}.html",
+                f"_meta/html/offer_{wm(2)}.html",
+                "_meta/manifest.jsonl",
+                f"_meta/print/offer_{wm(1)}.html",
+                f"_meta/print/offer_{wm(2)}.html",
+                f"offers/offer_{wm(1)}.pdf",
+                f"offers/offer_{wm(2)}.pdf",
+            ],
+        )
+        self.assertTrue((self.out / "offers" / f"offer_{wm(1)}.pdf").read_bytes().startswith(b"%PDF-"))
+        self.assertEqual((self.out / "_meta" / "html" / f"offer_{wm(1)}.html").read_bytes(), self.mkp_routes[detail_path(1)][1])
+
+    def test_prints_the_activity_count_found(self) -> None:
+        self.serve_offers({"A": [[detail_path(1)]], "C": [[detail_path(2), detail_path(1)]]})
+        self.serve_details({detail_path(n): offer_detail_html(f"OFFER{n}") for n in (1, 2)})
+        result = self.run_script()
+        self.assertIn("找到 2 個活動頁", result.stdout)
+
+
+class OfferPeriodTests(ScriptTestCase):
+    def serve_one_activity(self, html: str) -> dict[str, str]:
+        """登記只有一個活動的列表與詳情頁，執行腳本，回傳該活動的清單紀錄。"""
+        self.serve_offers({"A": [[detail_path(1)]]})
+        self.serve_details({detail_path(1): html})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        records = self.manifest()
+        self.assertEqual(len(records), 1)
+        return records[0]
+
+    def test_activity_that_ended_before_today_is_skipped_and_recorded_as_expired(self) -> None:
+        period = period_from_today(-60, -1)
+        record = self.serve_one_activity(offer_detail_html("OFFER1", period=period))
+        self.assertEqual(record["result"], "過期略過")
+        self.assertEqual(record["period"], period)
+        self.assertEqual(record["category"], "活動")
+        self.assertEqual(self.files_under_out(), ["_meta/html/offer_%s.html" % wm(1), "_meta/manifest.jsonl"])
+
+    def test_activity_that_ends_today_is_downloaded(self) -> None:
+        period = period_from_today(-10, 0)
+        record = self.serve_one_activity(offer_detail_html("OFFER1", period=period))
+        self.assertEqual(record["result"], "已下載")
+        self.assertEqual(record["period"], period)
+        self.assertTrue((self.out / "offers" / f"offer_{wm(1)}.pdf").is_file())
+
+    def test_activity_without_a_period_block_is_downloaded_and_marked_unknown_ignoring_free_text(self) -> None:
+        # 頁面正文的自由文字寫著已過期的期間，不能拿來當活動期間
+        record = self.serve_one_activity(offer_detail_html("OFFER1", period=None))
+        self.assertEqual(record["result"], "已下載")
+        self.assertEqual(record["period"], "期間不明")
+        self.assertTrue((self.out / "offers" / f"offer_{wm(1)}.pdf").is_file())
+
+    def test_period_in_another_format_or_with_a_nonexistent_date_is_unknown(self) -> None:
+        for text in ("2020/09/22~2020/12/31", "2020-9-22~2020-12-31", "2020-09-22 ~ 2020-12-31", "2020-13-45~2020-12-31", ""):
+            with self.subTest(period=text):
+                self.server.requests.clear()
+                self.mkp_server.requests.clear()
+                shutil.rmtree(self.out, ignore_errors=True)
+                record = self.serve_one_activity(offer_detail_html("OFFER1", period=text))
+                self.assertEqual(record["result"], "已下載")
+                self.assertEqual(record["period"], "期間不明")
+
+    def test_expired_activity_is_not_printed_and_does_not_fail_the_run(self) -> None:
+        self.serve_offers({"A": [[detail_path(1), detail_path(2)]]})
+        self.serve_details(
+            {
+                detail_path(1): offer_detail_html("OFFER1", period=period_from_today(-60, -1)),
+                detail_path(2): offer_detail_html("OFFER2", period=period_from_today(-1, 60)),
+            }
+        )
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(sorted(p.name for p in (self.out / "offers").iterdir()), [f"offer_{wm(2)}.pdf"])
+        self.assertIn(f"過期略過 活動 offer_{wm(1)}.pdf", result.stdout)
+
+    def test_rerun_keeps_the_period_of_existing_activities_in_the_manifest(self) -> None:
+        period = period_from_today(-5, 30)
+        self.serve_one_activity(offer_detail_html("OFFER1", period=period))
+        self.mkp_server.requests.clear()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.mkp_server.paths(), [], "已存在的活動頁不該再請求")
+        record = self.manifest()[0]
+        self.assertEqual(record["result"], "已存在略過")
+        self.assertEqual(record["period"], period)
+
+
+# 每種支援的圖片副檔名對應一段合法的檔頭（RAG-Anything 支援的 8 種，見 rag_lab/formats.py）
+VALID_IMAGE_HEADERS = {
+    "png": PNG_BYTES,
+    "jpg": JPEG_BYTES,
+    "jpeg": JPEG_BYTES,
+    "gif": b"GIF89a" + b"fake gif body",
+    "bmp": b"BM" + b"fake bmp body",
+    "tiff": b"II*\x00" + b"fake tiff body",
+    "tif": b"MM\x00*" + b"fake tif body",
+    "webp": b"RIFF\x10\x00\x00\x00WEBP" + b"fake webp body",
+}
+
+
+class OfferImageTests(ScriptTestCase):
+    def serve_activities(self, banners: dict[int, str | None], *, periods: dict[int, str] | None = None) -> None:
+        """登記活動 1..N（N 是 banners 的最大編號）都在分類 A 的第 1 頁，各自的主視覺網址是 mkp 前綴加 banners[n]。
+
+        Args:
+            banners: 活動編號對主視覺路徑；None 表示該活動頁沒有 div.banner-image。
+            periods: 活動編號對活動期間；沒有列出的活動期間是 2099 年。
+        """
+        periods = periods or {}
+        self.serve_offers({"A": [[detail_path(n) for n in sorted(banners)]]})
+        self.serve_details(
+            {
+                detail_path(n): offer_detail_html(
+                    f"OFFER{n}",
+                    period=periods.get(n, "2099-01-01~2099-12-31"),
+                    banner=None if path is None else self.mkp_server.base_url + path,
+                )
+                for n, path in banners.items()
+            }
+        )
+
+    def image_requests(self) -> list[str]:
+        """mkp 收到的圖片請求路徑（依時間順序）。"""
+        return [p for p in self.mkp_server.paths() if p.startswith(UPLOAD_PREFIX)]
+
+    def test_saves_the_banner_of_the_first_8_activities_that_have_one_in_discovery_order(self) -> None:
+        # 活動 1 沒有主視覺（頁面只有分享圖示），2–10 有 9 個：只收前 8 個，也就是 2–9
+        banners = {1: None, **{n: banner_path(n) for n in range(2, 11)}}
+        self.serve_activities(banners)
+        self.serve_images({banner_path(n): PNG_BYTES + str(n).encode() for n in range(2, 11)})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.image_requests(), [banner_path(n) for n in range(2, 10)])
+        self.assertNotIn("round-default.png", " ".join(self.mkp_server.paths()))
+        saved = sorted(p.name for p in (self.out / "offer_images").iterdir())
+        self.assertEqual(saved, [f"offer_image_{wm(n)}_banner_image.png" for n in range(2, 10)])
+        self.assertEqual(
+            (self.out / "offer_images" / f"offer_image_{wm(2)}_banner_image.png").read_bytes(), PNG_BYTES + b"2"
+        )
+        self.assertEqual(len(list((self.out / "offers").iterdir())), 10, "10 個活動頁都要列印成 PDF")
+        self.assertIn("找到 8 張主視覺", result.stdout)
+
+    def test_expired_activities_do_not_take_a_banner_slot(self) -> None:
+        banners = {n: banner_path(n) for n in range(1, 11)}
+        self.serve_activities(banners, periods={1: period_from_today(-60, -1)})
+        self.serve_images({banner_path(n): PNG_BYTES for n in range(1, 11)})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.image_requests(), [banner_path(n) for n in range(2, 10)])
+
+    def test_record_for_a_saved_banner(self) -> None:
+        self.serve_activities({1: banner_path(1)})
+        self.serve_images({banner_path(1): PNG_BYTES})
+        self.assertEqual(self.run_script().returncode, 0)
+        record = next(r for r in self.manifest() if r["category"] == "活動圖片")
+        self.assertEqual(record["url"], self.mkp_server.base_url + banner_path(1))
+        self.assertEqual(record["filename"], f"offer_image_{wm(1)}_banner_image.png")
+        self.assertEqual(record["format"], "圖片")
+        self.assertEqual(record["downloaded_at"], time.strftime("%Y-%m-%d"))
+        self.assertEqual(record["sha256"], hashlib.sha256(PNG_BYTES).hexdigest())
+        self.assertEqual(record["html_sha256"], "")
+        self.assertEqual(record["period"], "")
+        self.assertEqual(record["result"], "已下載")
+
+    def test_unsupported_image_format_is_skipped_recorded_and_still_takes_a_slot(self) -> None:
+        banners = {1: banner_path(1, "svg"), **{n: banner_path(n) for n in range(2, 11)}}
+        self.serve_activities(banners)
+        self.serve_images({banner_path(1, "svg"): b"<svg/>", **{banner_path(n): PNG_BYTES for n in range(2, 11)}})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.image_requests(), [banner_path(n) for n in range(2, 9)], "svg 不請求，前 8 個有主視覺的是 1–8")
+        record = next(r for r in self.manifest() if r["filename"] == f"offer_image_{wm(1)}_banner_image.svg")
+        self.assertEqual(record["result"], "格式不支援略過")
+        self.assertIn(".svg", record["detail"])
+        self.assertEqual(len(list((self.out / "offer_images").iterdir())), 7)
+
+    def test_every_supported_extension_is_saved_when_the_header_matches_and_the_extension_is_lowercased(self) -> None:
+        # 8 種副檔名各一個活動，剛好用滿 8 個名額；jpg 在網址裡寫成大寫
+        extensions = list(VALID_IMAGE_HEADERS)
+        banners = {n: banner_path(n, "JPG" if ext == "jpg" else ext) for n, ext in enumerate(extensions, start=1)}
+        self.serve_activities(banners)
+        self.serve_images({banners[n]: VALID_IMAGE_HEADERS[ext] for n, ext in enumerate(extensions, start=1)})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        saved = sorted(p.suffix for p in (self.out / "offer_images").iterdir())
+        self.assertEqual(saved, sorted(f".{ext}" for ext in extensions))
+
+    def test_content_that_does_not_match_the_extension_is_a_failure_and_is_not_saved(self) -> None:
+        self.serve_activities({1: banner_path(1, "png"), 2: banner_path(2, "jpg"), 3: banner_path(3, "gif")})
+        self.serve_images(
+            {
+                banner_path(1, "png"): JPEG_BYTES,
+                banner_path(2, "jpg"): b"<html>error page</html>",
+                banner_path(3, "gif"): b"GIF89a ok",
+            }
+        )
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(sorted(p.name for p in (self.out / "offer_images").iterdir()), [f"offer_image_{wm(3)}_banner_image.gif"])
+        self.assertIn(f"offer_image_{wm(1)}_banner_image.png", result.stderr)
+        self.assertIn(f"offer_image_{wm(2)}_banner_image.jpg", result.stderr)
+        self.assertIn("檔頭", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_banner_outside_the_mkp_domain_is_a_failure_and_is_not_requested(self) -> None:
+        self.serve_offers({"A": [[detail_path(1)]]})
+        self.serve_details({detail_path(1): offer_detail_html("OFFER1", banner="https://img.example.invalid/b.png")})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("mkp", result.stderr)
+        self.assertEqual(self.image_requests(), [])
+        self.assertFalse((self.out / "offer_images").exists() and list((self.out / "offer_images").iterdir()))
+
+    def test_http_error_on_one_banner_does_not_stop_the_others(self) -> None:
+        self.serve_activities({1: banner_path(1), 2: banner_path(2)})
+        self.serve_images({banner_path(2): PNG_BYTES})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f"offer_image_{wm(1)}_banner_image.png", result.stderr)
+        self.assertEqual(sorted(p.name for p in (self.out / "offer_images").iterdir()), [f"offer_image_{wm(2)}_banner_image.png"])
+
+    def test_activity_that_failed_to_download_has_no_banner_and_the_next_one_takes_its_slot(self) -> None:
+        banners = {n: banner_path(n) for n in range(1, 11)}
+        self.serve_activities(banners)
+        self.serve_images({banner_path(n): PNG_BYTES for n in range(1, 11)})
+        del self.mkp_routes[detail_path(1)]
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.image_requests(), [banner_path(n) for n in range(2, 10)])
+
+    def test_rerun_skips_existing_banners_without_requesting_them(self) -> None:
+        self.serve_activities({1: banner_path(1), 2: None})
+        self.serve_images({banner_path(1): PNG_BYTES})
+        self.assertEqual(self.run_script().returncode, 0)
+        self.mkp_server.requests.clear()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.mkp_server.paths(), [])
+        record = next(r for r in self.manifest() if r["category"] == "活動圖片")
+        self.assertEqual(record["result"], "已存在略過")
+
+    def test_no_banners_when_the_offer_list_failed(self) -> None:
+        self.routes[offer_list_path("A", 1)] = (500, b"boom")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.stderr.count("ERROR 列表"), 1)
+        self.assertEqual(self.image_requests(), [])
+
+
+class OfferFailureTests(ScriptTestCase):
+    def test_list_page_failure_exits_nonzero_names_the_list_category_and_page_and_keeps_the_other_categories(self) -> None:
+        self.serve_cards({RICHART: card_html("RICHART")})
+        self.serve_offers({"A": [[detail_path(1)], [detail_path(2)]]})
+        self.routes[offer_list_path("A", 2)] = (500, b"boom")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        for text in ("刷卡優惠", "分類 A", "第 2 頁", "500"):
+            self.assertIn(text, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertTrue((self.out / "cards" / "card_cg047_card001.pdf").is_file())
+        self.assertEqual(self.mkp_server.paths(), [], "列表失敗時，這一類不下載任何活動頁")
+
+    def test_later_category_failure_also_fails_the_whole_offer_list(self) -> None:
+        self.serve_offers({"A": [[detail_path(1)]]})
+        self.routes[offer_list_path("D", 1)] = (404, b"gone")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("分類 D", result.stderr)
+
+    def test_stops_at_the_page_limit_when_a_category_keeps_having_new_activities(self) -> None:
+        def endless(request_path: str) -> tuple[int, bytes] | None:
+            parsed = urlparse(request_path)
+            if not parsed.path.startswith(OFFER_LIST_PREFIX):
+                return None
+            number = int(parse_qs(parsed.query)["page"][0])
+            return 200, offer_list_html([detail_path(number)]).encode()
+
+        self.list_handlers["offers"] = endless
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("分類 A", result.stderr)
+        self.assertIn("上限 20 頁", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        offer_requests = [p for p in self.server.paths() if p.startswith(OFFER_LIST_PREFIX)]
+        self.assertEqual(offer_requests, [offer_list_path("A", n) for n in range(1, 21)])
+
+    def test_http_error_on_one_activity_page_does_not_stop_the_others(self) -> None:
+        self.serve_offers({"A": [[detail_path(1), detail_path(2)]]})
+        self.serve_details({detail_path(2): offer_detail_html("OFFER2")})
+        self.mkp_routes[detail_path(1)] = (500, b"boom")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f"offer_{wm(1)}.pdf", result.stderr)
+        self.assertIn("500", result.stderr)
+        self.assertTrue((self.out / "offers" / f"offer_{wm(2)}.pdf").is_file())
+
+    def test_activity_page_without_a_main_content_area_is_a_failure(self) -> None:
+        self.serve_offers({"A": [[detail_path(1)]]})
+        self.serve_details({detail_path(1): card_html_without_main_content()})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("找不到主內容區", result.stderr)
+        self.assertFalse((self.out / "offers" / f"offer_{wm(1)}.pdf").exists())
+
+    def test_chrome_print_failure_fails_that_activity_only(self) -> None:
+        self.serve_offers({"A": [[detail_path(1), detail_path(2)]]})
+        self.serve_details({detail_path(1): offer_detail_html("FAKE-CHROME-FAIL"), detail_path(2): offer_detail_html("OFFER2")})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f"offer_{wm(1)}.pdf", result.stderr)
+        self.assertTrue((self.out / "offers" / f"offer_{wm(2)}.pdf").is_file())
+
+    def test_missing_chrome_fails_each_activity_and_names_the_environment_variable(self) -> None:
+        self.serve_offers({"A": [[detail_path(1)]]})
+        self.serve_details({detail_path(1): offer_detail_html("OFFER1")})
+        result = self.run_script(chrome=str(self.tmp / "no-such-chrome"))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("TAISHIN_CHROME", result.stderr)
+
+
+class OfferRequestPolicyTests(ScriptTestCase):
+    def test_requests_to_all_three_domains_carry_the_user_agent_and_are_spaced_by_the_interval(self) -> None:
+        self.serve_offers({"A": [[detail_path(1)]]})
+        self.serve_details({detail_path(1): offer_detail_html("OFFER1", banner=self.mkp_server.base_url + banner_path(1))})
+        self.serve_images({banner_path(1): PNG_BYTES})
+        interval = 0.3
+        self.assertEqual(self.run_script(interval=str(interval)).returncode, 0)
+        requests = sorted(self.server.requests + self.mkp_server.requests, key=lambda r: r[1])
+        self.assertEqual(len(self.mkp_server.requests), 2, "詳情頁與主視覺各 1 個")
+        for _path, _time, user_agent in requests:
+            self.assertTrue(user_agent.startswith("llm-lab-fetch-taishin/"), user_agent)
+        for earlier, later in zip(requests, requests[1:]):
+            self.assertGreaterEqual(later[1] - earlier[1], interval - 0.02)
+
+
+class OfferChromeInputTests(ScriptTestCase):
+    """交給 Chrome 的活動頁 HTML：只含 class 含 page-content 的主內容區。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.serve_offers({"A": [[detail_path(1)]]})
+        self.serve_details({detail_path(1): offer_detail_html("OFFER1", banner=self.mkp_server.base_url + banner_path(1))})
+        self.serve_images({banner_path(1): PNG_BYTES})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.received = (self.out / "offers" / f"offer_{wm(1)}.pdf").read_text(encoding="utf-8", errors="replace")
+
+    def test_contains_main_content_including_collapsed_blocks(self) -> None:
+        for text in ("OFFER1", "COLLAPSED-TEXT", "未關閉項目二"):
+            self.assertIn(text, self.received)
+
+    def test_excludes_site_scripts_styles_and_content_outside_the_main_area(self) -> None:
+        for text in ("SITE_SCRIPT_TEXT", "SITE-STYLE-TEXT", "INNER_SCRIPT_TEXT", "INNER-STYLE-TEXT", "NAV-MENU-TEXT", "FOOTER-TEXT", "banner-image"):
+            self.assertNotIn(text, self.received)
+
+    def test_has_base_href_pointing_to_the_original_url(self) -> None:
+        self.assertIn(f'<base href="{self.mkp_server.base_url}{detail_path(1)}">', self.received)
+
+
+class OfferManifestTests(ScriptTestCase):
+    def test_record_has_the_same_fields_as_other_categories_and_the_period(self) -> None:
+        self.serve_cards({RICHART: card_html("RICHART")})
+        self.serve_offers({"A": [[detail_path(1)]]})
+        period = period_from_today(-5, 30)
+        self.serve_details({detail_path(1): offer_detail_html("OFFER1", period=period)})
+        self.assertEqual(self.run_script().returncode, 0)
+        records = {r["filename"]: r for r in self.manifest()}
+        record = records[f"offer_{wm(1)}.pdf"]
+        pdf = (self.out / "offers" / f"offer_{wm(1)}.pdf").read_bytes()
+        self.assertEqual(record["url"], self.mkp_server.base_url + detail_path(1))
+        self.assertEqual(record["category"], "活動")
+        self.assertEqual(record["format"], "PDF")
+        self.assertEqual(record["downloaded_at"], time.strftime("%Y-%m-%d"))
+        self.assertEqual(record["sha256"], hashlib.sha256(pdf).hexdigest())
+        self.assertEqual(record["html_sha256"], hashlib.sha256(self.mkp_routes[detail_path(1)][1]).hexdigest())
+        self.assertEqual(record["result"], "已下載")
+        self.assertEqual(record["period"], period)
+        self.assertEqual(set(record), set(records["card_cg047_card001.pdf"]))
+        self.assertEqual(records["card_cg047_card001.pdf"]["period"], "")
 
 
 class ChromeInputTests(ScriptTestCase):
@@ -894,7 +1483,7 @@ class OverviewTests(ScriptTestCase):
         self.serve_rights({INSURANCE: card_html("INSURANCE")})
         result = self.run_script()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, INSURANCE, DOWNLOAD_PAGE_1])
+        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, INSURANCE, DOWNLOAD_PAGE_1, *EMPTY_OFFER_REQUESTS])
         self.assertTrue((self.out / "rights" / "rights_insurance_right0201.docx").is_file())
 
     def test_rights_list_failure_exits_nonzero_names_the_list_and_keeps_the_cards(self) -> None:
@@ -1058,7 +1647,7 @@ class RerunTests(ScriptTestCase):
 
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, DOWNLOAD_PAGE_1], "第二次只該請求列表頁")
+        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, DOWNLOAD_PAGE_1, *EMPTY_OFFER_REQUESTS], "第二次只該請求列表頁")
         self.assertEqual(pdf.read_bytes(), before)
         second = {r["filename"]: r for r in self.manifest()}
         self.assertEqual(sorted(second), sorted(first))
@@ -1079,7 +1668,7 @@ class RerunTests(ScriptTestCase):
         empty.mkdir()
         result = self.run_script(path=str(empty))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, DOWNLOAD_PAGE_1])
+        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, DOWNLOAD_PAGE_1, *EMPTY_OFFER_REQUESTS])
         self.assertEqual(docx.read_bytes(), before)
         second = self.manifest()[0]
         self.assertEqual(second["result"], "已存在略過")
@@ -1100,7 +1689,8 @@ class RequestPolicyTests(ScriptTestCase):
     def test_every_request_carries_an_identifiable_user_agent(self) -> None:
         self.serve_cards({RICHART: card_html("RICHART")})
         self.run_script()
-        self.assertEqual(len(self.server.requests), 4)
+        # 總覽頁、卡片頁、權益頁、下載頁各 1 個，加刷卡優惠列表 9 個分類各 1 頁
+        self.assertEqual(len(self.server.requests), 13)
         for _path, _time, user_agent in self.server.requests:
             self.assertTrue(user_agent.startswith("llm-lab-fetch-taishin/"), user_agent)
 
@@ -1111,7 +1701,7 @@ class RequestPolicyTests(ScriptTestCase):
         interval = 0.3
         self.assertEqual(self.run_script(interval=str(interval)).returncode, 0)
         times = [t for _path, t, _ua in self.server.requests]
-        self.assertEqual(len(times), 6)
+        self.assertEqual(len(times), 15)
         for earlier, later in zip(times, times[1:]):
             self.assertGreaterEqual(later - earlier, interval - 0.02)
 
