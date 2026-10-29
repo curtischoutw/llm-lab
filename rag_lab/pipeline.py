@@ -49,6 +49,9 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   收尾最後呼叫 finalize_share_data() 重置共用狀態，下一個 Session 初始化時會重建並綁到它自己的 loop。
   共用狀態是 process 層級，所以同一時間只允許一個開啟中的 Session（模組層級的鎖），也只能在建立它的
   執行緒、沒有執行中 event loop 的地方使用；誤用拋 SessionError（不繼承 PipelineError：誤用是程式錯誤）。
+- ingest 只接受 rag_lab.formats 列出的格式：整批先檢查，有任何一份不支援就拋 PipelineError、整批都不匯入。
+  CLI 自己的檢查只負責資料夾裡「略過」與單檔的使用錯誤（結束碼 2）；Python API 沒有 CLI 擋在前面，
+  不檢查的話 `.md`、`.mp3` 會直接進 RAG-Anything 的 parse_document，錯誤要到很深處才出現。
 - 模組函式 ingest／query／evaluate 是「開 Session、呼叫一次、關閉」，CLI 經由它們使用 Session。
   開 Session 之前先檢查端點：端點不可達時不建立 WORKING_DIR、不跑 mineru。
 - RAG-Anything 在建構時註冊 atexit(self.close)：實例會被留到 process 結束，結束時又用新的 event loop
@@ -98,6 +101,7 @@ from raganything.callbacks import ProcessingCallback
 from rag_lab import models
 from rag_lab.config import Settings, get_settings
 from rag_lab.evaluation import RETRIEVAL_MODES, Cell, Question
+from rag_lab.formats import describe_supported, is_supported
 
 # ==============================
 # 常數與例外
@@ -371,6 +375,20 @@ def _count_description_failures(rag: RAGAnything) -> None:
         processor.modal_caption_func = models.count_description_failures(processor.modal_caption_func)
 
 
+def _require_supported(documents: list[Path]) -> None:
+    """確認整批文件的格式都支援；有任何一份不支援就拒絕整批。
+
+    Args:
+        documents: 要匯入的文件路徑。
+
+    Raises:
+        PipelineError: 有文件的格式不支援（只報第一份）；訊息格式與 CLI 的單檔錯誤相同。
+    """
+    for document in documents:
+        if not is_supported(document):
+            raise PipelineError(f"不支援的格式：{document.name}（支援的格式：{describe_supported()}）")
+
+
 async def _ingest(rag: RAGAnything, documents: list[Path], settings: Settings) -> IngestSummary:
     """在已初始化的 RAGAnything 上匯入一批文件並彙整結果。
 
@@ -424,10 +442,11 @@ def ingest(documents: list[Path]) -> IngestSummary:
         IngestSummary；單篇失敗與描述失敗記在裡面（reports[].error、description_error），由呼叫端決定結束碼。
 
     Raises:
-        PipelineError: 初始化失敗等整批層級的可預期失敗。
+        PipelineError: 有文件的格式不支援（整批都不匯入，且在開 Session 之前檢查），或初始化失敗等整批層級的可預期失敗。
         EndpointError: 開始前有端點不可達。
         SessionError: 已有開啟中的 Session，或在不允許的環境呼叫（見 Session）。
     """
+    _require_supported(documents)
     # Session 建構時只檢查 LLM 與 embedding；VLM 在開 Session 之前先檢查，不可達時不建立 WORKING_DIR、不跑 mineru
     models.check_reachable("VLM")
     with Session() as session:
@@ -726,10 +745,12 @@ class Session:
             這一次匯入的 IngestSummary；VLM 與描述統計只計這一次。
 
         Raises:
+            PipelineError: 有文件的格式不支援；整批都不匯入。
             SessionError: Session 已關閉，或從不允許的執行緒／環境呼叫。
             EndpointError: 開始前有端點不可達。
         """
         self._check_usable()
+        _require_supported(documents)
         return self._runner.run(_ingest(self._rag, documents, self._settings))
 
     def query(self, question: str, mode: str, vlm_enhanced: bool = False) -> str:

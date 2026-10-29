@@ -12,9 +12,9 @@
   documents 組 6 份放進 data/documents/（主知識庫），format_check 組 5 份放進 data/format_check/。
   檔名是本地存檔名，與 URL 結尾不一定相同（來源的 image-1.png 沒有辨識度，所以改名）。
 - 先驗證參數（--group 的值、--out 不是一般檔案），再發任何網路請求。
-- 下載先寫 .part，SHA-256 相符才改名；不符時刪除 .part，不留正式檔案。
+- 下載後先在記憶體核對 SHA-256，相符才寫 .part 再改名；不符時還沒寫任何檔案。
 - 檔案已存在且雜湊正確就略過；已存在但雜湊不符時中止並指出檔名，不覆蓋。
-- 任何失敗（網路、HTTP、雜湊、既有檔案不符）都以非零碼結束並指出是哪一份，不略過後繼續。
+- 任何失敗（網路、HTTP、雜湊、既有檔案不符、本地檔案系統錯誤）都以非零碼結束並指出是哪一份，不略過後繼續。
 - 網路失敗包含連線重設與讀 body 到一半斷線（http.client.IncompleteRead 不是 OSError，要一併攔）。
 - 環境變數 FETCH_DOCUMENTS_BASE 取代清單 URL 的 https://raw.githubusercontent.com 前綴，
   只給測試指向本機假 server 用。
@@ -192,14 +192,14 @@ def check_existing(doc: Document, dest: Path) -> bool:
 
 
 def download(doc: Document, dest: Path) -> int:
-    """下載 doc 到 dest：先寫 .part，核對 SHA-256 相符後才改名。
+    """下載 doc 到 dest：先在記憶體核對 SHA-256，相符才寫 .part 再改名。
 
     Args:
         doc: 清單的一筆文件。
         dest: 最終檔案路徑。
 
     Returns:
-        寫入的位元組數。網路失敗或雜湊不符時拋出 FetchError，且不留下 dest 與 .part。
+        寫入的位元組數。網路失敗或雜湊不符時拋出 FetchError，此時還沒寫任何檔案，不留下 dest 與 .part。
     """
     url = URL_BASE + doc.url.removeprefix(URL_PREFIX)
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
@@ -208,12 +208,11 @@ def download(doc: Document, dest: Path) -> int:
             body = resp.read()
     except NETWORK_ERRORS as exc:
         raise FetchError(f"{doc.name}: 下載失敗（{type(exc).__name__}: {exc}）") from exc
-    part = dest.with_name(dest.name + ".part")
-    part.write_bytes(body)
     actual = hashlib.sha256(body).hexdigest()
     if actual != doc.sha256:
-        part.unlink()
         raise FetchError(f"{doc.name}: SHA-256 不符，來源內容與清單不同\n  預期: {doc.sha256}\n  實際: {actual}")
+    part = dest.with_name(dest.name + ".part")
+    part.write_bytes(body)
     part.replace(dest)
     return len(body)
 
@@ -255,11 +254,15 @@ def main(argv: list[str]) -> int:
             if args.group is not None and doc.folder != args.group:
                 continue
             dest = args.out / doc.folder / doc.name
-            if check_existing(doc, dest):
-                status, size = "exists", dest.stat().st_size
-            else:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                status, size = "downloaded", download(doc, dest)
+            try:
+                if check_existing(doc, dest):
+                    status, size = "exists", dest.stat().st_size
+                else:
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    status, size = "downloaded", download(doc, dest)
+            except OSError as exc:
+                # 網路錯誤已在 download 轉成 FetchError；這裡只會是本地檔案系統（建資料夾、讀寫、改名）的錯誤
+                raise FetchError(f"{doc.name}: 檔案系統錯誤（{type(exc).__name__}: {exc}）") from exc
             print(f"{status:10s} {doc.folder}/{doc.name}  {size} bytes")
     except FetchError as exc:
         print(f"ERROR {exc}", file=sys.stderr)
