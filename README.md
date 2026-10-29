@@ -4,7 +4,7 @@
 
 三個模型（LLM、VLM、embedding）都經由 OpenAI 相容的 HTTP 端點呼叫，端點與模型名稱全部寫在 `.env`。本機用 MLX server 提供；換機器或換模型時只改 `.env`。
 
-規格與實測紀錄在 `.scratch/rag-anything-lab/`（`spec.md` 與 `issues/`）。每個目錄與程式的用途見 [`docs/architecture.md`](docs/architecture.md)。
+目前的知識庫內容是台新銀行信用卡的權益與規則，正在建立中，規格與 ticket 在 `.scratch/taishin-credit-card-kb/`。前一版知識庫（RAG 論文與文件）的規格與實測紀錄在 `.scratch/rag-anything-lab/` 與 `.scratch/multi-format-documents/`。每個目錄與程式的用途見 [`docs/architecture.md`](docs/architecture.md)。
 
 ## 1. 建立環境
 
@@ -42,6 +42,8 @@ cp .env.example .env
 `.env.example` 的預設值對應下一節的本機 server，每個欄位的用途寫在檔案註解裡。`.env` 不進版本控管。
 
 ## 2. 下載論文
+
+這一節的兩支腳本下載的是前一版知識庫的資料（RAG 論文與文件）。這些資料與前一版知識庫已在 2026-10-30 刪除，需要時可以用腳本重新下載。
 
 ```sh
 .venv/bin/python scripts/fetch_papers.py
@@ -135,7 +137,7 @@ VLM 與 embedding（同一個 server，port 8081）：
 .venv/bin/python -m rag_lab ingest data/papers/2410.05779.pdf
 ```
 
-匯入整個資料夾（逐份處理；已完整匯入的文件會略過）。目前的知識庫是下面這 3 篇論文，加上 `data/documents/` 的 6 份文件。論文資料夾裡放的是指向 `data/papers/` 的 symlink：RAG-Anything 的文件 ID 是解析內容（文字、表格、公式與圖片路徑）的雜湊，而圖片所在的解析輸出資料夾名稱取自 symlink 解析後的原檔路徑，所以同一篇論文不會因為放在不同資料夾而被當成新文件。
+匯入整個資料夾（逐份處理；已完整匯入的文件會略過）。目前的知識庫是台新銀行信用卡，內容在建立中。下面是重建前一版知識庫（3 篇論文加 `data/documents/` 的 6 份文件）的指令。論文資料夾裡放的是指向 `data/papers/` 的 symlink：RAG-Anything 的文件 ID 是解析內容（文字、表格、公式與圖片路徑）的雜湊，而圖片所在的解析輸出資料夾名稱取自 symlink 解析後的原檔路徑，所以同一篇論文不會因為放在不同資料夾而被當成新文件。
 
 ```sh
 mkdir -p data/corpus
@@ -144,7 +146,7 @@ ln -sf ../papers/2410.05779.pdf ../papers/2404.16130.pdf ../papers/2510.12323.pd
 .venv/bin/python -m rag_lab ingest data/documents
 ```
 
-另外 2 篇（2005.11401 RAG、2310.11511 Self-RAG）已下載但沒有匯入；每篇匯入耗時可參考第 5 節。`data/format_check/` 的 5 份文件只在暫時的知識庫驗證過，沒有匯入主知識庫。
+前一版知識庫沒有匯入另外 2 篇論文（2005.11401 RAG、2310.11511 Self-RAG），每篇匯入耗時可參考第 5 節。`data/format_check/` 的 5 份文件只在暫時的知識庫驗證過，沒有匯入主知識庫。
 
 提問，預設 mix 模式；`--mode` 可選 naive、local、global、hybrid、mix；`--vlm-enhanced` 讓 VLM 看檢索到的圖片後產生答案（預設關閉）：
 
@@ -177,6 +179,8 @@ with Session() as session:
 只問一題也可以直接呼叫 `rag_lab.pipeline.query(question, mode="mix")`，它等於開一個 `Session`、問一題、關閉。完整範例在 `examples/query_from_python.py`，在 repo 根目錄用 `.venv/bin/python -m examples.query_from_python` 執行；`Session` 的規則與 `ingest`、`evaluate` 的說明見 `docs/architecture.md` 第 4 節。
 
 ## 5. 實測數據
+
+本節都是前一版知識庫的量測（RAG 論文與文件，2026-10-30 刪除）。記憶體與耗時仍可作為參考；台新信用卡知識庫的量測會在建立後補上。
 
 模型組合：LLM `Qwen3-4B-Instruct-2507-4bit`、VLM `Qwen3-VL-4B-Instruct-4bit`、embedding `Qwen3-Embedding-0.6B-8bit`；MinerU backend `pipeline`；`LLM_MAX_ASYNC=1`、`EMBED_MAX_ASYNC=1`、`QUERY_MAX_TOTAL_TOKENS=12000`；M2 Pro 32 GB。2410.05779 是 2026-10-26 單篇匯入時量測，另外兩篇是 2026-10-27 以資料夾匯入時量測（紀錄在 `.scratch/rag-anything-lab/issues/03-*.md` 與 `05-*.md`）。
 
