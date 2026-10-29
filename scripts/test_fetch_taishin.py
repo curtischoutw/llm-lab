@@ -34,9 +34,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "fetch_taishin.py"
 FAKE_CHROME = REPO_ROOT / "tests" / "fake_chrome.py"
+FAKE_LIBREOFFICE = REPO_ROOT / "tests" / "fake_libreoffice.py"
 
 OVERVIEW_PATH = "/TSB/personal/credit/intro/overview/"
 CARD_PATH_FORMAT = "/TSB/personal/credit/intro/overview/{cg}/{card}/"
+RIGHTS_LIST_PATH = "/TSB/personal/credit/intro/rights/"
+RIGHTS_PATH_FORMAT = "/TSB/personal/credit/intro/rights/{group}/{page}/"
 FAST_INTERVAL = "0.02"
 
 
@@ -67,6 +70,31 @@ def overview_html(card_paths: list[str]) -> str:
         '<a href="/TSB/personal/credit/intro/overview/">信用卡總覽</a>'
         '<a href="/TSB/personal/credit/intro/rights/oversea/right0101/">權益</a>'
         f'<ul class="ul-items">{items}</ul>'
+        "</body></html>"
+    )
+
+
+def rights_list_html(sub_paths: list[str]) -> str:
+    """產生權益頁：子頁連結在單引號屬性的 ul 裡，外加選單連結、PDF 連結與重複的錨點等干擾。
+
+    Args:
+        sub_paths: 權益子頁的路徑清單。
+
+    Returns:
+        權益頁的 HTML。
+    """
+    items = "".join(
+        f"<li class='ts-comp-19-items-ul-li '><a href=\"{path}\" alt=\"x\"  target='_self'>子頁 {path}</a></li>"
+        for path in sub_paths
+    )
+    return (
+        "<html><body>"
+        '<div id="topnav"><a href="/TSB/personal/credit/intro/rights/">信用卡權益</a>'
+        '<a href="/TSB/personal/credit/intro/overview/">信用卡總覽</a>'
+        '<a href="/TSB/personal/credit/intro/payment/">繳費</a></div>'
+        f"<ul class='ts-comp-19-items-ul'>{items}{items[:items.find('</li>') + 5]}</ul>"
+        '<a href="/TSB/export/sites/TSB/files/creditcard/x.pdf">PDF</a>'
+        '<a href="/TSB/personal/credit/intro/overview/cg047/card001/">卡片</a>'
         "</body></html>"
     )
 
@@ -169,6 +197,24 @@ def write_chrome_wrapper(directory: Path) -> Path:
     return wrapper
 
 
+def write_office_wrappers(directory: Path, names: tuple[str, ...] = ("libreoffice", "soffice")) -> Path:
+    """在 directory 寫 shell wrapper（每個名稱一個），轉呼叫 tests/fake_libreoffice.py。
+
+    Args:
+        directory: 放 wrapper 的資料夾（會建立）。
+        names: wrapper 的檔名。
+
+    Returns:
+        directory。
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        wrapper = directory / name
+        wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_LIBREOFFICE}" "$@"\n')
+        wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+    return directory
+
+
 class ScriptTestCase(unittest.TestCase):
     """每個案例有假 server（routes 由案例設定）、假 Chrome wrapper 與暫存的輸出資料夾 self.out。"""
 
@@ -178,10 +224,14 @@ class ScriptTestCase(unittest.TestCase):
         self.tmp = Path(self._tmp.name)
         self.out = self.tmp / "taishin"
         self.chrome = write_chrome_wrapper(self.tmp)
+        self.office_bin = write_office_wrappers(self.tmp / "office_bin")
         self.routes: dict[str, tuple[int, bytes]] = {}
         self.server = FakeServer(self.routes)
         self.server.start()
         self.addCleanup(self.server.stop)
+        # 沒有任何子頁的總覽頁與權益頁；案例需要子頁時用 serve_cards、serve_rights 覆蓋
+        self.serve_cards({})
+        self.serve_rights({})
 
     def serve_cards(self, cards: dict[str, str]) -> None:
         """登記總覽頁與各卡片頁。
@@ -193,12 +243,25 @@ class ScriptTestCase(unittest.TestCase):
         for path, html in cards.items():
             self.routes[path] = (200, html.encode())
 
-    def run_script(self, *, chrome: str | None = None, interval: str = FAST_INTERVAL) -> subprocess.CompletedProcess:
-        """以假 server、假 Chrome 與 self.out 執行腳本。
+    def serve_rights(self, pages: dict[str, str]) -> None:
+        """登記權益頁與各權益子頁。
+
+        Args:
+            pages: 權益子頁路徑對頁面 HTML。
+        """
+        self.routes[RIGHTS_LIST_PATH] = (200, rights_list_html(list(pages)).encode())
+        for path, html in pages.items():
+            self.routes[path] = (200, html.encode())
+
+    def run_script(
+        self, *, chrome: str | None = None, interval: str = FAST_INTERVAL, path: str | None = None
+    ) -> subprocess.CompletedProcess:
+        """以假 server、假 Chrome、假 LibreOffice 與 self.out 執行腳本。
 
         Args:
             chrome: TAISHIN_CHROME 的值；預設為假 Chrome wrapper。
             interval: TAISHIN_REQUEST_INTERVAL_SEC 的值。
+            path: PATH 的完整值；預設是把放了假 LibreOffice 的 self.office_bin 放在原本的 PATH 前面。
 
         Returns:
             已完成的行程（文字模式）。
@@ -208,6 +271,7 @@ class ScriptTestCase(unittest.TestCase):
             "TAISHIN_WWW_BASE": self.server.base_url,
             "TAISHIN_CHROME": chrome if chrome is not None else str(self.chrome),
             "TAISHIN_REQUEST_INTERVAL_SEC": interval,
+            "PATH": path if path is not None else f"{self.office_bin}{os.pathsep}{os.environ['PATH']}",
         }
         return subprocess.run(
             [sys.executable, str(SCRIPT), "--out", str(self.out)],
@@ -233,6 +297,11 @@ RICHART = CARD_PATH_FORMAT.format(cg="cg047", card="card001")
 DAQUANLIAN = CARD_PATH_FORMAT.format(cg="cg010", card="card001")
 # 同一個 cg 底下的第二張卡：本地檔名不能只用 cgNNN
 DAQUANLIAN_2 = CARD_PATH_FORMAT.format(cg="cg010", card="card002")
+
+INSURANCE = RIGHTS_PATH_FORMAT.format(group="insurance", page="right0201")
+PARKING = RIGHTS_PATH_FORMAT.format(group="parking", page="right0301")
+# 真實的權益子頁有 notice/-00001/，路徑最後一段以連字號開頭
+NOTICE_DASH = RIGHTS_PATH_FORMAT.format(group="notice", page="-00001")
 
 
 # ==============================
@@ -280,6 +349,62 @@ class FakeChromeFixtureTests(unittest.TestCase):
             self.assertIn("<p>收到的內容</p>".encode(), data)
 
 
+class FakeLibreOfficeFixtureTests(unittest.TestCase):
+    """假 LibreOffice 新增轉 docx 的介面；轉 PDF 的既有介面（tests/test_pipeline.py 在用）維持嚴格檢查。"""
+
+    DOCX_FILTER = "docx:MS Word 2007 XML"
+
+    def run_fake(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, str(FAKE_LIBREOFFICE), *args], capture_output=True, text=True, timeout=30)
+
+    def test_converts_html_to_docx_that_contains_the_received_html(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "page.html"
+            page.write_text("<p>收到的內容</p>", encoding="utf-8")
+            result = self.run_fake("--headless", "--convert-to", self.DOCX_FILTER, "--outdir", tmp, str(page))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            data = (Path(tmp) / "page.docx").read_bytes()
+            self.assertTrue(data.startswith(b"PK"))
+            self.assertIn("<p>收到的內容</p>".encode(), data)
+
+    def test_rejects_plain_docx_target_because_real_libreoffice_has_no_export_filter_for_html(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "page.html"
+            page.write_text("<p>x</p>", encoding="utf-8")
+            result = self.run_fake("--headless", "--convert-to", "docx", "--outdir", tmp, str(page))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--convert-to", result.stderr)
+            self.assertFalse((Path(tmp) / "page.docx").exists())
+
+    def test_docx_conversion_still_checks_the_other_arguments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "page.html"
+            page.write_text("<p>x</p>", encoding="utf-8")
+            result = self.run_fake("--convert-to", self.DOCX_FILTER, "--outdir", tmp, str(page))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--outdir", result.stderr)
+
+    def test_docx_conversion_fails_for_names_starting_with_broken(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "broken_page.html"
+            page.write_text("<p>x</p>", encoding="utf-8")
+            result = self.run_fake("--headless", "--convert-to", self.DOCX_FILTER, "--outdir", tmp, str(page))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((Path(tmp) / "broken_page.docx").exists())
+
+    def test_pdf_conversion_keeps_its_behavior(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "report.docx"
+            page.write_bytes(b"not a real docx")
+            result = self.run_fake("--headless", "--convert-to", "pdf", "--outdir", tmp, str(page))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((Path(tmp) / "report.pdf").read_bytes().startswith(b"%PDF-"))
+            broken = Path(tmp) / "broken1.docx"
+            broken.write_bytes(b"x")
+            failed = self.run_fake("--headless", "--convert-to", "pdf", "--outdir", tmp, str(broken))
+            self.assertNotEqual(failed.returncode, 0)
+
+
 # ==============================
 # 卡片頁
 # ==============================
@@ -313,8 +438,62 @@ class CardPageTests(ScriptTestCase):
     def test_duplicate_links_and_non_card_links_are_fetched_once_or_not_at_all(self) -> None:
         self.serve_cards({RICHART: card_html("RICHART")})
         self.run_script()
-        # 總覽頁 1 次；卡片頁 1 次（3 個錨點指向同一頁）；權益連結、申辦連結、總覽頁自己的連結都不下載
-        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RICHART])
+        # 總覽頁 1 次；卡片頁 1 次（3 個錨點指向同一頁）；權益連結、申辦連結、總覽頁自己的連結都不下載；權益頁 1 次
+        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RICHART, RIGHTS_LIST_PATH])
+
+
+class RightsPageTests(ScriptTestCase):
+    def test_converts_each_rights_subpage_to_docx_with_unique_names_and_keeps_raw_html(self) -> None:
+        self.serve_rights({INSURANCE: card_html("INSURANCE"), PARKING: card_html("PARKING"), NOTICE_DASH: card_html("NOTICE")})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            self.files_under_out(),
+            [
+                "_meta/html/rights_insurance_right0201.html",
+                "_meta/html/rights_notice_-00001.html",
+                "_meta/html/rights_parking_right0301.html",
+                "_meta/manifest.jsonl",
+                "_meta/print/rights_insurance_right0201.html",
+                "_meta/print/rights_notice_-00001.html",
+                "_meta/print/rights_parking_right0301.html",
+                "rights/rights_insurance_right0201.docx",
+                "rights/rights_notice_-00001.docx",
+                "rights/rights_parking_right0301.docx",
+            ],
+        )
+        self.assertTrue((self.out / "rights" / "rights_insurance_right0201.docx").read_bytes().startswith(b"PK"))
+        self.assertEqual(
+            (self.out / "_meta" / "html" / "rights_insurance_right0201.html").read_bytes(), self.routes[INSURANCE][1]
+        )
+
+    def test_menu_links_pdf_links_and_duplicate_anchors_are_not_fetched_again(self) -> None:
+        self.serve_rights({INSURANCE: card_html("INSURANCE")})
+        self.run_script()
+        # 權益頁的選單連結（權益頁自己、總覽、繳費）、PDF 連結、卡片頁連結都不下載；重複的錨點只抓一次
+        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, INSURANCE])
+
+    def test_cards_and_rights_are_downloaded_in_one_run_into_separate_folders(self) -> None:
+        self.serve_cards({RICHART: card_html("RICHART")})
+        self.serve_rights({INSURANCE: card_html("INSURANCE")})
+        self.assertEqual(self.run_script().returncode, 0)
+        self.assertTrue((self.out / "cards" / "card_cg047_card001.pdf").is_file())
+        self.assertTrue((self.out / "rights" / "rights_insurance_right0201.docx").is_file())
+        self.assertEqual(len(self.manifest()), 2)
+
+    def test_prints_actual_subpage_count_and_continues_when_it_is_not_46(self) -> None:
+        self.serve_rights({INSURANCE: card_html("INSURANCE"), PARKING: card_html("PARKING")})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("找到 2 個權益子頁（預期 46）", result.stdout)
+
+    def test_prints_count_46_when_there_are_46_subpages(self) -> None:
+        pages = {RIGHTS_PATH_FORMAT.format(group="g", page=f"right{n:04d}"): card_html(f"P{n}") for n in range(46)}
+        self.serve_rights(pages)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("找到 46 個權益子頁（預期 46）", result.stdout)
+        self.assertEqual(len(self.manifest()), 46)
 
 
 class ChromeInputTests(ScriptTestCase):
@@ -351,6 +530,31 @@ class ChromeInputTests(ScriptTestCase):
         self.assertIn('<img src="/img/a.gif">', self.received)
 
 
+class LibreOfficeInputTests(ScriptTestCase):
+    """交給 LibreOffice 的 HTML：含主內容區的全部文字，不含官網的 script、樣式與主內容區以外的文字。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.serve_rights({INSURANCE: card_html("INSURANCE")})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # 假 LibreOffice 的輸出檔 = 假 docx 檔頭 + 收到的 HTML
+        self.received = (self.out / "rights" / "rights_insurance_right0201.docx").read_text(
+            encoding="utf-8", errors="replace"
+        )
+
+    def test_contains_main_content(self) -> None:
+        for text in ("INSURANCE", "COLLAPSED-TEXT", "MODAL-TEXT 每日23:59前轉換", "未關閉項目二"):
+            self.assertIn(text, self.received)
+
+    def test_excludes_site_scripts_styles_and_content_outside_the_main_area(self) -> None:
+        for text in ("SITE_SCRIPT_TEXT", "SITE-STYLE-TEXT", "INNER_SCRIPT_TEXT", "NAV-MENU-TEXT", "LEFT-MENU-TEXT", "FOOTER-TEXT"):
+            self.assertNotIn(text, self.received)
+
+    def test_has_base_href_pointing_to_the_original_url(self) -> None:
+        self.assertIn(f'<base href="{self.server.base_url}{INSURANCE}">', self.received)
+
+
 class ManifestTests(ScriptTestCase):
     def test_one_line_per_document_with_all_fields(self) -> None:
         self.serve_cards({RICHART: card_html("RICHART"), DAQUANLIAN: card_html("DAQUANLIAN")})
@@ -367,6 +571,25 @@ class ManifestTests(ScriptTestCase):
         self.assertEqual(richart["sha256"], hashlib.sha256(pdf).hexdigest())
         self.assertEqual(richart["html_sha256"], hashlib.sha256(raw).hexdigest())
         self.assertEqual(richart["result"], "已下載")
+
+
+class RightsManifestTests(ScriptTestCase):
+    def test_record_has_the_same_fields_as_cards(self) -> None:
+        self.serve_cards({RICHART: card_html("RICHART")})
+        self.serve_rights({INSURANCE: card_html("INSURANCE")})
+        self.assertEqual(self.run_script().returncode, 0)
+        records = {r["filename"]: r for r in self.manifest()}
+        self.assertEqual(sorted(records), ["card_cg047_card001.pdf", "rights_insurance_right0201.docx"])
+        rights = records["rights_insurance_right0201.docx"]
+        docx = (self.out / "rights" / "rights_insurance_right0201.docx").read_bytes()
+        self.assertEqual(rights["url"], self.server.base_url + INSURANCE)
+        self.assertEqual(rights["category"], "權益")
+        self.assertEqual(rights["format"], "DOCX")
+        self.assertEqual(rights["downloaded_at"], time.strftime("%Y-%m-%d"))
+        self.assertEqual(rights["sha256"], hashlib.sha256(docx).hexdigest())
+        self.assertEqual(rights["html_sha256"], hashlib.sha256(self.routes[INSURANCE][1]).hexdigest())
+        self.assertEqual(rights["result"], "已下載")
+        self.assertEqual(set(rights), set(records["card_cg047_card001.pdf"]))
 
 
 class OverviewTests(ScriptTestCase):
@@ -386,13 +609,30 @@ class OverviewTests(ScriptTestCase):
         self.assertEqual(len(self.manifest()), 16)
 
     def test_overview_failure_exits_nonzero_and_names_the_list(self) -> None:
-        # 沒有登記總覽頁：假 server 回 404
+        del self.routes[OVERVIEW_PATH]  # 假 server 對沒有登記的路徑回 404
         result = self.run_script()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("信用卡總覽", result.stderr)
         self.assertIn("404", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
-        self.assertEqual(self.server.paths(), [OVERVIEW_PATH])
+
+    def test_overview_failure_does_not_stop_the_rights_category(self) -> None:
+        del self.routes[OVERVIEW_PATH]
+        self.serve_rights({INSURANCE: card_html("INSURANCE")})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, INSURANCE])
+        self.assertTrue((self.out / "rights" / "rights_insurance_right0201.docx").is_file())
+
+    def test_rights_list_failure_exits_nonzero_names_the_list_and_keeps_the_cards(self) -> None:
+        self.serve_cards({RICHART: card_html("RICHART")})
+        del self.routes[RIGHTS_LIST_PATH]
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("信用卡權益", result.stderr)
+        self.assertIn("404", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertTrue((self.out / "cards" / "card_cg047_card001.pdf").is_file())
 
 
 class FailureTests(ScriptTestCase):
@@ -446,6 +686,94 @@ class FailureTests(ScriptTestCase):
         self.assertIn("card_cg010_card001.pdf", result.stderr)
 
 
+class RightsFailureTests(ScriptTestCase):
+    def assert_failed_subpage(self, result: subprocess.CompletedProcess, filename: str, reason: str) -> None:
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn(filename, result.stderr)
+        self.assertIn(reason, result.stderr)
+        failed = [r for r in self.manifest() if r["result"] == "失敗"]
+        self.assertEqual([r["filename"] for r in failed], [filename])
+        self.assertIn(reason, failed[0]["detail"])
+        self.assertEqual(failed[0]["sha256"], "")
+
+    def write_office_script(self, body: str) -> Path:
+        """寫一個只有 libreoffice／soffice 兩個名稱的假命令資料夾，內容是 sh 腳本 body。"""
+        directory = self.tmp / "custom_office"
+        directory.mkdir()
+        for name in ("libreoffice", "soffice"):
+            wrapper = directory / name
+            wrapper.write_text(f"#!/bin/sh\n{body}\n")
+            wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+        return directory
+
+    def test_missing_libreoffice_fails_each_subpage_but_not_the_cards(self) -> None:
+        self.serve_cards({RICHART: card_html("RICHART")})
+        self.serve_rights({INSURANCE: card_html("INSURANCE"), PARKING: card_html("PARKING")})
+        empty = self.tmp / "empty_path"
+        empty.mkdir()
+        result = self.run_script(path=str(empty))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        failed = [r for r in self.manifest() if r["result"] == "失敗"]
+        self.assertEqual(
+            sorted(r["filename"] for r in failed),
+            ["rights_insurance_right0201.docx", "rights_parking_right0301.docx"],
+        )
+        for record in failed:
+            self.assertIn("LibreOffice", record["detail"])
+            self.assertIn("libreoffice", record["detail"])
+            self.assertIn("soffice", record["detail"])
+        self.assertTrue((self.out / "cards" / "card_cg047_card001.pdf").is_file())
+
+    def test_soffice_alone_is_found(self) -> None:
+        self.serve_rights({INSURANCE: card_html("INSURANCE")})
+        only_soffice = write_office_wrappers(self.tmp / "soffice_only", names=("soffice",))
+        result = self.run_script(path=str(only_soffice))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.out / "rights" / "rights_insurance_right0201.docx").is_file())
+
+    def test_libreoffice_is_preferred_over_soffice(self) -> None:
+        self.serve_rights({INSURANCE: card_html("INSURANCE")})
+        directory = self.write_office_script('echo "called $0" >&2; exit 7')
+        (directory / "soffice").write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_LIBREOFFICE}" "$@"\n')
+        result = self.run_script(path=str(directory))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("結束碼 7", result.stderr)
+
+    def test_conversion_failure_fails_that_subpage_only(self) -> None:
+        self.serve_rights({INSURANCE: card_html("INSURANCE"), PARKING: card_html("PARKING")})
+        # 不是假 LibreOffice 的 broken 規則：腳本的本地檔名都以 rights_ 開頭，改用依輸入檔名決定的 wrapper
+        directory = self.write_office_script(
+            f'case "$6" in *insurance*) echo "cannot convert" >&2; exit 3;; esac\n'
+            f'exec "{sys.executable}" "{FAKE_LIBREOFFICE}" "$@"'
+        )
+        result = self.run_script(path=str(directory))
+        self.assert_failed_subpage(result, "rights_insurance_right0201.docx", "結束碼 3")
+        self.assertIn("cannot convert", result.stderr)
+        self.assertTrue((self.out / "rights" / "rights_parking_right0301.docx").is_file())
+        self.assertFalse((self.out / "rights" / "rights_insurance_right0201.docx").exists())
+
+    def test_exit_code_zero_without_output_is_a_failure(self) -> None:
+        self.serve_rights({INSURANCE: card_html("INSURANCE")})
+        result = self.run_script(path=str(self.write_office_script("exit 0")))
+        self.assert_failed_subpage(result, "rights_insurance_right0201.docx", "沒有產出")
+
+    def test_http_error_on_one_subpage_does_not_stop_the_others(self) -> None:
+        self.serve_rights({INSURANCE: card_html("INSURANCE"), PARKING: card_html("PARKING")})
+        self.routes[INSURANCE] = (500, b"boom")
+        result = self.run_script()
+        self.assert_failed_subpage(result, "rights_insurance_right0201.docx", "500")
+        self.assertTrue((self.out / "rights" / "rights_parking_right0301.docx").is_file())
+
+    def test_subpage_without_main_content_is_a_failure(self) -> None:
+        self.serve_rights({INSURANCE: card_html_without_main_content(), PARKING: card_html("PARKING")})
+        result = self.run_script()
+        self.assert_failed_subpage(result, "rights_insurance_right0201.docx", "找不到主內容區")
+        self.assertTrue((self.out / "_meta" / "html" / "rights_insurance_right0201.html").is_file())
+        self.assertTrue((self.out / "rights" / "rights_parking_right0301.docx").is_file())
+
+
 class RerunTests(ScriptTestCase):
     def test_existing_files_are_skipped_without_requesting_the_pages(self) -> None:
         self.serve_cards({RICHART: card_html("RICHART"), DAQUANLIAN: card_html("DAQUANLIAN")})
@@ -457,7 +785,7 @@ class RerunTests(ScriptTestCase):
 
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.server.paths(), [OVERVIEW_PATH], "第二次只該請求總覽頁")
+        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH], "第二次只該請求兩個列表頁")
         self.assertEqual(pdf.read_bytes(), before)
         second = {r["filename"]: r for r in self.manifest()}
         self.assertEqual(sorted(second), sorted(first))
@@ -465,6 +793,25 @@ class RerunTests(ScriptTestCase):
             self.assertEqual(record["result"], "已存在略過")
             self.assertEqual(record["sha256"], first[name]["sha256"])
             self.assertEqual(record["html_sha256"], first[name]["html_sha256"])
+
+    def test_existing_rights_documents_are_skipped_without_converting_them_again(self) -> None:
+        self.serve_rights({INSURANCE: card_html("INSURANCE")})
+        self.assertEqual(self.run_script().returncode, 0)
+        first = self.manifest()[0]
+        docx = self.out / "rights" / "rights_insurance_right0201.docx"
+        before = docx.read_bytes()
+        self.server.requests.clear()
+        # 第二次執行 PATH 上沒有 LibreOffice：略過的文件不需要它
+        empty = self.tmp / "empty_path"
+        empty.mkdir()
+        result = self.run_script(path=str(empty))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH])
+        self.assertEqual(docx.read_bytes(), before)
+        second = self.manifest()[0]
+        self.assertEqual(second["result"], "已存在略過")
+        self.assertEqual(second["sha256"], first["sha256"])
+        self.assertEqual(second["html_sha256"], first["html_sha256"])
 
     def test_failed_page_is_fetched_again_on_the_next_run(self) -> None:
         self.serve_cards({RICHART: card_html("RICHART")})
@@ -480,7 +827,7 @@ class RequestPolicyTests(ScriptTestCase):
     def test_every_request_carries_an_identifiable_user_agent(self) -> None:
         self.serve_cards({RICHART: card_html("RICHART")})
         self.run_script()
-        self.assertEqual(len(self.server.requests), 2)
+        self.assertEqual(len(self.server.requests), 3)
         for _path, _time, user_agent in self.server.requests:
             self.assertTrue(user_agent.startswith("llm-lab-fetch-taishin/"), user_agent)
 
@@ -491,7 +838,7 @@ class RequestPolicyTests(ScriptTestCase):
         interval = 0.3
         self.assertEqual(self.run_script(interval=str(interval)).returncode, 0)
         times = [t for _path, t, _ua in self.server.requests]
-        self.assertEqual(len(times), 4)
+        self.assertEqual(len(times), 5)
         for earlier, later in zip(times, times[1:]):
             self.assertGreaterEqual(later - earlier, interval - 0.02)
 
