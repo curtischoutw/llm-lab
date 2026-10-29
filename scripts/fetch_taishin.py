@@ -10,10 +10,11 @@
 目前涵蓋的類別：
 - 卡片：總覽頁列出的卡片頁，列印成 PDF，放在 DIR/cards/。
 - 權益：權益頁列出的權益說明子頁，用 LibreOffice 轉成 .docx，放在 DIR/rights/。
+- 下載：文件下載區每一頁列出的 PDF（約定條款、費用表、申請書等），不轉檔、原樣存檔，放在 DIR/downloads/。
 
 輸出結構：
 - DIR/<類別資料夾>/：匯入知識庫的文件，每個類別一個資料夾（ingest 不遞迴，一次匯入一個資料夾）。
-- DIR/_meta/html/：每一頁的原始 HTML。
+- DIR/_meta/html/：每一個網頁（卡片頁、權益子頁）的原始 HTML；下載區的 PDF 不是網頁，沒有。
 - DIR/_meta/print/：取出主內容區後交給 Chrome 或 LibreOffice 的本機 HTML。
 - DIR/_meta/manifest.jsonl：下載清單，一行一份文件。_meta 不會被匯入。
 
@@ -29,9 +30,18 @@
   目標一定要寫完整的濾鏡名稱：2026-10-30 實測，LibreOffice 把 HTML 當成 Writer/Web 文件開啟，
   目標只寫 docx 會回報 "no export filter"。LibreOffice 沿用 RAG-Anything 的找法，在 PATH 上依序找
   libreoffice、soffice；找不到時，每一個權益子頁各自記為失敗。轉檔不受官網 CSS 影響，取主內容區是為了去掉導覽選單。
-- 本地檔名由網址路徑組成並加類別前綴（卡片 card_cg047_card001，權益 rights_insurance_right0201），整批唯一。
+- 本地檔名由網址路徑組成並加類別前綴（卡片 card_cg047_card001，權益 rights_insurance_right0201，
+  下載 download_word_CR04131_1150B），整批唯一。前綴也讓以 - 開頭的 PDF 檔名（真實有 -_11407.pdf）不會變成以 - 開頭。
+  檔名中字母、數字、底線、. 與 - 以外的字元換成底線；同一類別裡兩個網址組出同一個檔名時（不分大小寫），兩者都加上完整網址的
+  SHA-256 前 8 碼，所以檔名只取決於這一批網址。
+- 文件下載區：從第 1 頁起用 `?nav1=credit&nav2=file-download&page=N` 往後翻，直到某一頁沒有新的 PDF 連結為止。
+  官網超過最後一頁時回 200 並重複最後一頁（2026-10-30 調查：page=3 與 page=99 都等於 page=2），不是空清單，
+  所以「沒有新連結」會在最後一頁的下一頁停下來（目前 2 頁，發 3 個請求）。
+  PDF 的 href 是只有路徑的相對網址，補上列表頁的網域；只收和列表頁同一個網域、路徑以 .pdf 結尾的連結，網址去除重複。
+  PDF 是不可信資料：存檔前確認內容以 `%PDF-` 開頭，不是的話（例如錯誤頁的 HTML）那一份記為失敗，不存檔。
 - 單頁失敗（HTTP、網路、轉檔、檔案系統）時記下原因，其他頁照常處理；最後列出所有失敗的頁面並以非零碼結束。
-  列表頁（總覽頁、權益頁）本身失敗時，那一類沒有任何網址，指出是哪一個列表；其他類別照常處理，最後以非零碼結束。
+  列表頁（總覽頁、權益頁、文件下載頁的任何一頁）本身失敗時，那一類沒有任何網址，指出是哪一個列表；
+  其他類別照常處理，最後以非零碼結束。
 - 再次執行時，本地檔案已存在就略過（不發請求）並記入清單；要更新內容時刪除資料夾後重新下載。
 - 請求間隔：腳本自己發出的每個 HTTP 請求之間至少 TAISHIN_REQUEST_INTERVAL_SEC 秒（預設 2）。
   這個環境變數只給測試調小。
@@ -43,7 +53,10 @@
 已知極限：
 - Chrome 與 LibreOffice 透過 <base href> 自行載入圖片，這些請求不受腳本的間隔控制。
 - 官網改版時，列表頁的連結格式或 id="centercontainer" 可能失效；總覽頁找到的卡片數不是 16、
-  權益頁找到的子頁數不是 46 時，腳本會印出實際數量提醒，但不中止。
+  權益頁找到的子頁數不是 46、下載區找到的 PDF 數不是 19 時，腳本會印出實際數量提醒，但不中止。
+- 翻頁上限 DOWNLOAD_MAX_PAGES（ASSUMPTION：20，目前實際只有 2 頁）。翻滿上限仍有新的 PDF 時，
+  視為下載頁失敗（官網改版或不再重複最後一頁的徵兆），而不是無限翻頁。
+- 只確認 PDF 以 `%PDF-` 開頭，不檢查檔案是否完整、能不能開啟（ASSUMPTION）。
 
 Dependencies: 僅標準函式庫；列印需要 Google Chrome，轉 .docx 需要 LibreOffice。
 """
@@ -61,12 +74,13 @@ import sys
 import tempfile
 import time
 import urllib.request
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import date
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, unquote, urljoin, urlparse, urlunparse
 
 # ==============================
 # 設定
@@ -88,6 +102,10 @@ DOCX_TARGET = "docx:MS Word 2007 XML"
 
 FORMAT_PDF = "PDF"
 FORMAT_DOCX = "DOCX"
+
+# 文件下載區：翻頁上限（ASSUMPTION，目前實際 2 頁）與 PDF 檔頭
+DOWNLOAD_MAX_PAGES = 20
+PDF_MAGIC = b"%PDF-"
 
 # 網路失敗的例外：連線／逾時／重設／HTTP 狀態錯誤（OSError，HTTPError 與 URLError 都是其子類）與讀 body
 # 到一半斷線的 http.client.IncompleteRead 等（HTTPException，不是 OSError）
@@ -361,7 +379,7 @@ def convert_to_docx(office: str | None, html_path: Path, docx_path: Path, work_d
 
 
 # ==============================
-# 類別與網頁
+# 一次執行共用的東西與類別
 # ==============================
 
 
@@ -374,11 +392,23 @@ class Tools:
 
 
 @dataclass(frozen=True)
-class Category:
-    """一個類別：從哪個列表頁找子頁、子頁怎麼轉檔、放在哪個資料夾。
+class Run:
+    """一次執行共用的設定：資料根目錄、官網網域前綴、發請求的物件、轉檔工具。"""
 
+    out: Path
+    www: str
+    fetcher: Fetcher
+    tools: Tools
+
+
+@dataclass(frozen=True)
+class Category:
+    """一個類別：從哪個列表頁找文件、文件怎麼取得、放在哪個資料夾。
+
+    collect 的參數是 (執行設定, 類別)，回傳文件的完整網址（去除重複、保留順序），列表頁失敗時拋出 FetchError。
+    produce 的參數是 (執行設定, 類別, 網址, 本地名稱, 最終檔案, 清單紀錄)，把文件寫到最終檔案、
+    補上紀錄的 html_sha256（有原始 HTML 的類別），失敗時拋出 FetchError。
     local_name 由 name_prefix 和 link_pattern 的各個群組以底線接起來，例如卡片 card_cg047_card001。
-    convert 的參數是 (工具, 本機 HTML, 最終檔案, 暫時資料夾的位置)，失敗時拋出 FetchError。
     """
 
     name: str
@@ -392,48 +422,36 @@ class Category:
     folder: str
     extension: str
     fmt: str
-    convert: Callable[[Tools, Path, Path, Path], None]
+    keeps_html: bool
+    collect: Callable[["Run", "Category"], list[str]]
+    produce: Callable[["Run", "Category", str, str, Path, "Record"], None]
 
     def local_name(self, url: str) -> str:
-        """由子頁網址組出本地檔名（不含副檔名）。"""
-        match = self.link_pattern.match(urlparse(url).path)
+        """由文件網址組出本地檔名（不含副檔名）；路徑先做百分比解碼，字母、數字、底線、. 與 - 以外的字元換成底線。"""
+        match = self.link_pattern.match(unquote(urlparse(url).path))
         assert match is not None, url
-        return "_".join((self.name_prefix, *match.groups()))
+        parts = (re.sub(r"[^\w.-]", "_", group) for group in match.groups())
+        return "_".join((self.name_prefix, *parts))
 
+    def local_names(self, urls: list[str]) -> dict[str, str]:
+        """為一批網址組出本地檔名；檔名相同（不分大小寫）的網址都加上完整網址的 SHA-256 前 8 碼。
 
-CARDS = Category(
-    name="卡片",
-    list_label="總覽頁",
-    list_name="信用卡總覽",
-    list_path="/TSB/personal/credit/intro/overview/",
-    link_pattern=re.compile(r"^/TSB/personal/credit/intro/overview/(cg\d+)/(card\d+)/$"),
-    expected_count=16,
-    unit="張卡片頁",
-    name_prefix="card",
-    folder="cards",
-    extension="pdf",
-    fmt=FORMAT_PDF,
-    convert=lambda tools, html_path, target, work_dir: print_to_pdf(tools.chrome, html_path, target, work_dir),
-)
-RIGHTS = Category(
-    name="權益",
-    list_label="權益頁",
-    list_name="信用卡權益",
-    list_path="/TSB/personal/credit/intro/rights/",
-    # 子頁是權益頁底下 <群組>/<頁名>/ 兩層；選單只連到權益頁自己，不符合這個格式。頁名可以是 -00001 這種怪名字
-    link_pattern=re.compile(r"^/TSB/personal/credit/intro/rights/([^/]+)/([^/]+)/$"),
-    expected_count=46,
-    unit="個權益子頁",
-    name_prefix="rights",
-    folder="rights",
-    extension="docx",
-    fmt=FORMAT_DOCX,
-    convert=lambda tools, html_path, target, work_dir: convert_to_docx(tools.office, html_path, target, work_dir),
-)
-CATEGORIES = (CARDS, RIGHTS)
+        Args:
+            urls: 這個類別的文件網址。
+
+        Returns:
+            網址對本地檔名（不含副檔名）；值在整批中不重複。
+        """
+        names = {url: self.local_name(url) for url in urls}
+        counts = Counter(name.lower() for name in names.values())
+        return {
+            url: name if counts[name.lower()] == 1 else f"{name}_{hashlib.sha256(url.encode()).hexdigest()[:8]}"
+            for url, name in names.items()
+        }
+
 
 # ==============================
-# 網頁下載與轉檔
+# 列表頁與取得文件
 # ==============================
 
 
@@ -457,42 +475,204 @@ def sha256_of(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def fetch_web_page(category: Category, url: str, out: Path, fetcher: Fetcher, tools: Tools) -> Record:
-    """下載一個網頁，取出主內容區並依類別轉檔。
+def collect_from_one_page(run: Run, category: Category) -> list[str]:
+    """從單一列表頁取出子頁網址（卡片、權益）。
 
     Args:
-        category: 這一頁所屬的類別。
-        url: 網頁完整網址。
-        out: 資料根目錄。
-        fetcher: 發請求的物件。
-        tools: 轉檔用的外部命令。
+        run: 一次執行共用的設定。
+        category: 要找文件的類別。
 
     Returns:
-        下載清單的一筆紀錄；失敗時 result 是「失敗」，detail 是原因。
+        子頁完整網址。列表頁失敗時拋出 FetchError。
     """
-    name = category.local_name(url)
-    filename = f"{name}.{category.extension}"
-    record = Record(url, category.name, filename, category.fmt, date.today().isoformat(), "", "", RESULT_FAILED, "")
-    target = out / category.folder / filename
-    raw_path = out / "_meta" / "html" / f"{name}.html"
-    print_path = out / "_meta" / "print" / f"{name}.html"
-    try:
-        if target.is_file():
-            record.downloaded_at = date.fromtimestamp(target.stat().st_mtime).isoformat()
-            record.sha256 = sha256_of(target)
-            record.html_sha256 = sha256_of(raw_path) if raw_path.is_file() else ""
-            record.result = RESULT_SKIPPED
-            return record
-        for folder in (target.parent, raw_path.parent, print_path.parent):
+    list_url = run.www + category.list_path
+    return find_page_links(decode_page(run.fetcher.get(list_url)), list_url, category.link_pattern)
+
+
+def find_pdf_links(list_html: str, list_url: str, link_pattern: re.Pattern[str]) -> list[str]:
+    """從文件下載頁取出 PDF 的網址。
+
+    Args:
+        list_html: 下載頁 HTML。
+        list_url: 下載頁網址，用來解析相對路徑，也限定只收同一個網域。
+        link_pattern: PDF 連結的路徑格式。
+
+    Returns:
+        去除重複、保留出現順序的 PDF 完整網址；路徑中 ASCII 以外的字元已做百分比編碼，網址才能送出請求。
+    """
+    collector = _AnchorCollector()
+    collector.feed(list_html)
+    host = urlparse(list_url).netloc
+    seen: dict[str, None] = {}
+    for href in collector.hrefs:
+        parsed = urlparse(urljoin(list_url, href))
+        if parsed.netloc == host and link_pattern.match(parsed.path):
+            seen[urlunparse(parsed._replace(path=quote(parsed.path, safe="/%"), fragment=""))] = None
+    return list(seen)
+
+
+def collect_from_paged_downloads(run: Run, category: Category) -> list[str]:
+    """從文件下載頁的第 1 頁往後翻，直到某一頁沒有新的 PDF 連結為止。
+
+    官網超過最後一頁時回 200 並重複最後一頁，所以停止條件是「沒有新連結」，不是空清單。
+
+    Args:
+        run: 一次執行共用的設定。
+        category: 文件下載類別；list_path 含 query，翻頁時在後面加 &page=N。
+
+    Returns:
+        所有頁面的 PDF 完整網址（去除重複）。任何一頁失敗，或翻滿 DOWNLOAD_MAX_PAGES 頁仍有新的 PDF 時拋出 FetchError。
+    """
+    list_url = run.www + category.list_path
+    found: dict[str, None] = {}
+    for number in range(1, DOWNLOAD_MAX_PAGES + 1):
+        page_url = f"{list_url}&page={number}"
+        try:
+            page_links = find_pdf_links(decode_page(run.fetcher.get(page_url)), page_url, category.link_pattern)
+        except FetchError as exc:
+            raise FetchError(f"第 {number} 頁（{page_url}）：{exc}") from exc
+        new = [link for link in page_links if link not in found]
+        if not new:
+            return list(found)
+        found.update(dict.fromkeys(new))
+    raise FetchError(f"翻到上限 {DOWNLOAD_MAX_PAGES} 頁仍有新的 PDF 連結，停止翻頁")
+
+
+def web_page_producer(
+    convert: Callable[[Tools, Path, Path, Path], None],
+) -> Callable[[Run, Category, str, str, Path, Record], None]:
+    """產生「下載網頁、取出主內容區、轉檔」的 produce 函式。
+
+    Args:
+        convert: 轉檔函式，參數是 (工具, 本機 HTML, 最終檔案, 暫時資料夾的位置)，失敗時拋出 FetchError。
+
+    Returns:
+        可放進 Category.produce 的函式。
+    """
+
+    def produce(run: Run, category: Category, url: str, name: str, target: Path, record: Record) -> None:
+        raw_path = run.out / "_meta" / "html" / f"{name}.html"
+        print_path = run.out / "_meta" / "print" / f"{name}.html"
+        for folder in (raw_path.parent, print_path.parent):
             folder.mkdir(parents=True, exist_ok=True)
-        raw = fetcher.get(url)
+        raw = run.fetcher.get(url)
         raw_path.write_bytes(raw)
         record.html_sha256 = hashlib.sha256(raw).hexdigest()
         main_content = extract_main_content(decode_page(raw), "centercontainer")
         if main_content is None:
             raise FetchError("找不到主內容區")
         print_path.write_text(build_print_html(main_content, url), encoding="utf-8")
-        category.convert(tools, print_path, target, out / "_meta")
+        convert(run.tools, print_path, target, run.out / "_meta")
+
+    return produce
+
+
+def save_pdf(run: Run, category: Category, url: str, name: str, target: Path, record: Record) -> None:
+    """下載 PDF，確認檔頭是 %PDF- 後原樣存檔（先寫暫時檔，成功才換成最終檔案）。
+
+    Args:
+        run: 一次執行共用的設定。
+        category: PDF 所屬的類別（未使用，為了符合 Category.produce 的參數）。
+        url: PDF 完整網址。
+        name: 本地名稱（未使用，為了符合 Category.produce 的參數）。
+        target: 最終檔案路徑。
+        record: 清單紀錄（PDF 沒有原始 HTML，不改它）。
+
+    Raises:
+        FetchError: 下載失敗，或內容不是以 %PDF- 開頭（例如伺服器回了錯誤頁的 HTML）。
+    """
+    data = run.fetcher.get(url)
+    if not data.startswith(PDF_MAGIC):
+        raise FetchError(f"下載的內容不是 PDF（開頭不是 {PDF_MAGIC.decode()}，共 {len(data)} bytes）")
+    with tempfile.TemporaryDirectory(dir=run.out / "_meta") as tmp:
+        tmp_pdf = Path(tmp) / "download.pdf"
+        tmp_pdf.write_bytes(data)
+        tmp_pdf.replace(target)
+
+
+CARDS = Category(
+    name="卡片",
+    list_label="總覽頁",
+    list_name="信用卡總覽",
+    list_path="/TSB/personal/credit/intro/overview/",
+    link_pattern=re.compile(r"^/TSB/personal/credit/intro/overview/(cg\d+)/(card\d+)/$"),
+    expected_count=16,
+    unit="張卡片頁",
+    name_prefix="card",
+    folder="cards",
+    extension="pdf",
+    fmt=FORMAT_PDF,
+    keeps_html=True,
+    collect=collect_from_one_page,
+    produce=web_page_producer(
+        lambda tools, html_path, target, work_dir: print_to_pdf(tools.chrome, html_path, target, work_dir)
+    ),
+)
+RIGHTS = Category(
+    name="權益",
+    list_label="權益頁",
+    list_name="信用卡權益",
+    list_path="/TSB/personal/credit/intro/rights/",
+    # 子頁是權益頁底下 <群組>/<頁名>/ 兩層；選單只連到權益頁自己，不符合這個格式。頁名可以是 -00001 這種怪名字
+    link_pattern=re.compile(r"^/TSB/personal/credit/intro/rights/([^/]+)/([^/]+)/$"),
+    expected_count=46,
+    unit="個權益子頁",
+    name_prefix="rights",
+    folder="rights",
+    extension="docx",
+    fmt=FORMAT_DOCX,
+    keeps_html=True,
+    collect=collect_from_one_page,
+    produce=web_page_producer(
+        lambda tools, html_path, target, work_dir: convert_to_docx(tools.office, html_path, target, work_dir)
+    ),
+)
+DOWNLOADS = Category(
+    name="下載",
+    list_label="下載頁",
+    list_name="文件下載",
+    list_path="/TSB/personal/common/download/index.html?nav1=credit&nav2=file-download",
+    # PDF 在 /TSB/export/sites/TSB/ 底下有三種前綴；任何以 .pdf 結尾的路徑都收，檔名（含 - 或 _ 開頭的）取最後一段
+    link_pattern=re.compile(r"^/(?:.*/)?([^/]+)\.pdf$", re.IGNORECASE),
+    expected_count=19,
+    unit="個 PDF",
+    name_prefix="download",
+    folder="downloads",
+    extension="pdf",
+    fmt=FORMAT_PDF,
+    keeps_html=False,
+    collect=collect_from_paged_downloads,
+    produce=save_pdf,
+)
+CATEGORIES = (CARDS, RIGHTS, DOWNLOADS)
+
+
+def fetch_document(run: Run, category: Category, url: str, name: str) -> Record:
+    """取得一份文件：已存在就略過，否則呼叫類別的 produce。
+
+    Args:
+        run: 一次執行共用的設定。
+        category: 這份文件所屬的類別。
+        url: 文件完整網址。
+        name: 本地名稱（不含副檔名）。
+
+    Returns:
+        下載清單的一筆紀錄；失敗時 result 是「失敗」，detail 是原因。
+    """
+    filename = f"{name}.{category.extension}"
+    record = Record(url, category.name, filename, category.fmt, date.today().isoformat(), "", "", RESULT_FAILED, "")
+    target = run.out / category.folder / filename
+    try:
+        if target.is_file():
+            raw_path = run.out / "_meta" / "html" / f"{name}.html"
+            record.downloaded_at = date.fromtimestamp(target.stat().st_mtime).isoformat()
+            record.sha256 = sha256_of(target)
+            record.html_sha256 = sha256_of(raw_path) if category.keeps_html and raw_path.is_file() else ""
+            record.result = RESULT_SKIPPED
+            return record
+        target.parent.mkdir(parents=True, exist_ok=True)
+        (run.out / "_meta").mkdir(parents=True, exist_ok=True)
+        category.produce(run, category, url, name, target, record)
         record.sha256 = sha256_of(target)
         record.result = RESULT_DOWNLOADED
     except FetchError as exc:
@@ -536,7 +716,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str]) -> int:
-    """下載總覽頁列出的卡片頁與權益頁列出的權益子頁。
+    """下載總覽頁列出的卡片頁、權益頁列出的權益子頁與文件下載區的 PDF。
 
     Args:
         argv: 不含程式名稱的參數清單。
@@ -558,22 +738,21 @@ def main(argv: list[str]) -> int:
     if args.out.exists() and not args.out.is_dir():
         print(f"ERROR --out {args.out} 已存在但不是資料夾", file=sys.stderr)
         return 2
-    fetcher = Fetcher(interval)
-
-    tools = Tools(chrome, find_office())
+    run = Run(args.out, www, Fetcher(interval), Tools(chrome, find_office()))
 
     records: list[Record] = []
     failed_lists: list[str] = []
     for category in CATEGORIES:
         list_url = www + category.list_path
         try:
-            urls = find_page_links(decode_page(fetcher.get(list_url)), list_url, category.link_pattern)
+            urls = category.collect(run, category)
         except FetchError as exc:
             print(f"ERROR 列表「{category.list_name}」（{list_url}）失敗：{exc}", file=sys.stderr)
             failed_lists.append(category.list_name)
             continue
         print(f"{category.list_label}找到 {len(urls)} {category.unit}（預期 {category.expected_count}）")
-        records.extend(fetch_web_page(category, url, args.out, fetcher, tools) for url in urls)
+        names = category.local_names(urls)
+        records.extend(fetch_document(run, category, url, names[url]) for url in urls)
 
     write_manifest(args.out, records)
     for r in records:

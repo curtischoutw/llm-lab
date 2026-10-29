@@ -11,7 +11,8 @@ stdout／stderr、輸出資料夾的檔案、下載清單的內容、假 server 
   腳本拿到的 Chrome 路徑就是這個 wrapper。
 - 假頁面依官網結構筆記的最小結構製作：主內容區含預設收合的區塊與彈窗，主內容區外有導覽選單，
   頁面裡有 script 與 style。
-- 假 server 記錄每個請求的路徑、收到的時間與 User-Agent。
+- 假 server 記錄每個請求的路徑、收到的時間與 User-Agent。沒有登記的路徑交給 fallback（預設 404）；
+  文件下載頁用 fallback 模擬官網「超過最後一頁時回 200 並重複最後一頁」。
 
 執行方式：python3 -m unittest scripts/test_fetch_taishin.py
 
@@ -28,8 +29,10 @@ import tempfile
 import threading
 import time
 import unittest
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, quote, urlparse
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "fetch_taishin.py"
@@ -40,6 +43,9 @@ OVERVIEW_PATH = "/TSB/personal/credit/intro/overview/"
 CARD_PATH_FORMAT = "/TSB/personal/credit/intro/overview/{cg}/{card}/"
 RIGHTS_LIST_PATH = "/TSB/personal/credit/intro/rights/"
 RIGHTS_PATH_FORMAT = "/TSB/personal/credit/intro/rights/{group}/{page}/"
+DOWNLOAD_LIST_PATH = "/TSB/personal/common/download/index.html"
+DOWNLOAD_QUERY = "?nav1=credit&nav2=file-download"
+FILES_DIR = "/TSB/export/sites/TSB/files/creditcard/"
 FAST_INTERVAL = "0.02"
 
 
@@ -99,6 +105,40 @@ def rights_list_html(sub_paths: list[str]) -> str:
     )
 
 
+def download_page_html(pdf_paths: list[str], total_pages: int) -> str:
+    """產生文件下載頁：每個 PDF 一個 <li>，外加頁碼選單與不該下載的干擾連結。
+
+    Args:
+        pdf_paths: 這一頁的 PDF 路徑（只有路徑的相對網址，和官網一樣）。
+        total_pages: 頁碼選單列出的頁數。
+
+    Returns:
+        下載頁的 HTML。
+    """
+    items = "".join(
+        f'<li><div class="text-block"><p>文件 {path}</p></div>'
+        f'<div class="ts-comp-30 btn-block"><div class="editor-btnnn"><div class="btnnn">'
+        f'<a href="{path}" title="x" class="oval-style" target="_blank">立即下載</a></div></div></div></li>'
+        for path in pdf_paths
+    )
+    options = "".join(f'<option value="{n}">{n}</option>' for n in range(1, total_pages + 1))
+    return (
+        "<html><body>"
+        '<a href="/TSB/personal/credit/intro/overview/">信用卡總覽</a>'
+        '<a href="/TSB/personal/credit/intro/rights/">信用卡權益</a>'
+        '<a href="https://example.invalid/outside.pdf">外部網站的 PDF</a>'
+        f'<ul class="list-and-btn-block">{items}</ul>'
+        f'<a href="?page={total_pages}&nav2=file-download&nav1=credit" title="到最末頁">到最末頁</a>'
+        f'<select name="page" id="_page">{options}</select>'
+        "</body></html>"
+    )
+
+
+def pdf_bytes(path: str) -> bytes:
+    """產生內容隨路徑而異、以 %PDF- 開頭的假 PDF。"""
+    return b"%PDF-1.4\n" + path.encode() + b"\n%%EOF\n"
+
+
 def card_html(label: str) -> str:
     """產生卡片頁：主內容區含收合區塊、彈窗與未關閉的標籤，主內容區外有導覽選單與頁尾。
 
@@ -146,12 +186,18 @@ class FakeServer:
     def __init__(self, routes: dict[str, tuple[int, bytes]]) -> None:
         self.routes = routes
         self.requests: list[tuple[str, float, str]] = []
+        self.fallback: Callable[[str], tuple[int, bytes]] | None = None
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802
                 outer.requests.append((self.path, time.monotonic(), self.headers.get("User-Agent", "")))
-                status, body = outer.routes.get(self.path, (404, b"not found"))
+                if self.path in outer.routes:
+                    status, body = outer.routes[self.path]
+                elif outer.fallback is not None:
+                    status, body = outer.fallback(self.path)
+                else:
+                    status, body = 404, b"not found"
                 self.send_response(status)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -232,6 +278,7 @@ class ScriptTestCase(unittest.TestCase):
         # 沒有任何子頁的總覽頁與權益頁；案例需要子頁時用 serve_cards、serve_rights 覆蓋
         self.serve_cards({})
         self.serve_rights({})
+        self.serve_downloads([[]])
 
     def serve_cards(self, cards: dict[str, str]) -> None:
         """登記總覽頁與各卡片頁。
@@ -252,6 +299,26 @@ class ScriptTestCase(unittest.TestCase):
         self.routes[RIGHTS_LIST_PATH] = (200, rights_list_html(list(pages)).encode())
         for path, html in pages.items():
             self.routes[path] = (200, html.encode())
+
+    def serve_downloads(self, pages: list[list[str]]) -> None:
+        """登記文件下載頁的每一頁與其中的 PDF；page 超過最後一頁時回 200 並重複最後一頁，和官網一樣。
+
+        Args:
+            pages: 每一頁的 PDF 路徑清單。同一個路徑只登記一次內容（pdf_bytes）。
+        """
+        for paths in pages:
+            for path in paths:
+                self.routes[path] = (200, pdf_bytes(path))
+
+        def page_response(request_path: str) -> tuple[int, bytes]:
+            parsed = urlparse(request_path)
+            number = parse_qs(parsed.query).get("page", [""])[0]
+            if parsed.path != DOWNLOAD_LIST_PATH or not number.isdigit() or int(number) < 1:
+                return 404, b"not found"
+            shown = min(int(number), len(pages))
+            return 200, download_page_html(pages[shown - 1], len(pages)).encode()
+
+        self.server.fallback = page_response
 
     def run_script(
         self, *, chrome: str | None = None, interval: str = FAST_INTERVAL, path: str | None = None
@@ -302,6 +369,22 @@ INSURANCE = RIGHTS_PATH_FORMAT.format(group="insurance", page="right0201")
 PARKING = RIGHTS_PATH_FORMAT.format(group="parking", page="right0301")
 # 真實的權益子頁有 notice/-00001/，路徑最後一段以連字號開頭
 NOTICE_DASH = RIGHTS_PATH_FORMAT.format(group="notice", page="-00001")
+
+APPLICATION = FILES_DIR + "word_CR04131_1150B.pdf"
+TERMS = FILES_DIR + "terms_1150.pdf"
+FEES = FILES_DIR + "fees.pdf"
+# 真實的檔名有以 - 或 _ 開頭的，以 - 開頭的名字當命令列參數會被當成選項
+DASH_NAMED = FILES_DIR + "-_11407.pdf"
+UNDERSCORE_NAMED = FILES_DIR + "__11507.pdf"
+
+
+def download_page_path(number: int) -> str:
+    """文件下載頁第 number 頁的請求路徑（含 query）。"""
+    return f"{DOWNLOAD_LIST_PATH}{DOWNLOAD_QUERY}&page={number}"
+
+
+# 預設的下載頁只有第 1 頁而且沒有 PDF：沒有新連結，所以每次執行都剛好請求這一頁
+DOWNLOAD_PAGE_1 = download_page_path(1)
 
 
 # ==============================
@@ -438,8 +521,8 @@ class CardPageTests(ScriptTestCase):
     def test_duplicate_links_and_non_card_links_are_fetched_once_or_not_at_all(self) -> None:
         self.serve_cards({RICHART: card_html("RICHART")})
         self.run_script()
-        # 總覽頁 1 次；卡片頁 1 次（3 個錨點指向同一頁）；權益連結、申辦連結、總覽頁自己的連結都不下載；權益頁 1 次
-        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RICHART, RIGHTS_LIST_PATH])
+        # 總覽頁 1 次；卡片頁 1 次（3 個錨點指向同一頁）；權益連結、申辦連結、總覽頁自己的連結都不下載；權益頁 1 次；下載頁 1 次
+        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RICHART, RIGHTS_LIST_PATH, DOWNLOAD_PAGE_1])
 
 
 class RightsPageTests(ScriptTestCase):
@@ -471,7 +554,7 @@ class RightsPageTests(ScriptTestCase):
         self.serve_rights({INSURANCE: card_html("INSURANCE")})
         self.run_script()
         # 權益頁的選單連結（權益頁自己、總覽、繳費）、PDF 連結、卡片頁連結都不下載；重複的錨點只抓一次
-        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, INSURANCE])
+        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, INSURANCE, DOWNLOAD_PAGE_1])
 
     def test_cards_and_rights_are_downloaded_in_one_run_into_separate_folders(self) -> None:
         self.serve_cards({RICHART: card_html("RICHART")})
@@ -494,6 +577,196 @@ class RightsPageTests(ScriptTestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("找到 46 個權益子頁（預期 46）", result.stdout)
         self.assertEqual(len(self.manifest()), 46)
+
+
+class DownloadAreaTests(ScriptTestCase):
+    def test_walks_pages_until_a_page_has_no_new_pdf_and_saves_each_pdf_unchanged(self) -> None:
+        self.serve_downloads([[APPLICATION, DASH_NAMED], [TERMS, UNDERSCORE_NAMED]])
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # 第 3 頁重複第 2 頁的清單（和官網一樣）：沒有新連結，所以停在第 3 頁，不發第 4 頁的請求
+        list_requests = [p for p in self.server.paths() if p.startswith(DOWNLOAD_LIST_PATH)]
+        self.assertEqual(list_requests, [download_page_path(1), download_page_path(2), download_page_path(3)])
+        self.assertEqual(
+            [f for f in self.files_under_out() if f.startswith("downloads/")],
+            [
+                "downloads/download_-_11407.pdf",
+                "downloads/download___11507.pdf",
+                "downloads/download_terms_1150.pdf",
+                "downloads/download_word_CR04131_1150B.pdf",
+            ],
+        )
+        for path in (APPLICATION, TERMS, DASH_NAMED, UNDERSCORE_NAMED):
+            saved = self.out / "downloads" / f"download_{path.rsplit('/', 1)[1]}"
+            self.assertEqual(saved.read_bytes(), pdf_bytes(path))
+        self.assertEqual(sorted(p for p in self.server.paths() if p.endswith(".pdf")), sorted([APPLICATION, TERMS, DASH_NAMED, UNDERSCORE_NAMED]))
+
+
+    def test_pdf_listed_on_several_pages_and_non_pdf_links_are_handled_once_or_not_at_all(self) -> None:
+        # 第 2 頁重複第 1 頁的 B，另有新的 C：有新連結所以繼續翻；頁面上的選單連結與外部網站的 PDF 不下載
+        self.serve_downloads([[APPLICATION, TERMS], [TERMS, FEES]])
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        pdf_requests = [p for p in self.server.paths() if p.endswith(".pdf")]
+        self.assertEqual(sorted(pdf_requests), sorted([APPLICATION, TERMS, FEES]))
+        self.assertEqual(len([r for r in self.manifest() if r["category"] == "下載"]), 3)
+        self.assertNotIn("outside", result.stdout + result.stderr)
+
+    def test_prints_actual_pdf_count_and_continues_when_it_is_not_19(self) -> None:
+        self.serve_downloads([[APPLICATION, TERMS]])
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("找到 2 個 PDF（預期 19）", result.stdout)
+
+    def test_names_are_unique_when_different_urls_share_a_file_name(self) -> None:
+        other_dir = "/TSB/export/sites/TSB/personal/credit/intro/payment/"
+        same_name = [FEES, other_dir + "fees.pdf", other_dir + "Fees.pdf", APPLICATION]
+        self.serve_downloads([same_name])
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        records = {r["url"]: r["filename"] for r in self.manifest()}
+        names = [records[self.server.base_url + path] for path in same_name]
+        self.assertEqual(len({n.lower() for n in names}), 4, names)
+        self.assertEqual(names[3], "download_word_CR04131_1150B.pdf")
+        for name in names[:3]:
+            self.assertRegex(name, r"^download_[Ff]ees_[0-9a-f]{8}\.pdf$")
+        for path, name in zip(same_name, names):
+            self.assertEqual((self.out / "downloads" / name).read_bytes(), pdf_bytes(path))
+
+    def test_file_names_with_spaces_and_chinese_are_requested_percent_encoded_and_saved_with_safe_names(self) -> None:
+        href = FILES_DIR + "費用 表.pdf"
+        self.serve_downloads([[href]])
+        self.routes[quote(href)] = (200, pdf_bytes(href))
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(quote(href), self.server.paths())
+        self.assertEqual((self.out / "downloads" / "download_費用_表.pdf").read_bytes(), pdf_bytes(href))
+
+    def test_list_pages_and_pdfs_are_spaced_by_the_configured_interval(self) -> None:
+        self.serve_downloads([[APPLICATION], [TERMS]])
+        interval = 0.3
+        self.assertEqual(self.run_script(interval=str(interval)).returncode, 0)
+        times = [t for _path, t, _ua in self.server.requests]
+        # 總覽頁、權益頁、下載頁 3 頁、PDF 2 份
+        self.assertEqual(len(times), 7)
+        for earlier, later in zip(times, times[1:]):
+            self.assertGreaterEqual(later - earlier, interval - 0.02)
+
+
+class DownloadAreaManifestTests(ScriptTestCase):
+    def test_record_has_the_same_fields_and_no_html_sha256(self) -> None:
+        self.serve_cards({RICHART: card_html("RICHART")})
+        self.serve_downloads([[TERMS]])
+        self.assertEqual(self.run_script().returncode, 0)
+        records = {r["filename"]: r for r in self.manifest()}
+        self.assertEqual(sorted(records), ["card_cg047_card001.pdf", "download_terms_1150.pdf"])
+        record = records["download_terms_1150.pdf"]
+        pdf = (self.out / "downloads" / "download_terms_1150.pdf").read_bytes()
+        self.assertEqual(record["url"], self.server.base_url + TERMS)
+        self.assertEqual(record["category"], "下載")
+        self.assertEqual(record["format"], "PDF")
+        self.assertEqual(record["downloaded_at"], time.strftime("%Y-%m-%d"))
+        self.assertEqual(record["sha256"], hashlib.sha256(pdf).hexdigest())
+        self.assertEqual(record["html_sha256"], "")
+        self.assertEqual(record["result"], "已下載")
+        self.assertEqual(set(record), set(records["card_cg047_card001.pdf"]))
+        self.assertFalse((self.out / "_meta" / "html" / "download_terms_1150.html").exists())
+
+
+class DownloadAreaFailureTests(ScriptTestCase):
+    def test_pdf_http_error_fails_that_pdf_only(self) -> None:
+        self.serve_downloads([[APPLICATION, TERMS, FEES]])
+        self.routes[TERMS] = (500, b"boom")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("download_terms_1150.pdf", result.stderr)
+        self.assertIn("500", result.stderr)
+        self.assertEqual(
+            sorted(p.name for p in (self.out / "downloads").iterdir()),
+            ["download_fees.pdf", "download_word_CR04131_1150B.pdf"],
+        )
+        failed = [r for r in self.manifest() if r["result"] == "失敗"]
+        self.assertEqual([r["filename"] for r in failed], ["download_terms_1150.pdf"])
+        self.assertEqual(failed[0]["sha256"], "")
+
+    def test_content_that_does_not_start_with_pdf_magic_is_a_failure_and_is_not_saved(self) -> None:
+        self.serve_downloads([[APPLICATION, TERMS, FEES]])
+        self.routes[TERMS] = (200, b"<html><body>Service Unavailable</body></html>")
+        self.routes[FEES] = (200, b"")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("download_terms_1150.pdf", result.stderr)
+        self.assertIn("download_fees.pdf", result.stderr)
+        self.assertIn("不是 PDF", result.stderr)
+        self.assertEqual(
+            [f for f in self.files_under_out() if f != "_meta/manifest.jsonl"],
+            ["downloads/download_word_CR04131_1150B.pdf"],
+        )
+
+    def test_first_page_failure_exits_nonzero_names_the_list_and_keeps_the_other_categories(self) -> None:
+        self.serve_cards({RICHART: card_html("RICHART")})
+        self.routes[DOWNLOAD_PAGE_1] = (404, b"gone")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("文件下載", result.stderr)
+        self.assertIn("第 1 頁", result.stderr)
+        self.assertIn("404", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertTrue((self.out / "cards" / "card_cg047_card001.pdf").is_file())
+
+    def test_later_page_failure_exits_nonzero_and_names_the_page(self) -> None:
+        self.serve_downloads([[APPLICATION], [TERMS]])
+        self.routes[download_page_path(2)] = (500, b"boom")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("文件下載", result.stderr)
+        self.assertIn("第 2 頁", result.stderr)
+        self.assertIn("500", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_stops_at_the_page_limit_when_every_page_keeps_having_new_pdfs(self) -> None:
+        def endless(request_path: str) -> tuple[int, bytes]:
+            number = int(parse_qs(urlparse(request_path).query)["page"][0])
+            return 200, download_page_html([f"{FILES_DIR}page{number}.pdf"], number).encode()
+
+        self.server.fallback = endless
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("文件下載", result.stderr)
+        self.assertIn("上限 20 頁", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        list_requests = [p for p in self.server.paths() if p.startswith(DOWNLOAD_LIST_PATH)]
+        self.assertEqual(list_requests, [download_page_path(n) for n in range(1, 21)])
+
+
+class DownloadAreaRerunTests(ScriptTestCase):
+    def test_existing_pdfs_are_skipped_without_requesting_them_but_the_list_is_walked_again(self) -> None:
+        self.serve_downloads([[APPLICATION], [TERMS]])
+        self.assertEqual(self.run_script().returncode, 0)
+        first = {r["filename"]: r for r in self.manifest()}
+        self.server.requests.clear()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            [p for p in self.server.paths() if p.endswith(".pdf")], [], "已存在的 PDF 不該再請求"
+        )
+        second = {r["filename"]: r for r in self.manifest()}
+        self.assertEqual(sorted(second), sorted(first))
+        for name, record in second.items():
+            self.assertEqual(record["result"], "已存在略過")
+            self.assertEqual(record["sha256"], first[name]["sha256"])
+            self.assertEqual(record["html_sha256"], "")
+
+    def test_failed_pdf_is_fetched_again_on_the_next_run(self) -> None:
+        self.serve_downloads([[APPLICATION]])
+        self.routes[APPLICATION] = (200, b"<html>error</html>")
+        self.assertEqual(self.run_script().returncode, 1)
+        self.routes[APPLICATION] = (200, pdf_bytes(APPLICATION))
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([r["result"] for r in self.manifest() if r["category"] == "下載"], ["已下載"])
 
 
 class ChromeInputTests(ScriptTestCase):
@@ -621,7 +894,7 @@ class OverviewTests(ScriptTestCase):
         self.serve_rights({INSURANCE: card_html("INSURANCE")})
         result = self.run_script()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, INSURANCE])
+        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, INSURANCE, DOWNLOAD_PAGE_1])
         self.assertTrue((self.out / "rights" / "rights_insurance_right0201.docx").is_file())
 
     def test_rights_list_failure_exits_nonzero_names_the_list_and_keeps_the_cards(self) -> None:
@@ -785,7 +1058,7 @@ class RerunTests(ScriptTestCase):
 
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH], "第二次只該請求兩個列表頁")
+        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, DOWNLOAD_PAGE_1], "第二次只該請求列表頁")
         self.assertEqual(pdf.read_bytes(), before)
         second = {r["filename"]: r for r in self.manifest()}
         self.assertEqual(sorted(second), sorted(first))
@@ -806,7 +1079,7 @@ class RerunTests(ScriptTestCase):
         empty.mkdir()
         result = self.run_script(path=str(empty))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH])
+        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, DOWNLOAD_PAGE_1])
         self.assertEqual(docx.read_bytes(), before)
         second = self.manifest()[0]
         self.assertEqual(second["result"], "已存在略過")
@@ -827,7 +1100,7 @@ class RequestPolicyTests(ScriptTestCase):
     def test_every_request_carries_an_identifiable_user_agent(self) -> None:
         self.serve_cards({RICHART: card_html("RICHART")})
         self.run_script()
-        self.assertEqual(len(self.server.requests), 3)
+        self.assertEqual(len(self.server.requests), 4)
         for _path, _time, user_agent in self.server.requests:
             self.assertTrue(user_agent.startswith("llm-lab-fetch-taishin/"), user_agent)
 
@@ -838,7 +1111,7 @@ class RequestPolicyTests(ScriptTestCase):
         interval = 0.3
         self.assertEqual(self.run_script(interval=str(interval)).returncode, 0)
         times = [t for _path, t, _ua in self.server.requests]
-        self.assertEqual(len(times), 5)
+        self.assertEqual(len(times), 6)
         for earlier, later in zip(times, times[1:]):
             self.assertGreaterEqual(later - earlier, interval - 0.02)
 
