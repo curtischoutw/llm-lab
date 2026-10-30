@@ -25,15 +25,23 @@
 關鍵設計決策：
 - 直接列印原網址會漏掉收合區與彈窗：2026-10-30 實測 Richart 卡片頁的 PDF 只有 2 頁、1,074 字，
   原始 HTML 的可見文字是 36,767 字，「23:59」與「天天刷」都是 0 次。官網 CSS 讓預設收合的區塊與彈窗在列印時不顯示。
-  所以先從原始 HTML 取出主內容區（卡片頁是 id="centercontainer"），拿掉其中的 <script> 與 <style>，
+  所以先從原始 HTML 取出主內容區（卡片頁是 id="centercontainer"），拿掉其中會執行或載入外部內容的部分，
   包成只帶固定列印用 CSS 與 <base href>（指回原網址）的本機 HTML，再交給 Chrome。
   這樣列印出的版面是純 HTML 的排版，不像官網。
+- 拿掉的部分（strip_active_content，用 HTMLParser 重新輸出，不用正規表示式）：<script>、<style>、<iframe> 連同內容，
+  <link rel="stylesheet">，名稱以 on 開頭的事件屬性（onclick、onerror、onload…），值是 javascript: 網址的 href／src 等屬性
+  （只拿掉屬性，文字留著），以及註解。headless Chrome 開著 JS，所以 Chrome 的暫時 profile 另外把 JavaScript 設成封鎖。
+  封鎖用 profile 的 Preferences（`profile.default_content_setting_values.javascript` = 2），不是命令列參數：
+  2026-10-30 用真的 Chrome 對本機 HTML 實測，`--disable-javascript` 沒有效果（inline script 與 onload 照常寫入文字），
+  `--blink-settings=scriptEnabled=false` 讓 `--print-to-pdf` 結束碼 0 但沒有產出 PDF；只有 Preferences 讓 PDF 沒有 JS 寫入的文字。
 - 找不到主內容區的頁面記為失敗，原因寫「找不到主內容區」，不退回列印整頁。
 - 權益子頁和卡片頁共用同一套流程（下載、取主內容區、轉檔、清單、略過、失敗處理），只有轉檔的外部命令不同：
   `<libreoffice 或 soffice> --headless --convert-to "docx:MS Word 2007 XML" --outdir <資料夾> <HTML 檔>`。
   目標一定要寫完整的濾鏡名稱：2026-10-30 實測，LibreOffice 把 HTML 當成 Writer/Web 文件開啟，
   目標只寫 docx 會回報 "no export filter"。LibreOffice 沿用 RAG-Anything 的找法，在 PATH 上依序找
   libreoffice、soffice；找不到時，每一個權益子頁各自記為失敗。轉檔不受官網 CSS 影響，取主內容區是為了去掉導覽選單。
+  每次轉檔加上 `-env:UserInstallation=file://<暫時資料夾>/profile` 使用暫時的 user profile（轉檔後移除）：
+  不指定時，使用者開著 LibreOffice，headless 轉檔會結束碼 0 但沒有產出。
 - 本地檔名由網址路徑組成並加類別前綴（卡片 card_cg047_card001，權益 rights_insurance_right0201，
   下載 download_word_CR04131_1150B），整批唯一。前綴也讓以 - 開頭的 PDF 檔名（真實有 -_11407.pdf）不會變成以 - 開頭。
   檔名中字母、數字、底線、. 與 - 以外的字元換成底線；同一類別裡兩個網址組出同一個檔名時（不分大小寫），兩者都加上完整網址的
@@ -42,6 +50,8 @@
   官網超過最後一頁時回 200 並重複最後一頁（2026-10-30 調查：page=3 與 page=99 都等於 page=2），不是空清單，
   所以「沒有新連結」會在最後一頁的下一頁停下來（目前 2 頁，發 3 個請求）。
   PDF 的 href 是只有路徑的相對網址，補上列表頁的網域；只收和列表頁同一個網域、路徑以 .pdf 結尾的連結，網址去除重複。
+  送出請求前，路徑與 query 中 ASCII 以外的字元做百分比編碼（request_url）；card 與權益子頁的網址去掉 fragment 再去重複
+  （`card001/` 與 `card001/#tab2` 是同一頁）。列表頁裡格式錯誤的 href（例如 `http://[bad`）略過，不讓那一類失敗。
   PDF 是不可信資料：存檔前確認內容以 `%PDF-` 開頭，不是的話（例如錯誤頁的 HTML）那一份記為失敗，不存檔。
 - 刷卡優惠列表（mkpcard）：分類 A–I 各自從 `/tscccms/promotion/offerList/<字母>?page=N` 的第 1 頁往後翻（GET，不是 POST），
   直到某一頁沒有新連結為止。官網超過最後一頁時回 200、清單為空、內容是「查無資料」（和下載區的重複最後一頁不同），
@@ -53,17 +63,25 @@
   正文裡的其他寫法（「活動期間：2026/9/22-10/31」等自由文字）不當期間。結束日早於下載當天（本機日期）略過，
   結果記為「過期略過」，不轉檔；結束日等於下載當天仍下載。讀不出期間（沒有這個區塊、格式不同、日期不存在）
   時照樣下載，period 記為「期間不明」。過期與期間不明的活動，原始 HTML 都照樣存檔。
+  「下載當天」一次執行只取一次（Run.today），過期判斷與清單的下載日期共用，執行跨過午夜時前後一致。
+  再次執行時，活動沒有 PDF 但 `_meta/html` 已有原始 HTML 且讀出的期間已過期，直接記為過期略過，不再請求詳情頁。
 - 活動頁的主內容區是 class 含 page-content 的元素（第一個），其餘處理和卡片頁相同（web_page_producer）。
 - 活動圖片：主視覺是詳情頁 `div.banner-image` 裡的第一個 `<img>`，沒有這個 div 就視為沒有主視覺。
   內容區的第一張 `<img>` 是分享圖示（round-default.png），不是主視覺。2026-10-30 的 5 個樣本中有 2 頁沒有主視覺。
-  挑選：依活動的發現順序，跳過結束日早於下載當天的活動與沒有原始 HTML 的活動（下載失敗），取前 8 個有主視覺的。
-  讀存下來的原始 HTML 挑選，不重新請求，所以再次執行時挑出同一批。副檔名不支援的主視覺照樣佔名額，記為「格式不支援略過」。
+  挑選：依活動的發現順序，只算活動 PDF 確實存在的活動（本次下載，或已存在而略過），取前 8 個有主視覺的。
+  過期的活動與 PDF 失敗（下載、列印失敗）的活動沒有 PDF，不算；已存在的活動不論現在是否過期都算，所以再次執行時挑出同一批。
+  讀存下來的原始 HTML 挑選，不重新請求。副檔名不支援的主視覺照樣佔名額，記為「格式不支援略過」。
   支援的副檔名取自 rag_lab/formats.py 的 FORMATS["圖片"]（專案裡唯一的一份），腳本啟動時把 repo 根目錄放進 sys.path 來 import。
-  圖片是不可信資料：只向 mkp 網域請求（其他網域的主視覺記為失敗），存檔前檢查檔頭（magic bytes）和副檔名一致
+  主視覺網址若是指向官網 mkp 網域的絕對網址，和活動詳情頁連結一樣換成 TAISHIN_MKP_BASE 的前綴（Run.to_mkp），所以用本機
+  server 測試時真實格式的主視覺也會向本機請求。
+  圖片是不可信資料：只向 mkp 網域請求（其他網域的主視覺記為失敗，訊息列出該網域與 mkp 網域），存檔前檢查檔頭（magic bytes）和副檔名一致
   （png、jpg／jpeg、bmp、gif、tif／tiff、webp 各有檢查），不符的記為失敗、不存檔。副檔名取自網址，轉成小寫。
-- 單頁失敗（HTTP、網路、轉檔、檔案系統）時記下原因，其他頁照常處理；最後列出所有失敗的頁面並以非零碼結束。
+- 單頁失敗（HTTP、網路、轉址到外部網域、網址無法送出請求、轉檔、檔案系統）時記下原因，其他頁照常處理；最後列出所有失敗的頁面並以非零碼結束。
   列表頁（總覽頁、權益頁、文件下載頁與刷卡優惠列表的任何一頁）本身失敗時，那一類沒有任何網址，指出是哪一個列表；
   其他類別照常處理，最後以非零碼結束。
+- 轉址：腳本自己發出的請求只跟隨原請求網域內的轉址。轉址到其他網域時不跟隨，那一頁記為失敗，原因是
+  「轉址到外部網域 <網域>」。2026-10-30 實測，權益頁的 Visa、Mastercard、JCB 子頁會轉址到國際組織的網站。
+  「原請求的網域」是環境變數替換後實際請求的網域，所以本機 server 的測試也適用。
 - 再次執行時，本地檔案已存在就略過（不發請求）並記入清單；要更新內容時刪除資料夾後重新下載。
 - 請求間隔：腳本自己發出的每個 HTTP 請求之間至少 TAISHIN_REQUEST_INTERVAL_SEC 秒（預設 2）。
   這個環境變數只給測試調小。
@@ -72,7 +90,7 @@
   TAISHIN_MKP_BASE 取代 https://mkp.taishinbank.com.tw（活動詳情頁與主視覺）。列表裡指向 mkp 的絕對網址
   會被換成 TAISHIN_MKP_BASE 的前綴，所以測試只要設這三個變數，不會有請求送到真的官網。
   TAISHIN_CHROME 指定 Chrome 執行檔，預設是 macOS 上 Google Chrome 的標準安裝路徑。
-- Chrome 列印時使用暫時的使用者資料夾，不用使用者自己的 Chrome profile。
+- Chrome 列印時使用暫時的使用者資料夾（含封鎖 JavaScript 的 Preferences），不用使用者自己的 Chrome profile。
 - 下載的內容是不可信資料：腳本不執行它們；外部命令用參數列表呼叫。
 
 已知極限：
@@ -88,6 +106,10 @@
   翻滿上限仍有新連結時，視為刷卡優惠列表失敗。
 - 圖片只檢查檔頭和副檔名一致，不檢查圖片是否完整、能不能解碼。沒有大小上限（ASSUMPTION）。
 - 活動已存在而再次執行時，不重新判斷是否過期：已下載的活動 PDF 與圖片留著，清單記為已存在略過。
+- 已過期的活動，再次執行時依上次存下的原始 HTML 判斷，不再請求；官網之後延長該活動的期間，要刪除 `_meta/html` 裡那個檔案才會重新下載。
+- 行內 `style="display:none"` 沒有處理：2026-10-30 實測轉出率 0.93–1.01，沒有因此漏字。
+- 列印前拿掉註解與 <iframe>、樣式表連結，所以 iframe 裡的內容與外部樣式表不會出現在 PDF／.docx；<object>、<embed> 沒有處理
+  （Chrome 的 JavaScript 已封鎖，LibreOffice 不執行腳本）。
 
 Dependencies: 標準函式庫；rag_lab.formats（專案內，只用標準函式庫，取圖片副檔名清單）；
 列印需要 Google Chrome，轉 .docx 需要 LibreOffice。
@@ -112,7 +134,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import date
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import quote, unquote, urljoin, urlparse, urlunparse
+from typing import IO
+from urllib.parse import ParseResult, quote, unquote, urljoin, urlparse, urlunparse
 
 # 圖片格式的清單沿用專案唯一的一份（rag_lab/formats.py，只用標準函式庫）；腳本在 scripts/ 底下，
 # 要先把 repo 根目錄放進 sys.path 才找得到 rag_lab
@@ -165,6 +188,14 @@ WWW_BASE_ENV = "TAISHIN_WWW_BASE"
 MKPCARD_BASE_ENV = "TAISHIN_MKPCARD_BASE"
 MKP_BASE_ENV = "TAISHIN_MKP_BASE"
 
+# request_url 編碼 query 時保持原樣的字元：query 的分隔符號與已經編碼的 %
+QUERY_SAFE = "=&%+/?:;,@$!*'()~"
+
+# Chrome profile 的 Preferences：封鎖所有網頁的 JavaScript（content setting 2 = block）。
+# 2026-10-30 用真的 Chrome 對本機 HTML 實測：--disable-javascript 沒有效果，--blink-settings=scriptEnabled=false
+# 會讓 --print-to-pdf 結束碼 0 但沒有產出 PDF，只有這個設定讓 inline script 與 onload 都不執行
+CHROME_PREFERENCES = {"profile": {"default_content_setting_values": {"javascript": 2}}}
+
 # 固定的列印用 CSS：圖片不超出頁寬，表格有框線
 PRINT_CSS = "img{max-width:100%;height:auto}table{border-collapse:collapse}td,th{border:1px solid #999;padding:2px}"
 
@@ -183,6 +214,12 @@ class SkipDocument(Exception):
     """這份文件依規則不下載（不是失敗）；result 是寫進清單的結果，訊息是寫進清單的原因。"""
 
     def __init__(self, result: str, detail: str) -> None:
+        """SkipDocument 的建構。
+
+        Args:
+            result: 寫進清單的結果（RESULT_EXPIRED 或 RESULT_UNSUPPORTED）。
+            detail: 寫進清單的原因。
+        """
         super().__init__(detail)
         self.result = result
 
@@ -208,10 +245,58 @@ class Record:
 # ==============================
 
 
+class _SameDomainRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """只跟隨同一個網域內的轉址；轉址到其他網域時拋出 FetchError，不發出那個請求。"""
+
+    def __init__(self, domain: str) -> None:
+        """_SameDomainRedirectHandler 的建構。
+
+        Args:
+            domain: 原請求的網域（netloc，小寫）。
+        """
+        self.domain = domain
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: http.client.HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        """urllib 要跟隨轉址時呼叫。
+
+        Args:
+            req: 被轉址的請求。
+            fp: 轉址回應。
+            code: 轉址的 HTTP 狀態碼。
+            msg: 狀態文字。
+            headers: 回應標頭。
+            newurl: 轉址目標的完整網址。
+
+        Returns:
+            跟隨轉址用的新請求；目標網域與原請求相同時才會有。
+
+        Raises:
+            FetchError: 目標網域和原請求不同。
+        """
+        target = urlparse(newurl).netloc
+        if target.lower() != self.domain:
+            fp.close()
+            raise FetchError(f"轉址到外部網域 {target}，不跟隨")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 class Fetcher:
-    """腳本自己發出的 HTTP 請求：帶 User-Agent，每個請求之間至少間隔 interval 秒。"""
+    """腳本自己發出的 HTTP 請求：帶 User-Agent，每個請求之間至少間隔 interval 秒；轉址只跟隨原請求的網域內。"""
 
     def __init__(self, interval: float) -> None:
+        """Fetcher 的建構。
+
+        Args:
+            interval: 兩個請求之間至少間隔的秒數。
+        """
         self.interval = interval
         self._last_end = float("-inf")
 
@@ -222,17 +307,21 @@ class Fetcher:
             url: 完整網址。
 
         Returns:
-            回應 body。網路失敗或 HTTP 狀態錯誤時拋出 FetchError。
+            回應 body。網路失敗、HTTP 狀態錯誤、轉址到原請求以外的網域，或網址本身無法送出請求
+            （例如路徑含 ASCII 以外的字元）時拋出 FetchError。
         """
         wait = self._last_end + self.interval - time.monotonic()
         if wait > 0:
             time.sleep(wait)
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        opener = urllib.request.build_opener(_SameDomainRedirectHandler(urlparse(url).netloc.lower()))
         try:
-            with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as resp:
+            with opener.open(req, timeout=TIMEOUT_SEC) as resp:
                 return resp.read()
         except NETWORK_ERRORS as exc:
             raise FetchError(f"下載失敗（{type(exc).__name__}: {exc}）") from exc
+        except ValueError as exc:
+            raise FetchError(f"網址無法送出請求（{type(exc).__name__}: {exc}）") from exc
         finally:
             self._last_end = time.monotonic()
 
@@ -243,7 +332,15 @@ class Fetcher:
 
 
 def _has_class(attrs: list[tuple[str, str | None]], css_class: str) -> bool:
-    """attrs 的 class 屬性是否含有 css_class 這個完整的 class 名稱。"""
+    """attrs 的 class 屬性是否含有 css_class 這個完整的 class 名稱。
+
+    Args:
+        attrs: 標籤的屬性清單。
+        css_class: class 名稱。
+
+    Returns:
+        class 屬性（以空白分隔）含有 css_class 時為 True。
+    """
     return css_class in (dict(attrs).get("class") or "").split()
 
 
@@ -254,15 +351,42 @@ class _AnchorCollector(HTMLParser):
     """
 
     def __init__(self, required_class: str | None = None) -> None:
+        """_AnchorCollector 的建構。
+
+        Args:
+            required_class: 只收 class 含這個名稱的 <a>；None 表示全收。
+        """
         super().__init__(convert_charrefs=True)
         self.required_class = required_class
         self.hrefs: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """遇到開始標籤時記下符合條件的 <a> 的 href。
+
+        Args:
+            tag: 標籤名稱（小寫）。
+            attrs: 屬性（名稱小寫，值已還原字元參照；沒有值的屬性是 None）。
+        """
         if tag == "a" and (self.required_class is None or _has_class(attrs, self.required_class)):
             href = dict(attrs).get("href")
             if href:
                 self.hrefs.append(href)
+
+
+def resolve_href(base_url: str, href: str) -> ParseResult | None:
+    """把列表頁裡的 href 解析成完整網址。
+
+    Args:
+        base_url: 列表頁網址，用來解析相對路徑。
+        href: <a> 的 href 屬性。
+
+    Returns:
+        解析後的網址；href 格式錯誤（例如 `http://[bad`）時為 None，呼叫端略過這個連結，不讓整個列表失敗。
+    """
+    try:
+        return urlparse(urljoin(base_url, href))
+    except ValueError:
+        return None
 
 
 def find_page_links(list_html: str, list_url: str, link_pattern: re.Pattern[str]) -> list[str]:
@@ -274,15 +398,16 @@ def find_page_links(list_html: str, list_url: str, link_pattern: re.Pattern[str]
         link_pattern: 子頁連結的路徑格式；選單、PDF 等其他連結不符合就不收。
 
     Returns:
-        去除重複、保留出現順序的子頁完整網址（不含 query）。
+        去除重複、保留出現順序的子頁完整網址（不含 query 與 fragment；只差 fragment 的連結是同一頁）。
+        格式錯誤的 href 略過。
     """
     collector = _AnchorCollector()
     collector.feed(list_html)
     seen: dict[str, None] = {}
     for href in collector.hrefs:
-        absolute = urljoin(list_url, href)
-        if link_pattern.match(urlparse(absolute).path) and not urlparse(absolute).query:
-            seen[absolute] = None
+        parsed = resolve_href(list_url, href)
+        if parsed is not None and link_pattern.match(parsed.path) and not parsed.query:
+            seen[parsed._replace(fragment="").geturl()] = None
     return list(seen)
 
 
@@ -293,6 +418,12 @@ class _MainContentFinder(HTMLParser):
     """
 
     def __init__(self, attr: str, value: str) -> None:
+        """_MainContentFinder 的建構。
+
+        Args:
+            attr: 用哪個屬性找：id 或 class。
+            value: 屬性值（class 時是 class 名稱）。
+        """
         super().__init__(convert_charrefs=False)
         self.attr = attr
         self.value = value
@@ -302,6 +433,12 @@ class _MainContentFinder(HTMLParser):
         self.end: tuple[int, int] | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """找到符合條件的元素就記下起點；之後數同名標籤的深度。
+
+        Args:
+            tag: 標籤名稱（小寫）。
+            attrs: 屬性（名稱小寫，值已還原字元參照；沒有值的屬性是 None）。
+        """
         if self.end is not None:
             return
         if self.start is None:
@@ -311,11 +448,24 @@ class _MainContentFinder(HTMLParser):
             self.depth += 1
 
     def _matches(self, attrs: list[tuple[str, str | None]]) -> bool:
+        """屬性是否符合要找的主內容區。
+
+        Args:
+            attrs: 標籤的屬性清單。
+
+        Returns:
+            符合時為 True。
+        """
         if self.attr == "class":
             return _has_class(attrs, self.value)
         return dict(attrs).get(self.attr) == self.value
 
     def handle_endtag(self, tag: str) -> None:
+        """遇到結束標籤時，深度歸零就記下終點。
+
+        Args:
+            tag: 標籤名稱（小寫）。
+        """
         if self.start is None or self.end is not None or tag != self.tag:
             return
         self.depth -= 1
@@ -323,8 +473,144 @@ class _MainContentFinder(HTMLParser):
             self.end = self.getpos()
 
 
+# 值是網址的屬性：值以 javascript: 開頭時整個屬性拿掉
+URL_ATTRIBUTES = frozenset({"href", "src", "action", "formaction", "xlink:href", "data", "poster", "background"})
+# 連同內容整個拿掉的元素
+REMOVED_ELEMENTS = frozenset({"script", "style", "iframe"})
+
+
+def _is_javascript_url(value: str) -> bool:
+    """網址是不是 javascript: 開頭（瀏覽器解析網址時會忽略空白與控制字元，大小寫不分）。
+
+    Args:
+        value: 屬性值。
+
+    Returns:
+        移除空白與控制字元後以 javascript: 開頭（不分大小寫）時為 True。
+    """
+    return re.sub(r"[\x00-\x20]+", "", value).lower().startswith("javascript:")
+
+
+class _ActiveContentStripper(HTMLParser):
+    """把 HTML 重新輸出，拿掉會執行或載入外部內容的部分：
+
+    - <script>、<style>、<iframe> 連同內容；
+    - <link rel="stylesheet">；
+    - 事件屬性（名稱以 on 開頭，例如 onclick、onerror、onload）；
+    - 值是 javascript: 網址的 href、src 等屬性（只拿掉屬性，標籤與文字留著）。
+
+    註解不輸出；其餘標籤、屬性與文字（含字元參照）照原樣輸出，所以未關閉的 <p>、<li> 不受影響。
+    """
+
+    def __init__(self) -> None:
+        """_ActiveContentStripper 的建構。"""
+        super().__init__(convert_charrefs=False)
+        self.parts: list[str] = []
+        self.removing: str | None = None
+        self.removing_depth = 0
+
+    def _open_tag(self, tag: str, attrs: list[tuple[str, str | None]], self_closing: bool) -> None:
+        """輸出一個開始標籤（需要拿掉的除外）。
+
+        Args:
+            tag: 標籤名稱（小寫）。
+            attrs: 屬性（名稱小寫，值已還原字元參照）。
+            self_closing: 原文是不是 `<tag ... />` 的寫法。
+        """
+        if self.removing is not None:
+            if tag == self.removing and not self_closing:
+                self.removing_depth += 1
+            return
+        if tag in REMOVED_ELEMENTS:
+            if not self_closing:
+                self.removing, self.removing_depth = tag, 1
+            return
+        if tag == "link" and "stylesheet" in (dict(attrs).get("rel") or "").lower().split():
+            return
+        kept = []
+        for name, value in attrs:
+            if name.startswith("on") or (name in URL_ATTRIBUTES and value is not None and _is_javascript_url(value)):
+                continue
+            kept.append(name if value is None else f'{name}="{html.escape(value, quote=True)}"')
+        self.parts.append(f"<{' '.join([tag, *kept])}{' /' if self_closing else ''}>")
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """輸出開始標籤（需要拿掉的除外）。
+
+        Args:
+            tag: 標籤名稱（小寫）。
+            attrs: 屬性（名稱小寫，值已還原字元參照；沒有值的屬性是 None）。
+        """
+        self._open_tag(tag, attrs, self_closing=False)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """輸出 `<tag ... />` 形式的標籤（需要拿掉的除外）。
+
+        Args:
+            tag: 標籤名稱（小寫）。
+            attrs: 屬性（名稱小寫，值已還原字元參照；沒有值的屬性是 None）。
+        """
+        self._open_tag(tag, attrs, self_closing=True)
+
+    def handle_endtag(self, tag: str) -> None:
+        """輸出結束標籤；正在拿掉的元素則依深度判斷是否結束。
+
+        Args:
+            tag: 標籤名稱（小寫）。
+        """
+        if self.removing is not None:
+            if tag == self.removing:
+                self.removing_depth -= 1
+                if self.removing_depth == 0:
+                    self.removing = None
+            return
+        self.parts.append(f"</{tag}>")
+
+    def handle_data(self, data: str) -> None:
+        """輸出文字（正在拿掉的元素內除外）。
+
+        Args:
+            data: 文字。
+        """
+        if self.removing is None:
+            self.parts.append(data)
+
+    def handle_entityref(self, name: str) -> None:
+        """輸出具名字元參照，例如 &amp;。
+
+        Args:
+            name: 參照名稱（不含 & 與 ;）。
+        """
+        if self.removing is None:
+            self.parts.append(f"&{name};")
+
+    def handle_charref(self, name: str) -> None:
+        """輸出數字字元參照，例如 &#169;。
+
+        Args:
+            name: 參照內容（不含 &# 與 ;）。
+        """
+        if self.removing is None:
+            self.parts.append(f"&#{name};")
+
+
+def strip_active_content(fragment: str) -> str:
+    """拿掉 HTML 片段裡會執行或載入外部內容的部分（細節見 _ActiveContentStripper）。
+
+    Args:
+        fragment: HTML 片段。
+
+    Returns:
+        處理後的 HTML 片段。
+    """
+    stripper = _ActiveContentStripper()
+    stripper.feed(fragment)
+    stripper.close()
+    return "".join(stripper.parts)
+
+
 def extract_main_content(page_html: str, attr: str, value: str) -> str | None:
-    """取出第一個符合條件的元素（含自身），並拿掉其中的 <script> 與 <style>。
+    """取出第一個符合條件的元素（含自身），並拿掉會執行或載入外部內容的部分（strip_active_content）。
 
     Args:
         page_html: 原始 HTML。
@@ -332,7 +618,8 @@ def extract_main_content(page_html: str, attr: str, value: str) -> str | None:
         value: 屬性值或 class 名稱。
 
     Returns:
-        主內容區的 HTML；找不到、或元素沒有結束標籤時為 None。
+        主內容區的 HTML（不含 <script>、<style>、<iframe>、樣式表連結、事件屬性與 javascript: 網址）；
+        找不到、或元素沒有結束標籤時為 None。
     """
     finder = _MainContentFinder(attr, value)
     finder.feed(page_html)
@@ -345,9 +632,7 @@ def extract_main_content(page_html: str, attr: str, value: str) -> str | None:
     begin = offsets[finder.start[0] - 1] + finder.start[1]
     close = offsets[finder.end[0] - 1] + finder.end[1]
     stop = page_html.index(">", close) + 1
-    fragment = page_html[begin:stop]
-    fragment = re.sub(r"(?is)<script\b[^>]*>.*?</script\s*>", "", fragment)
-    return re.sub(r"(?is)<style\b[^>]*>.*?</style\s*>", "", fragment)
+    return strip_active_content(page_html[begin:stop])
 
 
 def build_print_html(main_content: str, base_url: str) -> str:
@@ -380,24 +665,41 @@ class _PeriodFinder(HTMLParser):
     """找 <h5 class="subtitle">活動期間</h5> 後面緊接的 <p> 的文字；正文裡的其他寫法不是期間。"""
 
     def __init__(self) -> None:
+        """_PeriodFinder 的建構。"""
         super().__init__(convert_charrefs=True)
         self.state = "idle"  # idle → in_heading → after_heading → in_period → done
         self.heading = ""
         self.text = ""
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """找 h5.subtitle，或「活動期間」標題後面緊接的 <p>。
+
+        Args:
+            tag: 標籤名稱（小寫）。
+            attrs: 屬性（名稱小寫，值已還原字元參照；沒有值的屬性是 None）。
+        """
         if self.state == "idle" and tag == "h5" and _has_class(attrs, "subtitle"):
             self.state, self.heading = "in_heading", ""
         elif self.state == "after_heading":
             self.state = "in_period" if tag == "p" else "idle"
 
     def handle_endtag(self, tag: str) -> None:
+        """標題結束時確認是不是「活動期間」；<p> 結束時完成。
+
+        Args:
+            tag: 標籤名稱（小寫）。
+        """
         if self.state == "in_heading" and tag == "h5":
             self.state = "after_heading" if self.heading.strip() == PERIOD_HEADING else "idle"
         elif self.state == "in_period" and tag == "p":
             self.state = "done"
 
     def handle_data(self, data: str) -> None:
+        """收集標題或期間 <p> 的文字。
+
+        Args:
+            data: 文字。
+        """
         if self.state == "in_heading":
             self.heading += data
         elif self.state == "in_period":
@@ -429,11 +731,18 @@ class _BannerFinder(HTMLParser):
     """找 div.banner-image 裡的第一個 <img> 的 src；沒有這個 div 就沒有主視覺（內容區第一張圖是分享圖示）。"""
 
     def __init__(self) -> None:
+        """_BannerFinder 的建構。"""
         super().__init__(convert_charrefs=True)
         self.depth = 0
         self.src: str | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """進入 div.banner-image 後記下第一個 <img> 的 src。
+
+        Args:
+            tag: 標籤名稱（小寫）。
+            attrs: 屬性（名稱小寫，值已還原字元參照；沒有值的屬性是 None）。
+        """
         if self.src is not None:
             return
         if self.depth == 0:
@@ -445,6 +754,11 @@ class _BannerFinder(HTMLParser):
             self.src = (dict(attrs).get("src") or "").strip() or None
 
     def handle_endtag(self, tag: str) -> None:
+        """離開 div 時減少深度。
+
+        Args:
+            tag: 標籤名稱（小寫）。
+        """
         if self.depth > 0 and tag == "div":
             self.depth -= 1
 
@@ -465,7 +779,14 @@ def find_banner_src(page_html: str) -> str | None:
 
 
 def period_label(period: tuple[date, date] | None) -> str:
-    """清單的活動期間欄：讀得出來是 YYYY-MM-DD~YYYY-MM-DD，讀不出來是 PERIOD_UNKNOWN。"""
+    """清單的活動期間欄：讀得出來是 YYYY-MM-DD~YYYY-MM-DD，讀不出來是 PERIOD_UNKNOWN。
+
+    Args:
+        period: read_offer_period 的結果。
+
+    Returns:
+        清單的 period 欄的值。
+    """
     return PERIOD_UNKNOWN if period is None else f"{period[0].isoformat()}~{period[1].isoformat()}"
 
 
@@ -475,7 +796,7 @@ def period_label(period: tuple[date, date] | None) -> str:
 
 
 def print_to_pdf(chrome: str, html_path: Path, pdf_path: Path, work_dir: Path) -> None:
-    """用 headless Chrome 把本機 HTML 檔列印成 PDF，使用暫時的使用者資料夾。
+    """用 headless Chrome 把本機 HTML 檔列印成 PDF，使用暫時的使用者資料夾，資料夾的設定封鎖 JavaScript。
 
     Args:
         chrome: Chrome 執行檔路徑。
@@ -488,12 +809,15 @@ def print_to_pdf(chrome: str, html_path: Path, pdf_path: Path, work_dir: Path) -
     """
     with tempfile.TemporaryDirectory(dir=work_dir) as tmp:
         tmp_pdf = Path(tmp) / "page.pdf"
+        profile = Path(tmp) / "profile"
+        (profile / "Default").mkdir(parents=True)
+        (profile / "Default" / "Preferences").write_text(json.dumps(CHROME_PREFERENCES), encoding="utf-8")
         command = [
             chrome,
             "--headless",
             "--disable-gpu",
             "--no-pdf-header-footer",
-            f"--user-data-dir={Path(tmp) / 'profile'}",
+            f"--user-data-dir={profile}",
             f"--print-to-pdf={tmp_pdf}",
             html_path.resolve().as_uri(),
         ]
@@ -526,7 +850,9 @@ def find_office() -> str | None:
 
 
 def convert_to_docx(office: str | None, html_path: Path, docx_path: Path, work_dir: Path) -> None:
-    """用 LibreOffice 把本機 HTML 檔轉成 .docx。
+    """用 LibreOffice 把本機 HTML 檔轉成 .docx，使用暫時的 user profile。
+
+    不指定 profile 時，使用者開著 LibreOffice 的話，headless 轉檔會結束碼 0 但沒有產出。
 
     Args:
         office: LibreOffice 命令路徑；None 表示 PATH 上找不到。
@@ -540,7 +866,17 @@ def convert_to_docx(office: str | None, html_path: Path, docx_path: Path, work_d
     if office is None:
         raise FetchError(f"找不到 LibreOffice（PATH 上沒有 {' 或 '.join(OFFICE_COMMANDS)}）")
     with tempfile.TemporaryDirectory(dir=work_dir) as tmp:
-        command = [office, "--headless", "--convert-to", DOCX_TARGET, "--outdir", tmp, str(html_path.resolve())]
+        profile = (Path(tmp) / "profile").resolve().as_uri()
+        command = [
+            office,
+            f"-env:UserInstallation={profile}",
+            "--headless",
+            "--convert-to",
+            DOCX_TARGET,
+            "--outdir",
+            tmp,
+            str(html_path.resolve()),
+        ]
         try:
             completed = subprocess.run(command, capture_output=True, text=True, timeout=OFFICE_TIMEOUT_SEC)
         except subprocess.TimeoutExpired as exc:
@@ -572,7 +908,9 @@ class Tools:
 
 @dataclass(frozen=True)
 class Run:
-    """一次執行共用的設定：資料根目錄、三個官網網域的前綴、發請求的物件、轉檔工具，以及各類別找到的網址。
+    """一次執行共用的設定：資料根目錄、三個官網網域的前綴、發請求的物件、轉檔工具、下載當天，以及各類別找到的網址。
+
+    today 在一次執行開始時取一次（本機日期），活動是否過期、清單的下載日期都用它，所以執行跨過午夜時前後一致。
 
     found 是類別名稱對網址清單，main 在每個類別的 collect 之後填入，讓後面的類別（活動圖片）
     能用前面類別（活動）找到的網址。
@@ -584,11 +922,33 @@ class Run:
     mkp: str
     fetcher: Fetcher
     tools: Tools
+    today: date
     found: dict[str, list[str]] = field(default_factory=dict)
 
     def base(self, site: str) -> str:
-        """網域代號（www、mkpcard、mkp）對應的網址前綴。"""
+        """網域代號對應的網址前綴。
+
+        Args:
+            site: 網域代號：www、mkpcard 或 mkp。
+
+        Returns:
+            該網域這次執行用的前綴（預設是官網，環境變數替換後是替換值）。
+        """
         return {"www": self.www, "mkpcard": self.mkpcard, "mkp": self.mkp}[site]
+
+    def to_mkp(self, absolute: str) -> str:
+        """指向官網 mkp 網域的網址，換成這次執行的 mkp 前綴（和活動詳情頁連結的處理一樣）；其他網域原樣回傳。
+
+        Args:
+            absolute: 完整網址。
+
+        Returns:
+            網域是官網 mkp（MKP_PREFIX）時，換成 self.mkp 加上原本的路徑與 query；否則是 absolute 本身。
+        """
+        parsed = urlparse(absolute)
+        if parsed.netloc.lower() != urlparse(MKP_PREFIX).netloc:
+            return absolute
+        return self.mkp + urlunparse(("", "", parsed.path, parsed.params, parsed.query, ""))
 
 
 @dataclass(frozen=True)
@@ -622,14 +982,30 @@ class Category:
     produce: Callable[["Run", "Category", str, str, Path, "Record"], None]
 
     def local_name(self, url: str) -> str:
-        """由文件網址組出本地檔名（不含副檔名）；路徑先做百分比解碼，字母、數字、底線、. 與 - 以外的字元換成底線。"""
+        """由文件網址組出本地檔名（不含副檔名）。
+
+        路徑先做百分比解碼，字母、數字、底線、. 與 - 以外的字元換成底線。
+
+        Args:
+            url: 文件完整網址；路徑必須符合 link_pattern。
+
+        Returns:
+            name_prefix 和 link_pattern 的各個群組以底線接起來的名稱，例如 card_cg047_card001。
+        """
         match = self.link_pattern.match(unquote(urlparse(url).path))
         assert match is not None, url
         parts = (re.sub(r"[^\w.-]", "_", group) for group in match.groups())
         return "_".join((self.name_prefix, *parts))
 
     def extension_of(self, url: str) -> str:
-        """文件的副檔名（不含點、小寫）：類別固定一種時是 extension，否則取自網址路徑；字母、數字、底線、- 以外的字元換成底線。"""
+        """文件的副檔名（不含點、小寫）。
+
+        Args:
+            url: 文件完整網址。
+
+        Returns:
+            類別固定一種格式時是 extension；否則取自網址路徑的最後一個副檔名，字母、數字、底線、- 以外的字元換成底線。
+        """
         if self.extension is not None:
             return self.extension
         return re.sub(r"[^\w-]", "_", Path(unquote(urlparse(url).path)).suffix.removeprefix(".").lower())
@@ -672,8 +1048,27 @@ def decode_page(raw: bytes) -> str:
 
 
 def sha256_of(path: Path) -> str:
-    """回傳檔案內容的 SHA-256 十六進位字串。"""
+    """檔案內容的 SHA-256。
+
+    Args:
+        path: 檔案路徑。
+
+    Returns:
+        十六進位字串。
+    """
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def saved_html(path: Path) -> str:
+    """讀本腳本存下來的原始 HTML。
+
+    Args:
+        path: _meta/html/ 底下的檔案。
+
+    Returns:
+        檔案內容；不是 UTF-8 的位元組以替代字元顯示，不拋出錯誤（存檔前 decode_page 已確認是 UTF-8）。
+    """
+    return path.read_bytes().decode("utf-8", errors="replace")
 
 
 def collect_from_one_page(run: Run, category: Category) -> list[str]:
@@ -691,9 +1086,18 @@ def collect_from_one_page(run: Run, category: Category) -> list[str]:
 
 
 def request_url(absolute: str) -> str:
-    """把完整網址整理成可以送出請求的形式：路徑中 ASCII 以外的字元做百分比編碼，去掉 fragment。"""
+    """把完整網址整理成可以送出請求的形式。
+
+    Args:
+        absolute: 完整網址。
+
+    Returns:
+        路徑與 query 中 ASCII 以外的字元已做百分比編碼（已編碼的 % 與 query 的分隔符號保持原樣）、去掉 fragment 的網址。
+    """
     parsed = urlparse(absolute)
-    return urlunparse(parsed._replace(path=quote(parsed.path, safe="/%"), fragment=""))
+    return urlunparse(
+        parsed._replace(path=quote(parsed.path, safe="/%"), query=quote(parsed.query, safe=QUERY_SAFE), fragment="")
+    )
 
 
 def find_pdf_links(list_html: str, list_url: str, link_pattern: re.Pattern[str]) -> list[str]:
@@ -705,15 +1109,16 @@ def find_pdf_links(list_html: str, list_url: str, link_pattern: re.Pattern[str])
         link_pattern: PDF 連結的路徑格式。
 
     Returns:
-        去除重複、保留出現順序的 PDF 完整網址；路徑中 ASCII 以外的字元已做百分比編碼，網址才能送出請求。
+        去除重複、保留出現順序的 PDF 完整網址；路徑與 query 中 ASCII 以外的字元已做百分比編碼，網址才能送出請求。
+        格式錯誤的 href 略過。
     """
     collector = _AnchorCollector()
     collector.feed(list_html)
     host = urlparse(list_url).netloc
     seen: dict[str, None] = {}
     for href in collector.hrefs:
-        parsed = urlparse(urljoin(list_url, href))
-        if parsed.netloc == host and link_pattern.match(parsed.path):
+        parsed = resolve_href(list_url, href)
+        if parsed is not None and parsed.netloc == host and link_pattern.match(parsed.path):
             seen[request_url(parsed.geturl())] = None
     return list(seen)
 
@@ -786,14 +1191,14 @@ def find_offer_links(list_html: str, list_url: str, link_pattern: re.Pattern[str
         mkp: mkp 網域的前綴。
 
     Returns:
-        去除重複、保留出現順序的活動詳情頁完整網址（mkp 上，不含 query）。
+        去除重複、保留出現順序的活動詳情頁完整網址（mkp 上，不含 query）。格式錯誤的 href 略過。
     """
     collector = _AnchorCollector("card-holder")
     collector.feed(list_html)
     seen: dict[str, None] = {}
     for href in collector.hrefs:
-        parsed = urlparse(urljoin(list_url, href))
-        if link_pattern.match(parsed.path) and not parsed.query:
+        parsed = resolve_href(list_url, href)
+        if parsed is not None and link_pattern.match(parsed.path) and not parsed.query:
             seen[mkp + parsed.path] = None
     return list(seen)
 
@@ -844,6 +1249,20 @@ def web_page_producer(
     """
 
     def produce(run: Run, category: Category, url: str, name: str, target: Path, record: Record) -> None:
+        """下載網頁、存原始 HTML、取出主內容區、轉檔成 target。
+
+        Args:
+            run: 一次執行共用的設定。
+            category: 這個網頁所屬的類別（未使用，為了符合 Category.produce 的參數）。
+            url: 網頁完整網址。
+            name: 本地名稱（不含副檔名）。
+            target: 最終檔案路徑。
+            record: 清單紀錄；補上 html_sha256，inspect 也可能補其他欄位。
+
+        Raises:
+            FetchError: 下載失敗、頁面不是 UTF-8、找不到主內容區或轉檔失敗。
+            SkipDocument: inspect 判斷這一頁不下載。
+        """
         raw_path = run.out / "_meta" / "html" / f"{name}.html"
         print_path = run.out / "_meta" / "print" / f"{name}.html"
         for folder in (raw_path.parent, print_path.parent):
@@ -902,8 +1321,9 @@ IMAGE_SIGNATURES: dict[str, Callable[[bytes], bool]] = {
 def collect_banners(run: Run, category: Category) -> list[str]:
     """依活動的發現順序，取前 IMAGE_LIMIT 個有主視覺的活動，回傳它們的主視覺網址。
 
-    讀的是活動類別存下來的原始 HTML（不另外請求）：已存在而被略過的活動也讀得到，所以再次執行時挑出同一批。
-    結束日早於下載當天的活動不算（它的 PDF 沒有下載）；沒有原始 HTML 的活動（下載失敗）也不算，名額由下一個有主視覺的活動補上。
+    讀的是活動類別存下來的原始 HTML（不另外請求）。只算活動 PDF 確實存在的活動（本次下載，或已存在而略過）：
+    過期的活動、下載或列印失敗的活動沒有 PDF，不算，名額由下一個有主視覺的活動補上；已存在的活動不論現在是否過期都算，
+    所以再次執行時挑出同一批。指向官網 mkp 網域的絕對網址，換成這次執行的 mkp 前綴（Run.to_mkp）。
     副檔名不支援的主視覺照樣佔名額，下載時記為略過。
 
     Args:
@@ -915,19 +1335,15 @@ def collect_banners(run: Run, category: Category) -> list[str]:
     """
     activity_urls = run.found.get(ACTIVITIES.name, [])
     names = ACTIVITIES.local_names(activity_urls)
-    today = date.today()
     banners: dict[str, None] = {}
     for url in activity_urls:
+        pdf_path = run.out / ACTIVITIES.folder / f"{names[url]}.{ACTIVITIES.extension_of(url)}"
         raw_path = run.out / "_meta" / "html" / f"{names[url]}.html"
-        if not raw_path.is_file():
+        if not (pdf_path.is_file() and raw_path.is_file()):
             continue
-        page = raw_path.read_bytes().decode("utf-8", errors="replace")
-        period = read_offer_period(page)
-        if period is not None and period[1] < today:
-            continue
-        src = find_banner_src(page)
+        src = find_banner_src(saved_html(raw_path))
         if src is not None:
-            banners[request_url(urljoin(url, src))] = None
+            banners[request_url(run.to_mkp(urljoin(url, src)))] = None
             if len(banners) == IMAGE_LIMIT:
                 break
     return list(banners)
@@ -952,7 +1368,9 @@ def save_image(run: Run, category: Category, url: str, name: str, target: Path, 
     if extension not in SUPPORTED_IMAGE_EXTENSIONS:
         raise SkipDocument(RESULT_UNSUPPORTED, f"不支援的圖片格式（副檔名 {extension}）")
     if urlparse(url).netloc != urlparse(run.mkp).netloc:
-        raise FetchError(f"主視覺網址不在 mkp 網域（{urlparse(url).netloc}），不下載")
+        raise FetchError(
+            f"主視覺網址不在 mkp 網域（{urlparse(url).netloc}，mkp 網域是 {urlparse(run.mkp).netloc}），不下載"
+        )
     is_valid = IMAGE_SIGNATURES.get(extension)
     if is_valid is None:
         raise FetchError(f"沒有 {extension} 的檔頭檢查，不下載")
@@ -1030,6 +1448,8 @@ DOWNLOADS = Category(
 def check_offer_period(record: Record, page: str) -> None:
     """讀出活動詳情頁的活動期間寫進清單紀錄；結束日早於下載當天的活動不下載。
 
+    下載當天是 record.downloaded_at，新下載的紀錄由 fetch_document 設成 Run.today。
+
     讀不出期間時照樣下載，清單的活動期間欄是「期間不明」。
 
     Args:
@@ -1103,18 +1523,22 @@ def fetch_document(run: Run, category: Category, url: str, name: str) -> Record:
     """
     extension = category.extension_of(url)
     filename = f"{name}.{extension}" if extension else name
-    record = Record(url, category.name, filename, category.fmt, date.today().isoformat(), "", "", RESULT_FAILED, "")
+    record = Record(url, category.name, filename, category.fmt, run.today.isoformat(), "", "", RESULT_FAILED, "")
     target = run.out / category.folder / filename
+    raw_path = run.out / "_meta" / "html" / f"{name}.html"
     try:
         if target.is_file():
-            raw_path = run.out / "_meta" / "html" / f"{name}.html"
             record.downloaded_at = date.fromtimestamp(target.stat().st_mtime).isoformat()
             record.sha256 = sha256_of(target)
             record.html_sha256 = sha256_of(raw_path) if category.keeps_html and raw_path.is_file() else ""
             if category.reads_period and raw_path.is_file():
-                record.period = period_label(read_offer_period(raw_path.read_bytes().decode("utf-8", errors="replace")))
+                record.period = period_label(read_offer_period(saved_html(raw_path)))
             record.result = RESULT_SKIPPED
             return record
+        if category.reads_period and raw_path.is_file():
+            # 上次存下的原始 HTML 顯示已過期：不再請求詳情頁
+            record.html_sha256 = sha256_of(raw_path)
+            check_offer_period(record, saved_html(raw_path))
         target.parent.mkdir(parents=True, exist_ok=True)
         (run.out / "_meta").mkdir(parents=True, exist_ok=True)
         category.produce(run, category, url, name, target, record)
@@ -1187,7 +1611,7 @@ def main(argv: list[str]) -> int:
     if args.out.exists() and not args.out.is_dir():
         print(f"ERROR --out {args.out} 已存在但不是資料夾", file=sys.stderr)
         return 2
-    run = Run(args.out, www, mkpcard, mkp, Fetcher(interval), Tools(chrome, find_office()))
+    run = Run(args.out, www, mkpcard, mkp, Fetcher(interval), Tools(chrome, find_office()), date.today())
 
     records: list[Record] = []
     failed_lists: list[str] = []
