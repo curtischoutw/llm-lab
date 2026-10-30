@@ -18,6 +18,7 @@
 Dependencies: 標準函式庫；Pillow（RAG-Anything 的依賴，只用來產生測試用的小圖）。
 """
 
+import hashlib
 import json
 import os
 import re
@@ -102,6 +103,24 @@ def write_office(path: Path) -> Path:
     """
     path.write_text(f"fake office document: {path.name}\n", encoding="utf-8")
     return path
+
+
+def parsed_office_sources(output_dir: Path) -> list[str]:
+    """列出 output_dir 底下每份解析結果記下的 Office 來源（假 LibreOffice 寫進 PDF、假 mineru 帶進內容清單的那一行）。
+
+    Args:
+        output_dir: PARSER_OUTPUT_DIR。
+
+    Returns:
+        每個 `*_content_list.json` 各一個來源文字，依文字排序；沒有來源標記的內容清單（PDF、圖片）不列入。
+    """
+    prefix = "Converted from Office document: "
+    sources = []
+    for path in output_dir.rglob("*_content_list.json"):
+        for block in json.loads(path.read_text(encoding="utf-8")):
+            if block.get("text", "").startswith(prefix):
+                sources.append(block["text"].removeprefix(prefix))
+    return sorted(sources)
 
 
 class PipelineCase(unittest.TestCase):
@@ -646,6 +665,80 @@ class IngestOfficeTest(PipelineCase):
         self.assertIn("[2/2] report.docx", second.stdout)
         self.assertNotIn("/3]", second.stdout, "再次匯入資料夾時，轉出的 PDF 不該被當成新文件")
         self.assertEqual(second.stdout.count("已完整處理過，略過"), 2)
+
+    def test_two_documents_with_the_same_stem_in_one_folder_are_both_ingested_with_their_own_pdf_and_parse_output(self):
+        folder = self.tmp / "same_stem"
+        folder.mkdir()
+        write_office(folder / "a.docx")
+        write_office(folder / "a.pptx")
+        result = self.ingest(folder)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("processed=2", result.stdout)
+        self.assertIn("failed=0", result.stdout)
+        self.assertEqual(len(list(self.output_dir.rglob("a.pdf"))), 2, "兩份文件各有自己轉出的 PDF，不共用同一個路徑")
+        self.assertEqual(
+            parsed_office_sources(self.output_dir),
+            ["fake office document: a.docx", "fake office document: a.pptx"],
+            "兩份文件各有自己的解析輸出，內容沒有被另一份覆蓋",
+        )
+
+        before = len(self.server.requests)
+        answer = self.query("What is Fake Entity Alpha?", "--mode", "naive")
+        self.assertEqual(answer.returncode, 0, answer.stdout + answer.stderr)
+        prompt = "".join(str(r["payload"]["messages"]) for r in self.server.requests[before:] if r["path"] == "/v1/chat/completions")
+        for source in ("fake office document: a.docx", "fake office document: a.pptx"):
+            self.assertIn(source, prompt, f"{source} 的內容查得到")
+
+        second = self.ingest(folder)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(second.stdout.count("已完整處理過，略過"), 2)
+
+    def test_two_documents_with_the_same_name_in_different_folders_are_both_ingested_with_their_own_pdf_and_parse_output(self):
+        for folder, text in (("x", "from folder x"), ("y", "from folder y")):
+            (self.tmp / folder).mkdir()
+            (self.tmp / folder / "a.docx").write_text(text + "\n", encoding="utf-8")
+        first = self.ingest(self.tmp / "x" / "a.docx")
+        second = self.ingest(self.tmp / "y" / "a.docx")
+        for result in (first, second):
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("failed=0", result.stdout)
+        self.assertNotIn("已完整處理過，略過", second.stdout, "y/a.docx 是另一份文件，不是 x/a.docx 的重複")
+        self.assertEqual(len(list(self.output_dir.rglob("a.pdf"))), 2)
+        self.assertEqual(parsed_office_sources(self.output_dir), ["from folder x", "from folder y"])
+        statuses = json.loads((self.working_dir / "kv_store_doc_status.json").read_text())
+        self.assertEqual(sorted(v["status"] for v in statuses.values()), ["processed", "processed"])
+
+    def test_a_pdf_and_an_image_keep_their_parser_output_path(self):
+        # 主知識庫已用這個路徑匯入 PDF 與圖片：路徑是 <主檔名>_<原檔絕對路徑 md5 的前 8 碼>，不能因為修 Office 撞名而改變
+        pdf = self.document
+        image = write_image(self.tmp / "figure.png")
+        self.assertEqual(self.ingest(pdf).returncode, 0)
+        self.assertEqual(self.ingest(image).returncode, 0)
+        for document in (pdf, image):
+            digest = hashlib.md5(str(document.resolve()).encode()).hexdigest()[:8]
+            expected = self.output_dir / f"{document.stem}_{digest}" / document.stem
+            found = [d for d in ("auto", "ocr") if (expected / d / f"{document.stem}_content_list.json").is_file()]
+            self.assertEqual(len(found), 1, f"{document.name} 的解析輸出應該在 {expected}")
+        self.assertEqual(
+            sorted(path.name for path in self.output_dir.iterdir()),
+            sorted(f"{d.stem}_{hashlib.md5(str(d.resolve()).encode()).hexdigest()[:8]}" for d in (pdf, image)),
+            "輸出資料夾底下只有這兩份文件的解析資料夾，沒有多出別的路徑",
+        )
+
+    def test_an_office_document_ingested_before_is_skipped_without_parsing_again(self):
+        # 已匯入的 Office 文件，其解析輸出在舊路徑或新路徑都一樣：略過的判斷只靠索引裡的解析快取，與輸出資料夾無關。
+        # 把整個解析輸出資料夾刪掉再匯入一次，若重新解析，輸出資料夾會再出現、也會呼叫模型。
+        deck = write_office(self.tmp / "deck.pptx")
+        first = self.ingest(deck)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        shutil.rmtree(self.output_dir)
+        requests_after_first = len(self.server.requests)
+
+        second = self.ingest(deck)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertIn("已完整處理過，略過", second.stdout)
+        self.assertEqual(len(self.server.requests), requests_after_first)
+        self.assertFalse(self.output_dir.exists(), "略過的文件不該重新轉檔或解析")
 
 
 # ==============================

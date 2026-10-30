@@ -23,7 +23,7 @@ import unittest
 
 from tests.fake_openai_server import CHAT_REPLY
 from tests.test_cli import OPTIONAL_FIELDS, REPO_ROOT, REQUIRED_FIELDS
-from tests.test_pipeline import INGEST_TIMEOUT, PipelineCase, write_image, write_office
+from tests.test_pipeline import INGEST_TIMEOUT, PipelineCase, parsed_office_sources, write_image, write_office
 
 # 依 argv 的步驟依序呼叫公開函式；每一步印一行結果。
 # argv[1] 是文件路徑，argv[2] 是題目檔，argv[3] 是 functions（模組函式）或 session（同一個 Session），其餘是步驟。
@@ -380,6 +380,23 @@ class IngestOfficeTest(PythonApiCase):
         self.assertEqual(lines[0], "doc deck.pptx skipped=False error=None")
         self.assertRegex(lines[1], r"^doc broken\.xlsx skipped=False error=RuntimeError: LibreOffice conversion failed")
         self.assertEqual(lines[2:], ["doc deck.pptx skipped=True error=None", "doc legacy.doc skipped=False error=None"])
+
+    def test_session_ingests_two_office_documents_with_the_same_stem_each_with_its_own_pdf_and_parse_output(self):
+        write_office(self.tmp / "a.docx")
+        write_office(self.tmp / "a.pptx")
+        result = self.run_api("doc:a.docx", "doc:a.pptx", "doc:a.docx", "doc:a.pptx", mode="session")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "doc a.docx skipped=False error=None",
+                "doc a.pptx skipped=False error=None",
+                "doc a.docx skipped=True error=None",
+                "doc a.pptx skipped=True error=None",
+            ],
+        )
+        self.assertEqual(len(list(self.output_dir.rglob("a.pdf"))), 2)
+        self.assertEqual(parsed_office_sources(self.output_dir), ["fake office document: a.docx", "fake office document: a.pptx"])
 
 
 class IngestUnsupportedFormatTest(PythonApiCase):

@@ -172,11 +172,11 @@ VLM 與 embedding（同一個 server，port 8081）：
 - 圖片：`.png`、`.jpg`、`.jpeg` 直接交給 MinerU；其他格式先由 RAG-Anything 用 Pillow 轉成 png 再交給 MinerU。轉檔用的暫存檔不會留在來源資料夾。
 - 圖片的已知限制：沒有文字的圖片，MinerU 能抽出的內容很少，內容主要來自 VLM 的描述。實測 2 張圖片時（第 5 節），流程圖的 VLM 描述寫出了各節點的名稱，截圖的文字也被 OCR 出來，但兩張圖片各自的題目在 mix 模式都沒有答對，因為這些切塊沒有被選進查詢的 context。
 - 重複匯入同一張圖片會略過，不呼叫模型；匯入中斷後重新執行會重試，不會留下重複的紀錄。行為和 PDF 相同。
-- Office 文件（PPT、Word、Excel，含舊格式 .ppt .doc .xls）：RAG-Anything 呼叫 LibreOffice 轉成 PDF，再交給 MinerU。轉出的 PDF 寫在 `PARSER_OUTPUT_DIR` 底下，不會留在來源資料夾，所以下次匯入同一個資料夾時不會被當成新文件。需要先安裝 LibreOffice（第 1 節）。Office 文件的匯入報告，解析階段標籤是「解析（含 Office 轉 PDF）」，轉檔時間包含在裡面，沒有另外計時；PDF 和圖片的標籤是「解析」。
+- Office 文件（PPT、Word、Excel，含舊格式 .ppt .doc .xls）：RAG-Anything 呼叫 LibreOffice 轉成 PDF，再交給 MinerU。轉出的 PDF 寫在 `PARSER_OUTPUT_DIR/office/` 底下，不會留在來源資料夾，所以下次匯入同一個資料夾時不會被當成新文件。需要先安裝 LibreOffice（第 1 節）。Office 文件的匯入報告，解析階段標籤是「解析（含 Office 轉 PDF）」，轉檔時間包含在裡面，沒有另外計時；PDF 和圖片的標籤是「解析」。
 - 沒有安裝 LibreOffice 時，那份文件匯入失敗，`stderr` 的訊息是 RAG-Anything 的原始錯誤，包含「LibreOffice」與各平台的安裝方式（macOS：`brew install --cask libreoffice`）；結束碼 1。資料夾裡其他文件照常匯入。Office 文件轉檔失敗（LibreOffice 以非零碼結束）時，訊息相同，因為 RAG-Anything 無法區分兩者；逾時時訊息改為指出 `LIBREOFFICE_CONVERT_TIMEOUT`。
 - Office 文件的已知限制（Excel 與舊格式的實測見第 5 節）：
   - Excel 轉成 PDF 頁面後由 MinerU 做表格辨識，不讀儲存格。實測時，旋轉的欄位標題被 OCR 成無法辨識的文字（例如 Underlying Trading operating profit 變成 `Undeng Tedng peong pnyh`）；表格上方的「January–June 2023」這類標題沒有進入任何內容項目，同一頁的兩張表分不出年份；同一個工作表裡並排的兩張表被合併成一張、欄位錯位。所以問表格裡的特定數字時，常常答成同一張表的其他欄或其他年份。每個工作表都有被解析；寬的工作表會被切成多頁。
-  - 主檔名相同的 Office 文件（例如同一個資料夾裡的 `report.docx` 與 `report.pptx`，或不同資料夾裡的兩份 `report.docx`）會轉成同一個 `PARSER_OUTPUT_DIR/<主檔名>.pdf`，解析結果也寫進同一個資料夾，後匯入的會覆蓋先匯入的轉檔 PDF 與內容清單。文件是逐份匯入的，每份的內容在被覆蓋前就已寫入知識庫；圖片以雜湊命名，不會被覆蓋。實測 `legacy_sample.ppt`／`.doc`／`.xls` 時發生，三份都問得到。重新解析被覆蓋的文件時會重新轉檔。PDF 與圖片沒有這個問題，它們的解析資料夾名稱含原檔路徑的雜湊。
+  - 主檔名相同的 Office 文件（例如同一個資料夾裡的 `report.docx` 與 `report.pptx`，或不同資料夾裡的兩份 `report.docx`）各自轉檔、各自解析：轉出的 PDF 與 MinerU 的解析結果在 `PARSER_OUTPUT_DIR/office/<主檔名>_<雜湊>/`，雜湊是原檔絕對路徑 md5 的前 8 碼，同一份文件每次都在同一個資料夾。這個行為從 ticket 10 開始；在那之前匯入的 Office 文件，轉出的 PDF 在 `PARSER_OUTPUT_DIR/<主檔名>.pdf`，同主檔名的文件互相覆蓋轉檔 PDF 與內容清單（每份的內容在被覆蓋前已寫入知識庫，圖片以雜湊命名不會被覆蓋）。舊路徑的檔案不會被搬動或刪除，已匯入的文件重新匯入時照常略過，不重新轉檔。PDF 與圖片的解析資料夾路徑不變：`PARSER_OUTPUT_DIR/<主檔名>_<原檔路徑雜湊>/`。
   - PPT 轉檔可能要好幾分鐘：RAG-Anything 原始碼的註解記錄 7.4 MB 的 PPTX 要 4 分鐘。
 
 匯入單篇文件：
