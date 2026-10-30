@@ -39,7 +39,7 @@ from collections.abc import Callable
 from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "fetch_taishin.py"
@@ -287,10 +287,14 @@ CAROUSEL_ONLY = detail_path(999)
 
 
 class FakeServer:
-    """本機假 HTTP server：routes 把路徑（含 query）對到 (狀態碼, body)；沒有登記的路徑回 404。"""
+    """本機假 HTTP server：routes 把路徑（含 query）對到 (狀態碼, body)；沒有登記的路徑回 404。
+
+    redirects 把路徑對到 Location，登記的路徑回 302（優先於 routes）。
+    """
 
     def __init__(self, routes: dict[str, tuple[int, bytes]]) -> None:
         self.routes = routes
+        self.redirects: dict[str, str] = {}
         self.requests: list[tuple[str, float, str]] = []
         self.fallback: Callable[[str], tuple[int, bytes]] | None = None
         outer = self
@@ -298,6 +302,12 @@ class FakeServer:
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802
                 outer.requests.append((self.path, time.monotonic(), self.headers.get("User-Agent", "")))
+                if self.path in outer.redirects:
+                    self.send_response(302)
+                    self.send_header("Location", outer.redirects[self.path])
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 if self.path in outer.routes:
                     status, body = outer.routes[self.path]
                 elif outer.fallback is not None:
@@ -480,7 +490,12 @@ class ScriptTestCase(unittest.TestCase):
             self.mkp_routes[path] = (200, html.encode())
 
     def run_script(
-        self, *, chrome: str | None = None, interval: str = FAST_INTERVAL, path: str | None = None
+        self,
+        *,
+        chrome: str | None = None,
+        interval: str = FAST_INTERVAL,
+        path: str | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess:
         """以假 server、假 Chrome、假 LibreOffice 與 self.out 執行腳本。
 
@@ -488,6 +503,7 @@ class ScriptTestCase(unittest.TestCase):
             chrome: TAISHIN_CHROME 的值；預設為假 Chrome wrapper。
             interval: TAISHIN_REQUEST_INTERVAL_SEC 的值。
             path: PATH 的完整值；預設是把放了假 LibreOffice 的 self.office_bin 放在原本的 PATH 前面。
+            extra_env: 另外加進行程環境變數的項目。
 
         Returns:
             已完成的行程（文字模式）。
@@ -500,6 +516,7 @@ class ScriptTestCase(unittest.TestCase):
             "TAISHIN_CHROME": chrome if chrome is not None else str(self.chrome),
             "TAISHIN_REQUEST_INTERVAL_SEC": interval,
             "PATH": path if path is not None else f"{self.office_bin}{os.pathsep}{os.environ['PATH']}",
+            **(extra_env or {}),
         }
         return subprocess.run(
             [sys.executable, str(SCRIPT), "--out", str(self.out)],
@@ -555,7 +572,28 @@ DOWNLOAD_PAGE_1 = download_page_path(1)
 
 class FakeChromeFixtureTests(unittest.TestCase):
     def run_fake(self, *args: str) -> subprocess.CompletedProcess:
+        """執行假 Chrome。
+
+        Args:
+            args: 命令列引數（不含程式名稱）。
+
+        Returns:
+            已完成的行程（文字模式）。
+        """
         return subprocess.run([sys.executable, str(FAKE_CHROME), *args], capture_output=True, text=True, timeout=30)
+
+    @staticmethod
+    def write_profile(directory: str, javascript_setting: int | None = 2) -> None:
+        """在 directory/profile 寫 Chrome 的 Preferences。
+
+        Args:
+            directory: 放 profile 的資料夾。
+            javascript_setting: default_content_setting_values.javascript 的值（2 是封鎖）；None 表示不寫這個設定。
+        """
+        default = Path(directory) / "profile" / "Default"
+        default.mkdir(parents=True)
+        values = {} if javascript_setting is None else {"javascript": javascript_setting}
+        (default / "Preferences").write_text(json.dumps({"profile": {"default_content_setting_values": values}}))
 
     def test_rejects_unexpected_arguments_and_prints_them(self) -> None:
         result = self.run_fake("--headless", "--print-to-pdf=/tmp/x.pdf", "file:///nonexistent.html")
@@ -564,6 +602,7 @@ class FakeChromeFixtureTests(unittest.TestCase):
 
     def test_rejects_input_that_is_not_an_existing_html_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            self.write_profile(tmp)
             result = self.run_fake(
                 "--headless",
                 "--disable-gpu",
@@ -579,6 +618,7 @@ class FakeChromeFixtureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             page = Path(tmp) / "page.html"
             page.write_text("<p>收到的內容</p>", encoding="utf-8")
+            self.write_profile(tmp)
             result = self.run_fake(
                 "--headless",
                 "--disable-gpu",
@@ -592,6 +632,39 @@ class FakeChromeFixtureTests(unittest.TestCase):
             self.assertTrue(data.startswith(b"%PDF-"))
             self.assertIn("<p>收到的內容</p>".encode(), data)
 
+    def test_rejects_a_profile_that_does_not_block_javascript(self) -> None:
+        for setting in (None, 1):
+            with self.subTest(javascript_setting=setting), tempfile.TemporaryDirectory() as tmp:
+                page = Path(tmp) / "page.html"
+                page.write_text("<p>x</p>", encoding="utf-8")
+                self.write_profile(tmp, setting)
+                result = self.run_fake(
+                    "--headless",
+                    "--disable-gpu",
+                    "--no-pdf-header-footer",
+                    f"--user-data-dir={tmp}/profile",
+                    f"--print-to-pdf={tmp}/out.pdf",
+                    page.as_uri(),
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("javascript", result.stderr)
+                self.assertFalse((Path(tmp) / "out.pdf").exists())
+
+    def test_rejects_a_profile_folder_without_preferences(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "page.html"
+            page.write_text("<p>x</p>", encoding="utf-8")
+            result = self.run_fake(
+                "--headless",
+                "--disable-gpu",
+                "--no-pdf-header-footer",
+                f"--user-data-dir={tmp}/profile",
+                f"--print-to-pdf={tmp}/out.pdf",
+                page.as_uri(),
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("javascript", result.stderr)
+
 
 class FakeLibreOfficeFixtureTests(unittest.TestCase):
     """假 LibreOffice 新增轉 docx 的介面；轉 PDF 的既有介面（tests/test_pipeline.py 在用）維持嚴格檢查。"""
@@ -599,13 +672,35 @@ class FakeLibreOfficeFixtureTests(unittest.TestCase):
     DOCX_FILTER = "docx:MS Word 2007 XML"
 
     def run_fake(self, *args: str) -> subprocess.CompletedProcess:
+        """執行假 LibreOffice。
+
+        Args:
+            args: 命令列引數（不含程式名稱）。
+
+        Returns:
+            已完成的行程（文字模式）。
+        """
         return subprocess.run([sys.executable, str(FAKE_LIBREOFFICE), *args], capture_output=True, text=True, timeout=30)
+
+    @staticmethod
+    def profile_arg(directory: str) -> str:
+        """directory 底下一個新的 user profile 資料夾對應的 -env:UserInstallation 引數。
+
+        Args:
+            directory: 放 profile 資料夾的位置。
+
+        Returns:
+            `-env:UserInstallation=file://<directory>/profile`。
+        """
+        return f"-env:UserInstallation={(Path(directory) / 'profile').as_uri()}"
 
     def test_converts_html_to_docx_that_contains_the_received_html(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             page = Path(tmp) / "page.html"
             page.write_text("<p>收到的內容</p>", encoding="utf-8")
-            result = self.run_fake("--headless", "--convert-to", self.DOCX_FILTER, "--outdir", tmp, str(page))
+            result = self.run_fake(
+                self.profile_arg(tmp), "--headless", "--convert-to", self.DOCX_FILTER, "--outdir", tmp, str(page)
+            )
             self.assertEqual(result.returncode, 0, result.stderr)
             data = (Path(tmp) / "page.docx").read_bytes()
             self.assertTrue(data.startswith(b"PK"))
@@ -615,7 +710,7 @@ class FakeLibreOfficeFixtureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             page = Path(tmp) / "page.html"
             page.write_text("<p>x</p>", encoding="utf-8")
-            result = self.run_fake("--headless", "--convert-to", "docx", "--outdir", tmp, str(page))
+            result = self.run_fake(self.profile_arg(tmp), "--headless", "--convert-to", "docx", "--outdir", tmp, str(page))
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("--convert-to", result.stderr)
             self.assertFalse((Path(tmp) / "page.docx").exists())
@@ -624,15 +719,39 @@ class FakeLibreOfficeFixtureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             page = Path(tmp) / "page.html"
             page.write_text("<p>x</p>", encoding="utf-8")
-            result = self.run_fake("--convert-to", self.DOCX_FILTER, "--outdir", tmp, str(page))
+            result = self.run_fake(self.profile_arg(tmp), "--convert-to", self.DOCX_FILTER, "--outdir", tmp, str(page))
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("--outdir", result.stderr)
+
+    def test_docx_conversion_requires_a_user_profile_because_a_running_libreoffice_makes_the_default_one_unusable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "page.html"
+            page.write_text("<p>x</p>", encoding="utf-8")
+            result = self.run_fake("--headless", "--convert-to", self.DOCX_FILTER, "--outdir", tmp, str(page))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("UserInstallation", result.stderr)
+            self.assertFalse((Path(tmp) / "page.docx").exists())
+
+    def test_docx_conversion_rejects_a_profile_that_is_not_a_file_url_or_is_already_in_use(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "page.html"
+            page.write_text("<p>x</p>", encoding="utf-8")
+            convert = ["--headless", "--convert-to", self.DOCX_FILTER, "--outdir", tmp, str(page)]
+            plain_path = self.run_fake(f"-env:UserInstallation={tmp}/profile", *convert)
+            self.assertNotEqual(plain_path.returncode, 0)
+            first = self.run_fake(self.profile_arg(tmp), *convert)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            reused = self.run_fake(self.profile_arg(tmp), *convert)
+            self.assertNotEqual(reused.returncode, 0)
+            self.assertIn("already in use", reused.stderr)
 
     def test_docx_conversion_fails_for_names_starting_with_broken(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             page = Path(tmp) / "broken_page.html"
             page.write_text("<p>x</p>", encoding="utf-8")
-            result = self.run_fake("--headless", "--convert-to", self.DOCX_FILTER, "--outdir", tmp, str(page))
+            result = self.run_fake(
+                self.profile_arg(tmp), "--headless", "--convert-to", self.DOCX_FILTER, "--outdir", tmp, str(page)
+            )
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse((Path(tmp) / "broken_page.docx").exists())
 
@@ -647,6 +766,14 @@ class FakeLibreOfficeFixtureTests(unittest.TestCase):
             broken.write_bytes(b"x")
             failed = self.run_fake("--headless", "--convert-to", "pdf", "--outdir", tmp, str(broken))
             self.assertNotEqual(failed.returncode, 0)
+
+    def test_pdf_conversion_does_not_accept_a_user_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "report.docx"
+            page.write_bytes(b"not a real docx")
+            result = self.run_fake(self.profile_arg(tmp), "--headless", "--convert-to", "pdf", "--outdir", tmp, str(page))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((Path(tmp) / "report.pdf").exists())
 
 
 # ==============================
@@ -1207,6 +1334,39 @@ class OfferImageTests(ScriptTestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(self.image_requests(), [banner_path(n) for n in range(2, 10)])
 
+    def test_activity_whose_pdf_failed_has_no_banner_and_the_next_one_takes_its_slot(self) -> None:
+        # 活動 1 的原始 HTML 存下來了，但列印失敗，沒有 PDF
+        banners = {n: banner_path(n) for n in range(1, 11)}
+        self.serve_activities(banners)
+        self.mkp_routes[detail_path(1)] = (200, offer_detail_html("FAKE-CHROME-FAIL", banner=self.mkp_server.base_url + banner_path(1)).encode())
+        self.serve_images({banner_path(n): PNG_BYTES for n in range(1, 11)})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue((self.out / "_meta" / "html" / f"offer_{wm(1)}.html").is_file())
+        self.assertFalse((self.out / "offers" / f"offer_{wm(1)}.pdf").exists())
+        self.assertEqual(self.image_requests(), [banner_path(n) for n in range(2, 10)])
+
+    def test_banner_given_as_an_absolute_url_on_the_real_mkp_domain_is_replaced_with_the_mkp_prefix(self) -> None:
+        self.serve_offers({"A": [[detail_path(1)]]})
+        self.serve_details(
+            {detail_path(1): offer_detail_html("OFFER1", banner="https://mkp.taishinbank.com.tw" + banner_path(1))}
+        )
+        self.serve_images({banner_path(1): PNG_BYTES})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.image_requests(), [banner_path(1)])
+        record = next(r for r in self.manifest() if r["category"] == "活動圖片")
+        self.assertEqual(record["url"], self.mkp_server.base_url + banner_path(1))
+        self.assertEqual(record["result"], "已下載")
+
+    def test_banner_on_another_domain_names_that_domain_in_the_failure(self) -> None:
+        self.serve_offers({"A": [[detail_path(1)]]})
+        self.serve_details({detail_path(1): offer_detail_html("OFFER1", banner="https://img.example.invalid/b.png")})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("img.example.invalid", result.stderr)
+        self.assertNotIn("mkp.taishinbank.com.tw", result.stderr)
+
     def test_rerun_skips_existing_banners_without_requesting_them(self) -> None:
         self.serve_activities({1: banner_path(1), 2: None})
         self.serve_images({banner_path(1): PNG_BYTES})
@@ -1607,7 +1767,8 @@ class RightsFailureTests(ScriptTestCase):
         self.serve_rights({INSURANCE: card_html("INSURANCE"), PARKING: card_html("PARKING")})
         # 不是假 LibreOffice 的 broken 規則：腳本的本地檔名都以 rights_ 開頭，改用依輸入檔名決定的 wrapper
         directory = self.write_office_script(
-            f'case "$6" in *insurance*) echo "cannot convert" >&2; exit 3;; esac\n'
+            'for last; do :; done\n'
+            'case "$last" in *insurance*) echo "cannot convert" >&2; exit 3;; esac\n'
             f'exec "{sys.executable}" "{FAKE_LIBREOFFICE}" "$@"'
         )
         result = self.run_script(path=str(directory))
@@ -1721,6 +1882,273 @@ class RequestPolicyTests(ScriptTestCase):
         self.assertIn("--out", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(self.server.paths(), [])
+
+
+# ==============================
+# code-review 修正：請求前的網址處理、轉址、清單範圍
+# ==============================
+
+BAD_HREF = "http://[bad"
+
+
+class UrlHandlingTests(ScriptTestCase):
+    def test_pdf_link_with_a_non_ascii_query_is_requested_with_the_query_percent_encoded(self) -> None:
+        href = APPLICATION + "?name=費用"
+        self.serve_downloads([[href]])
+        self.routes[APPLICATION + "?name=" + quote("費用")] = (200, pdf_bytes(APPLICATION))
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn(APPLICATION + "?name=" + quote("費用"), self.server.paths())
+        self.assertEqual((self.out / "downloads" / "download_word_CR04131_1150B.pdf").read_bytes(), pdf_bytes(APPLICATION))
+
+    def test_a_page_whose_url_cannot_be_encoded_fails_that_page_only_and_the_manifest_is_still_written(self) -> None:
+        non_ascii = RIGHTS_PATH_FORMAT.format(group="保險", page="頁")
+        self.serve_rights({non_ascii: card_html("NON-ASCII"), PARKING: card_html("PARKING")})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        records = {r["filename"]: r for r in self.manifest()}
+        self.assertEqual(records["rights_保險_頁.docx"]["result"], "失敗")
+        self.assertEqual(records["rights_parking_right0301.docx"]["result"], "已下載")
+
+    def test_a_malformed_href_in_the_overview_is_skipped_and_the_other_cards_are_downloaded(self) -> None:
+        self.serve_cards({RICHART: card_html("RICHART")})
+        self.routes[OVERVIEW_PATH] = (
+            200,
+            overview_html([RICHART]).replace("</body>", f'<a href="{BAD_HREF}">壞連結</a></body>').encode(),
+        )
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual([r["filename"] for r in self.manifest()], ["card_cg047_card001.pdf"])
+
+    def test_a_malformed_href_in_the_download_list_is_skipped_and_the_other_pdfs_are_downloaded(self) -> None:
+        self.serve_downloads([[APPLICATION]])
+        original = self.list_handlers["downloads"]
+
+        def with_bad_link(request_path: str) -> tuple[int, bytes] | None:
+            """下載頁的回應加上一個格式錯誤的連結；不是下載頁的路徑回 None。"""
+            answer = original(request_path)
+            if answer is None:
+                return None
+            return answer[0], answer[1].replace(b"</body>", f'<a href="{BAD_HREF}">壞連結</a></body>'.encode())
+
+        self.list_handlers["downloads"] = with_bad_link
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual([r["filename"] for r in self.manifest()], ["download_word_CR04131_1150B.pdf"])
+
+    def test_a_malformed_href_in_the_offer_list_is_skipped_and_the_other_activities_are_downloaded(self) -> None:
+        self.serve_offers({"A": [[BAD_HREF, detail_path(1)]]})
+        self.serve_details({detail_path(1): offer_detail_html("OFFER1")})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual([r["result"] for r in self.manifest() if r["category"] == "活動"], ["已下載"])
+
+    def test_links_that_differ_only_by_fragment_are_one_page(self) -> None:
+        self.serve_cards({RICHART: card_html("RICHART")})
+        self.routes[OVERVIEW_PATH] = (200, overview_html([RICHART, RICHART + "#tab2", RICHART + "#"]).encode())
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.server.paths().count(RICHART), 1)
+        self.assertEqual([r["filename"] for r in self.manifest()], ["card_cg047_card001.pdf"])
+        self.assertIn("找到 1 張卡片頁", result.stdout)
+
+
+class RedirectTests(ScriptTestCase):
+    def test_redirect_to_another_domain_is_not_followed_and_fails_that_page_with_the_domain_in_the_reason(self) -> None:
+        self.serve_rights({INSURANCE: card_html("INSURANCE"), PARKING: card_html("PARKING")})
+        outside = urlparse(self.mkp_server.base_url).netloc
+        self.server.redirects[INSURANCE] = self.mkp_server.base_url + "/outside/page/"
+        self.mkp_routes["/outside/page/"] = (200, card_html("OUTSIDE").encode())
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(self.mkp_server.paths(), [], "外部網域不該收到請求")
+        records = {r["filename"]: r for r in self.manifest()}
+        failed = records["rights_insurance_right0201.docx"]
+        self.assertEqual(failed["result"], "失敗")
+        self.assertIn(f"轉址到外部網域 {outside}", failed["detail"])
+        self.assertEqual(records["rights_parking_right0301.docx"]["result"], "已下載")
+        self.assertFalse((self.out / "rights" / "rights_insurance_right0201.docx").exists())
+
+    def test_redirect_within_the_same_domain_is_followed(self) -> None:
+        self.serve_rights({INSURANCE: card_html("INSURANCE")})
+        self.server.redirects[INSURANCE] = "/TSB/moved/insurance/"
+        self.routes["/TSB/moved/insurance/"] = (200, card_html("MOVED-INSURANCE").encode())
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(b"MOVED-INSURANCE", (self.out / "rights" / "rights_insurance_right0201.docx").read_bytes())
+
+    def test_redirect_of_a_banner_to_another_domain_is_not_followed(self) -> None:
+        self.serve_offers({"A": [[detail_path(1)]]})
+        self.serve_details({detail_path(1): offer_detail_html("OFFER1", banner=self.mkp_server.base_url + banner_path(1))})
+        self.mkp_server.redirects[banner_path(1)] = self.server.base_url + "/outside.png"
+        self.routes["/outside.png"] = (200, PNG_BYTES)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("/outside.png", self.server.paths())
+        record = next(r for r in self.manifest() if r["category"] == "活動圖片")
+        self.assertEqual(record["result"], "失敗")
+        self.assertIn("轉址到外部網域", record["detail"])
+
+
+class ExpiredActivityRerunTests(ScriptTestCase):
+    def test_rerun_does_not_request_the_page_of_an_activity_whose_saved_html_is_expired(self) -> None:
+        period = period_from_today(-60, -1)
+        self.serve_offers({"A": [[detail_path(1)]]})
+        self.serve_details({detail_path(1): offer_detail_html("OFFER1", period=period)})
+        self.assertEqual(self.run_script().returncode, 0)
+        self.mkp_server.requests.clear()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.mkp_server.paths(), [], "已知過期的活動頁不該再請求")
+        record = self.manifest()[0]
+        self.assertEqual(record["result"], "過期略過")
+        self.assertEqual(record["period"], period)
+        self.assertEqual(record["html_sha256"], hashlib.sha256(self.mkp_routes[detail_path(1)][1]).hexdigest())
+
+    def test_rerun_requests_the_page_again_when_the_saved_html_is_not_expired_but_the_pdf_is_missing(self) -> None:
+        self.serve_offers({"A": [[detail_path(1)]]})
+        self.serve_details({detail_path(1): offer_detail_html("FAKE-CHROME-FAIL")})
+        self.assertEqual(self.run_script().returncode, 1)
+        self.mkp_server.requests.clear()
+        self.serve_details({detail_path(1): offer_detail_html("OFFER1")})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.mkp_server.paths(), [detail_path(1)])
+        self.assertTrue((self.out / "offers" / f"offer_{wm(1)}.pdf").is_file())
+
+
+SITECUSTOMIZE_CLOCK = """
+import datetime as _dt
+_real = _dt.date
+
+
+class _Date(_real):
+    calls = 0
+
+    @classmethod
+    def today(cls):
+        _Date.calls += 1
+        today = _real.today()
+        return today if _Date.calls == 1 else today + _dt.timedelta(days=1)
+
+
+_dt.date = _Date
+"""
+
+
+class RunDateTests(ScriptTestCase):
+    def test_today_is_read_once_per_run_so_crossing_midnight_does_not_change_the_result(self) -> None:
+        # 子行程的 date.today() 第一次回真正的今天，之後每次都回明天（模擬執行到一半跨過午夜）
+        clock = self.tmp / "clock"
+        clock.mkdir()
+        (clock / "sitecustomize.py").write_text(SITECUSTOMIZE_CLOCK, encoding="utf-8")
+        ends_today = period_from_today(-10, 0)
+        self.serve_offers({"A": [[detail_path(n) for n in (1, 2, 3)]]})
+        self.serve_details(
+            {detail_path(n): offer_detail_html(f"OFFER{n}", period=ends_today, banner=self.mkp_server.base_url + banner_path(n)) for n in (1, 2, 3)}
+        )
+        self.serve_images({banner_path(n): PNG_BYTES for n in (1, 2, 3)})
+        result = self.run_script(extra_env={"PYTHONPATH": str(clock)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        records = [r for r in self.manifest() if r["category"] in ("活動", "活動圖片")]
+        self.assertEqual([r["result"] for r in records], ["已下載"] * 6)
+        self.assertEqual({r["downloaded_at"] for r in records}, {time.strftime("%Y-%m-%d")})
+
+
+class LibreOfficeProfileTests(ScriptTestCase):
+    def test_each_conversion_uses_its_own_temporary_user_profile_that_is_removed_afterwards(self) -> None:
+        self.serve_rights({INSURANCE: card_html("INSURANCE"), PARKING: card_html("PARKING")})
+        log = self.tmp / "office_args.log"
+        directory = self.tmp / "logging_office"
+        directory.mkdir()
+        for name in ("libreoffice", "soffice"):
+            wrapper = directory / name
+            wrapper.write_text(
+                f'#!/bin/sh\nprintf "%s\\n" "$1" >> "{log}"\nexec "{sys.executable}" "{FAKE_LIBREOFFICE}" "$@"\n'
+            )
+            wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+        result = self.run_script(path=str(directory))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        first_args = log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(first_args), 2)
+        profiles = [Path(unquote(arg.removeprefix("-env:UserInstallation=file://"))) for arg in first_args]
+        self.assertEqual(len({str(p) for p in profiles}), 2, "兩次轉檔要各用自己的資料夾")
+        for profile in profiles:
+            self.assertTrue(profile.is_relative_to(self.out.resolve()), f"暫時資料夾要在輸出資料夾內：{profile}")
+            self.assertFalse(profile.parent.exists(), "轉檔完要移除暫時資料夾")
+        self.assertEqual(
+            [f for f in self.files_under_out() if not f.startswith("_meta/")],
+            ["rights/rights_insurance_right0201.docx", "rights/rights_parking_right0301.docx"],
+        )
+        self.assertEqual([f for f in self.files_under_out() if "profile" in f or "user" in f], [])
+
+
+def unsafe_card_html() -> str:
+    """產生卡片頁：主內容區含 inline 事件屬性、javascript: 網址、iframe 與 <link rel=stylesheet>。
+
+    Returns:
+        卡片頁的 HTML；另有會被保留的標記（未關閉的 <p>、字元參照、有引號的屬性值、boolean 屬性、rel=icon 的 link）。
+    """
+    return """<!doctype html><html><head><meta charset="utf-8"></head><body>
+<div id="centercontainer">
+  <p onclick="evil1()">UNSAFE-KEEP-TEXT</p>
+  <img src="/img/a.gif" onerror="evil2()" ONLOAD="evil3()">
+  <a href="javascript:evil4()">JS-LINK-TEXT</a>
+  <a href=" Java&#9;Script:evil5()">JS-LINK-TEXT-2</a>
+  <iframe src="https://example.invalid/frame"><p>IFRAME-INNER</p></iframe>
+  <link rel="stylesheet" href="/inner.css">
+  <link rel="icon" href="/favicon.ico">
+  <div class="kept" data-x='a"b' hidden>QUOTE-AND-FLAG</div>
+  <a href="/ok/">OK-LINK</a>
+  <p>AFTER &amp; ENTITY &copy; 2026
+</div></body></html>"""
+
+
+class ActiveContentTests(ScriptTestCase):
+    """交給 Chrome 與 LibreOffice 的 HTML 不含會執行或載入外部內容的元素；Chrome 的 profile 封鎖 JavaScript。"""
+
+    def setUp(self) -> None:
+        """卡片、權益與活動頁都用含主動內容的頁面執行一次，收下各自交給 Chrome 或 LibreOffice 的 HTML。"""
+        super().setUp()
+        self.serve_cards({RICHART: unsafe_card_html()})
+        self.serve_rights({INSURANCE: unsafe_card_html()})
+        self.serve_offers({"A": [[detail_path(1)]]})
+        self.serve_details({detail_path(1): unsafe_card_html().replace("centercontainer", "page-content").replace("id=", "class=")})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.received = {
+            "card": (self.out / "cards" / "card_cg047_card001.pdf").read_text(encoding="utf-8", errors="replace"),
+            "rights": (self.out / "rights" / "rights_insurance_right0201.docx").read_text(encoding="utf-8", errors="replace"),
+            "offer": (self.out / "offers" / f"offer_{wm(1)}.pdf").read_text(encoding="utf-8", errors="replace"),
+        }
+
+    def test_removes_inline_event_attributes_javascript_urls_iframes_and_stylesheet_links(self) -> None:
+        for kind, received in self.received.items():
+            with self.subTest(kind=kind):
+                for text in ("evil1", "evil2", "evil3", "evil4", "evil5", "onclick", "onerror", "onload", "javascript", "<iframe", "IFRAME-INNER", "inner.css"):
+                    self.assertNotIn(text.lower(), received.lower())
+
+    def test_keeps_the_text_and_the_other_markup(self) -> None:
+        for kind, received in self.received.items():
+            with self.subTest(kind=kind):
+                for text in (
+                    "UNSAFE-KEEP-TEXT",
+                    "JS-LINK-TEXT",
+                    "JS-LINK-TEXT-2",
+                    '<img src="/img/a.gif">',
+                    '<a href="/ok/">OK-LINK</a>',
+                    '<link rel="icon" href="/favicon.ico">',
+                    "data-x=\"a&quot;b\" hidden",
+                    "QUOTE-AND-FLAG",
+                    "AFTER &amp; ENTITY &copy; 2026",
+                ):
+                    self.assertIn(text, received)
 
 
 if __name__ == "__main__":
