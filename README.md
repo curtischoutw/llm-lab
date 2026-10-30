@@ -33,6 +33,19 @@ brew install --cask libreoffice
 
 RAG-Anything 依序嘗試 PATH 上的 `libreoffice`、`soffice`。轉檔逾時由環境變數 `LIBREOFFICE_CONVERT_TIMEOUT` 控制，預設 600 秒；大型文件逾時時，錯誤訊息會指出這個變數。這個專案不改這兩點。
 
+**macOS 上的中文 Office 文件**：headless 模式的 LibreOffice 透過 fontconfig 找字型，預設看不到 macOS 的系統字型。轉 PDF 時，中文字因為沒有字型可以畫，不會出現在 PDF 裡，MinerU 也就抽不到。
+
+2026-10-30 實測（LibreOffice 26.8.1.1）：
+- 有 7,309 個中文字的 docx，轉出的 PDF 中文是 0 字；
+- 只安裝 Noto Sans CJK TC 字型，仍然是 0 字；
+- 用 `scripts/libreoffice-fonts-macos.conf` 之後是 7,265 字。
+
+修法：在 `.env` 加上下面這一行。路徑要用絕對路徑，`.env.example` 裡有註解掉的範例。
+
+```sh
+FONTCONFIG_FILE=/絕對路徑/llm-lab/scripts/libreoffice-fonts-macos.conf
+```
+
 設定檔：
 
 ```sh
@@ -41,9 +54,44 @@ cp .env.example .env
 
 `.env.example` 的預設值對應下一節的本機 server，每個欄位的用途寫在檔案註解裡。`.env` 不進版本控管。
 
-## 2. 下載論文
+## 2. 下載資料
 
-這一節的兩支腳本下載的是前一版知識庫的資料（RAG 論文與文件）。這些資料與前一版知識庫已在 2026-10-30 刪除，需要時可以用腳本重新下載。
+### 下載台新信用卡內容（目前的知識庫）
+
+```sh
+.venv/bin/python scripts/fetch_taishin.py
+```
+
+從台新銀行官網的四個列表找出網址，下載到 `data/taishin_credit_card/`。每次執行都重新讀列表，所以網址會跟著官網更新。
+
+| 類別 | 來源 | 資料夾 | 格式 | 2026-10-30 份數 |
+|---|---|---|---|---|
+| 卡片 | 信用卡總覽頁列出的卡片頁 | `cards/` | PDF（Chrome 列印） | 16 |
+| 權益 | 信用卡權益頁列出的權益說明子頁 | `rights/` | `.docx`（LibreOffice 轉檔） | 43（另 3 個失敗，見下方） |
+| 下載 | 信用卡文件下載區的所有 PDF | `downloads/` | PDF（原樣） | 19 |
+| 活動 | 刷卡優惠列表分類 A–I 的活動詳情頁 | `offers/` | PDF（Chrome 列印） | 200（另 1 個過期略過） |
+| 活動圖片 | 前 8 個有主視覺的活動頁的主視覺 | `offer_images/` | JPG、PNG | 8 |
+
+- 卡片頁、權益子頁與活動頁：先從原始 HTML 取出主內容區，拿掉官網的 CSS 與 script，再轉檔。直接列印原網址時，官網 CSS 會把預設收合的區塊與彈窗藏起來。2026-10-30 實測 Richart 卡片頁直接列印只有 1,074 字，取主內容區後有 34,576 字。代價是 PDF 的版面是純 HTML 的排版，不像官網。
+- 請求之間至少間隔 2 秒。2026-10-30 完整執行一次花了 13 分 1 秒。Chrome 與 LibreOffice 轉檔時會自己載入圖片，這些請求不受間隔控制。
+- `data/taishin_credit_card/_meta/` 存放三樣東西，都不會被匯入：
+  - 每一頁的原始 HTML；
+  - 交給 Chrome 或 LibreOffice 的 HTML；
+  - 下載清單 `manifest.jsonl`。清單記錄每份文件的網址、類別、格式、下載日期、SHA-256、活動期間與結果。
+- 結果的種類：
+  - 已下載；
+  - 已存在略過：本地已有同名檔案，不重新下載；
+  - 過期略過：活動結束日早於下載當天；
+  - 格式不支援略過；
+  - 失敗：會附上原因。有任何失敗時，腳本以非零碼結束，並列出失敗的頁面。
+- 2026-10-30 有 3 筆失敗：權益頁的 Visa、Mastercard、JCB 三個子頁轉址到各國際組織的網站，不是台新的頁面。其中 2 頁找不到主內容區，Mastercard 回 403。
+- 需要 Google Chrome（預設路徑 `/Applications/Google Chrome.app`，可以用 `TAISHIN_CHROME` 指定）與 LibreOffice（PATH 上的 `libreoffice` 或 `soffice`）。
+- **更新權益內容**：已存在的檔案會略過，所以重新執行不會更新內容。要更新時，刪除 `data/taishin_credit_card/` 與 `rag_storage/`，重新下載，再重新匯入。
+- 台新官網的著作權聲明禁止未經授權的重製。這些資料只放在本機，不要推上 GitHub（`data/` 不進版本控管）。
+
+### 下載論文（前一版知識庫）
+
+這一節與下一節的兩支腳本，下載的是前一版知識庫的資料（RAG 論文與文件）。這些資料與前一版知識庫已在 2026-10-30 刪除，需要時可以用腳本重新下載。
 
 ```sh
 .venv/bin/python scripts/fetch_papers.py
@@ -51,7 +99,7 @@ cp .env.example .env
 
 下載 5 篇 RAG 主題的 arXiv 論文到 `data/papers/`，每篇都會先比對 arXiv 上的標題。已存在的完整檔案會略過。只下載部分論文：`--ids 2410.05779 2510.12323`。
 
-### 下載其他格式的文件
+### 下載其他格式的文件（前一版知識庫）
 
 ```sh
 .venv/bin/python scripts/fetch_documents.py
@@ -180,7 +228,36 @@ with Session() as session:
 
 ## 5. 實測數據
 
-本節都是前一版知識庫的量測（RAG 論文與文件，2026-10-30 刪除）。記憶體與耗時仍可作為參考；台新信用卡知識庫的量測會在建立後補上。
+### 台新信用卡知識庫：試匯入 7 份（2026-10-30）
+
+模型組合與設定和下方前一版相同（M2 Pro 32 GB）。7 份文件用 symlink 放進 `data/taishin_pilot/` 後一次匯入，紀錄在 `output/taishin_pilot/`。
+
+| 文件 | 格式 | 頁數 | 耗時 s |
+|---|---|---|---|
+| Richart 卡片頁 `card_cg047_card001` | PDF（Chrome 列印） | 31 | 4,960 |
+| 信用卡會員約定條款 `download__115_001final` | PDF | 23 | 1,314 |
+| 活動頁 `offer_WM_20250716180549852` | PDF（Chrome 列印） | 7 | 314 |
+| 活動頁 `offer_WM_20260903141803056` | PDF（Chrome 列印） | 4 | 387 |
+| 活動主視覺 `offer_image_WM_20260903141803056_banner_image` | JPG | 1 | 35 |
+| 權益子頁 `rights_favorable_right0505` | `.docx` | 1 | 57 |
+| 權益子頁 `rights_insurance_right0201` | `.docx` | 9 | 1,346 |
+
+- 總時間 2 小時 20 分（8,416 s），VLM 呼叫 64 次全部成功，wired 記憶體最高 19 GB。
+- Richart 卡片頁占 59%。它有 77 個表格與圖片區塊，每個區塊都要經過 VLM 或 LLM 處理。
+- 中文抽取：7 份的 MinerU 內容清單都沒有 U+FFFD。權益子頁 `right0201` 抽出 4,575 個中文字。
+  - 第一次試匯入時沒有設定 `FONTCONFIG_FILE`，兩份 docx 的中文都是 0 字，見第 1 節。
+  - 那一次 `right0201` 只花 61 s，因為內容只剩數字與標點。
+- Office 文件轉 PDF 每份不到 2 s。這是從前後兩份文件的時間戳推算的，log 沒有單獨記錄轉檔時間。
+- 全量匯入的估計：286 份文件約 24–44 小時。依類別：
+  - 卡片 16 份、349 頁：6.5–16 小時。估計範圍取自兩個每頁速度：Richart 卡片頁每頁 160 s，活動頁每頁 67 s。
+  - 權益 43 份、共 139,450 字：約 6 小時，以 `right0201` 每字 0.15 s 推算。
+  - 下載區 19 份、122 頁：約 2 小時，以約定條款每頁 57 s 推算。
+  - 活動 200 份、489 頁：9–20 小時。
+  - 活動主視覺 8 張：約 5 分鐘。
+
+### 前一版知識庫
+
+以下是前一版知識庫的量測（RAG 論文與文件，2026-10-30 刪除），記憶體與耗時仍可作為參考。
 
 模型組合：LLM `Qwen3-4B-Instruct-2507-4bit`、VLM `Qwen3-VL-4B-Instruct-4bit`、embedding `Qwen3-Embedding-0.6B-8bit`；MinerU backend `pipeline`；`LLM_MAX_ASYNC=1`、`EMBED_MAX_ASYNC=1`、`QUERY_MAX_TOTAL_TOKENS=12000`；M2 Pro 32 GB。2410.05779 是 2026-10-26 單篇匯入時量測，另外兩篇是 2026-10-27 以資料夾匯入時量測（紀錄在 `.scratch/rag-anything-lab/issues/03-*.md` 與 `05-*.md`）。
 

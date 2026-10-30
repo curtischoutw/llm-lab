@@ -39,7 +39,7 @@ rag_storage/   知識圖譜＋向量庫＋快取（＝知識庫本體）
 |---|---|---|---|---|
 | `rag_lab/` | 主程式（Python 套件），見第 3 節 | 是 | — | 不能 |
 | `examples/` | 從 Python 呼叫 `rag_lab` 的範例 | 是 | — | 不能 |
-| `scripts/` | 維運工具：下載論文與其他格式的文件、啟動 VLM server、檢查端點 | 是 | — | 不能 |
+| `scripts/` | 維運工具：下載台新信用卡內容、論文與其他格式的文件，啟動 VLM server，檢查端點；另有 macOS 上 LibreOffice 用的 fontconfig 設定 | 是 | — | 不能 |
 | `tests/` | 自動測試與測試用的假 server、假 MinerU、假 LibreOffice | 是 | — | 不能 |
 | `eval/` | `eval` 指令的題目檔（JSONL）：範例 `questions.example.jsonl`（論文）、`questions.formats.jsonl`（`data/documents/` 的 6 份文件，其中 2 題跨格式題同時問到論文）、`questions.format_check.jsonl`（`data/format_check/`，只用在暫時的知識庫） | 是 | 手寫 | 範例檔被測試引用，不能刪；另外兩份是 README 第 5 節實測數據的題目 |
 | `docs/` | 這份架構文件；`docs/agents/` 是給 Claude Code 技能讀的設定（issue tracker 位置、triage 標籤、domain 文件的讀法） | 是 | 手寫 | 不能 |
