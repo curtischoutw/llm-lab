@@ -11,6 +11,7 @@
 - 卡片：總覽頁列出的卡片頁，列印成 PDF，放在 DIR/cards/。
 - 權益：權益頁列出的權益說明子頁，用 LibreOffice 轉成 .docx，放在 DIR/rights/。
 - 下載：文件下載區每一頁列出的 PDF（約定條款、費用表、申請書等），不轉檔、原樣存檔，放在 DIR/downloads/。
+- 權益附件：權益子頁連到的 PDF（聯名卡、雙幣卡、企業卡的約定條款等），不轉檔、原樣存檔，放在 DIR/rights_attachments/。
 - 活動：刷卡優惠列表（分類 A–I）列出、下載當天還沒結束的活動頁，取主內容區後列印成 PDF，放在 DIR/offers/。
 - 活動圖片：依發現順序，前 IMAGE_LIMIT（8）個有主視覺的活動頁的主視覺，原樣存檔，放在 DIR/offer_images/。
 
@@ -20,7 +21,7 @@
 - DIR/_meta/print/：取出主內容區後交給 Chrome 或 LibreOffice 的本機 HTML。
 - DIR/_meta/manifest.jsonl：下載清單，一行一份文件。_meta 不會被匯入。欄位 period 是活動的活動期間
   （YYYY-MM-DD~YYYY-MM-DD，讀不出來是「期間不明」），其他類別為空字串。result 除了已下載、已存在略過、失敗，
-  還有「過期略過」（活動）與「格式不支援略過」（活動圖片）。
+  還有「過期略過」（活動）、「格式不支援略過」（活動圖片）、「外部網域略過」與「重複略過」（權益附件）。
 
 關鍵設計決策：
 - 直接列印原網址會漏掉收合區與彈窗：2026-10-30 實測 Richart 卡片頁的 PDF 只有 2 頁、1,074 字，
@@ -76,6 +77,16 @@
   server 測試時真實格式的主視覺也會向本機請求。
   圖片是不可信資料：只向 mkp 網域請求（其他網域的主視覺記為失敗，訊息列出該網域與 mkp 網域），存檔前檢查檔頭（magic bytes）和副檔名一致
   （png、jpg／jpeg、bmp、gif、tif／tiff、webp 各有檢查），不符的記為失敗、不存檔。副檔名取自網址，轉成小寫。
+- 權益附件（ASSUMPTION：類別名「權益附件」、資料夾 rights_attachments、檔名前綴 attachment，ticket 11 只指定類別名，
+  資料夾與前綴是這次自己訂的）：讀權益子頁存在 DIR/_meta/html/ 的原始 HTML，不重新請求子頁，所以本次下載與已存在而略過的子頁
+  處理方式相同；子頁的轉檔失敗但原始 HTML 已存檔時，也讀它。整頁的 <a href> 都看，連結以子頁網址解析，路徑以 .pdf 結尾（不分大小寫）的
+  是候選，同一個網址連在很多頁只算一次，檔名規則與下載區相同（前綴 attachment，例如 attachment_dual-card_01.pdf）。
+  這個類別排在文件下載之後，因為要用下載區找到的網址判斷重複。每個候選的處理：
+  只收和 www 前綴同網域的（環境變數 TAISHIN_WWW_BASE 替換後以替換值為準），其他網域不請求，清單的結果是「外部網域略過」，
+  原因寫出網域（使用者 2026-10-31 決定：icash.com.tw 的條款不收）；網址和文件下載區找到的相同時不請求，結果是「重複略過」，
+  原因寫出它在下載區的檔名（例如 right0701 連到的 _115_001final.pdf，下載區的 download__115_001final.pdf）；
+  其餘照 save_pdf：確認以 %PDF- 開頭後原樣存檔、再次執行時已存在就略過、失敗只記那一份。
+  下載區的列表失敗（沒有下載區的網址）時，無法判斷重複，這些 PDF 照常下載到權益附件資料夾。
 - 單頁失敗（HTTP、網路、轉址到外部網域、網址無法送出請求、轉檔、檔案系統）時記下原因，其他頁照常處理；最後列出所有失敗的頁面並以非零碼結束。
   列表頁（總覽頁、權益頁、文件下載頁與刷卡優惠列表的任何一頁）本身失敗時，那一類沒有任何網址，指出是哪一個列表；
   其他類別照常處理，最後以非零碼結束。
@@ -97,6 +108,10 @@
 - Chrome 與 LibreOffice 透過 <base href> 自行載入圖片，這些請求不受腳本的間隔控制。
 - 刷卡優惠列表頁頂的輪播（a.btn-slide，絕對網址）不收：2026-10-30 的樣本中，A 的輪播有一個活動不在 A 的任何列表頁裡，
   所以這類活動不會被下載（範圍外，ticket 05）。
+- 權益附件收的是子頁上所有同網域的 PDF 連結，不只約定條款：2026-10-30 存下原始 HTML 的 45 個子頁（含保險、道路救援、停車、
+  機場接送、優惠方案等）一共連到 18 個同網域 PDF，其中聯名卡、雙幣卡、企業卡的條款 7 份（right0702、right0704、right0705）。
+  ticket 11 預期 7 份，只對應 right07xx；其餘 11 份（SKinsurance_20260626.pdf 等）依同一條規則也會收，是否要限縮由使用者決定。
+  數量沒有預期值，只印出找到的連結數（含外部網域與重複的）。
 - 官網改版時，列表頁的連結格式、id="centercontainer" 或 class page-content 可能失效；總覽頁找到的卡片數不是 16、
   權益頁找到的子頁數不是 46、下載區找到的 PDF 數不是 19 時，腳本會印出實際數量提醒，但不中止。
 - 翻頁上限 DOWNLOAD_MAX_PAGES（ASSUMPTION：20，目前實際只有 2 頁）。翻滿上限仍有新的 PDF 時，
@@ -204,6 +219,8 @@ RESULT_SKIPPED = "已存在略過"
 RESULT_FAILED = "失敗"
 RESULT_EXPIRED = "過期略過"
 RESULT_UNSUPPORTED = "格式不支援略過"
+RESULT_EXTERNAL = "外部網域略過"
+RESULT_DUPLICATE = "重複略過"
 
 
 class FetchError(Exception):
@@ -1305,6 +1322,63 @@ def save_pdf(run: Run, category: Category, url: str, name: str, target: Path, re
         tmp_pdf.replace(target)
 
 
+def save_attachment(run: Run, category: Category, url: str, name: str, target: Path, record: Record) -> None:
+    """權益子頁連到的 PDF：只收官網（www）網域的，其他網域略過；文件下載區已有的同一個網址也略過；
+    通過後和下載區的 PDF 一樣原樣存檔（save_pdf）。
+
+    Args:
+        run: 一次執行共用的設定。
+        category: 權益附件類別。
+        url: PDF 完整網址。
+        name: 本地名稱。
+        target: 最終檔案路徑。
+        record: 清單紀錄。
+
+    Raises:
+        SkipDocument: 網址不在官網網域，或和文件下載區找到的網址相同（都不請求）。
+        FetchError: save_pdf 的失敗：下載失敗，或內容不是以 %PDF- 開頭。
+    """
+    host, www_host = urlparse(url).netloc.lower(), urlparse(run.www).netloc.lower()
+    if host != www_host:
+        raise SkipDocument(RESULT_EXTERNAL, f"外部網域 {host}（官網網域是 {www_host}），不下載")
+    downloads = run.found.get(DOWNLOADS.name, [])
+    if url in downloads:
+        in_downloads = f"{DOWNLOADS.local_names(downloads)[url]}.{DOWNLOADS.extension_of(url)}"
+        raise SkipDocument(RESULT_DUPLICATE, f"同一個網址已在文件下載區，檔名 {in_downloads}")
+    save_pdf(run, category, url, name, target, record)
+
+
+def collect_attachments(run: Run, category: Category) -> list[str]:
+    """從權益子頁存下來的原始 HTML 取出 PDF 連結（不重新請求子頁）。
+
+    本次下載的子頁與已存在而略過的子頁都處理：只要 _meta/html 有那一頁的原始 HTML 就讀。
+    整頁的連結都看，不只主內容區（2026-10-30 的樣本中兩者的 PDF 連結完全相同）。
+    連結以子頁網址解析，路徑以 .pdf 結尾（不分大小寫）的才收；同一個網址連在很多頁只算一次。
+
+    Args:
+        run: 一次執行共用的設定（found 裡要有權益類別找到的網址）。
+        category: 權益附件類別。
+
+    Returns:
+        PDF 的完整網址（去除重複、保留發現順序），包含外部網域與下載區已有的網址，由 produce 決定略過。
+        權益頁列表失敗時為空：那個失敗已經回報過。
+    """
+    page_urls = run.found.get(RIGHTS.name, [])
+    names = RIGHTS.local_names(page_urls)
+    found: dict[str, None] = {}
+    for page_url in page_urls:
+        raw_path = run.out / "_meta" / "html" / f"{names[page_url]}.html"
+        if not raw_path.is_file():
+            continue
+        collector = _AnchorCollector()
+        collector.feed(saved_html(raw_path))
+        for href in collector.hrefs:
+            parsed = resolve_href(page_url, href)
+            if parsed is not None and category.link_pattern.match(parsed.path):
+                found[request_url(parsed.geturl())] = None
+    return list(found)
+
+
 # 圖片檔頭（magic bytes）：副檔名對檢查函式。清單內每個副檔名都要有檢查，沒有的當成失敗，不放行
 IMAGE_SIGNATURES: dict[str, Callable[[bytes], bool]] = {
     ".png": lambda data: data.startswith(b"\x89PNG\r\n\x1a\n"),
@@ -1444,6 +1518,26 @@ DOWNLOADS = Category(
     produce=save_pdf,
 )
 
+ATTACHMENTS = Category(
+    name="權益附件",
+    list_label="權益子頁",
+    list_name="權益附件",
+    list_site="www",
+    list_path="",
+    # 路徑以 .pdf 結尾的連結都是候選；名稱取最後一段的主檔名，和下載區相同
+    link_pattern=re.compile(r"^/(?:.*/)?([^/]+)\.pdf$", re.IGNORECASE),
+    expected_count=None,
+    unit="個 PDF 連結",
+    name_prefix="attachment",
+    folder="rights_attachments",
+    extension="pdf",
+    fmt=FORMAT_PDF,
+    keeps_html=False,
+    reads_period=False,
+    collect=collect_attachments,
+    produce=save_attachment,
+)
+
 
 def check_offer_period(record: Record, page: str) -> None:
     """讀出活動詳情頁的活動期間寫進清單紀錄；結束日早於下載當天的活動不下載。
@@ -1506,7 +1600,7 @@ IMAGES = Category(
     collect=collect_banners,
     produce=save_image,
 )
-CATEGORIES = (CARDS, RIGHTS, DOWNLOADS, ACTIVITIES, IMAGES)
+CATEGORIES = (CARDS, RIGHTS, DOWNLOADS, ATTACHMENTS, ACTIVITIES, IMAGES)
 
 
 def fetch_document(run: Run, category: Category, url: str, name: str) -> Record:
@@ -1587,7 +1681,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str]) -> int:
-    """下載總覽頁列出的卡片頁、權益頁列出的權益子頁、文件下載區的 PDF、刷卡優惠的活動頁與前 8 個主視覺。
+    """下載總覽頁列出的卡片頁、權益頁列出的權益子頁、文件下載區的 PDF、權益子頁連到的 PDF、刷卡優惠的活動頁與前 8 個主視覺。
 
     Args:
         argv: 不含程式名稱的參數清單。
