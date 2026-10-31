@@ -59,6 +59,9 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   時在同一個 loop 上完整收尾並在 stderr 警告；正常 close 後取消，實例才能被回收。
 - 每次 ingest 開始時把 models 的 VLM 與描述統計清零，報告只計這一次；描述失敗計數的包裝在 Session
   初始化後只包一次（每次 ingest 都包會疊成多層，同一次失敗被計多次）。
+- Office 文件解析輸出的路徑含原檔路徑雜湊（_office_output_dir）：RAG-Anything 把 Office 轉成
+  `<輸出資料夾>/<主檔名>.pdf`，主檔名相同的文件會互相覆蓋。只對 Office 文件另給 output_dir；PDF 與圖片的
+  解析路徑（RAG-Anything 自己加 `<主檔名>_<雜湊>`）與解析快取 key 都不變，已匯入的文件重匯仍被略過。
 - 計時用 RAG-Anything 的 ProcessingCallback：解析＝第一次 parse_document（之後 process
   內的 parse 是快取命中）；建圖＝文字插入（含 LightRAG 實體抽取）；多模態＝圖表公式描述。
 - mineru 以 subprocess 依 PATH 尋找：PATH 上找不到時，把目前 Python 所在的 bin 目錄
@@ -83,6 +86,7 @@ Dependencies: raganything、lightrag-hku（由 raganything 帶入）。
 
 import asyncio
 import atexit
+import hashlib
 import os
 import shutil
 import sys
@@ -101,7 +105,7 @@ from raganything.callbacks import ProcessingCallback
 from rag_lab import models
 from rag_lab.config import Settings, get_settings
 from rag_lab.evaluation import RETRIEVAL_MODES, Cell, Question
-from rag_lab.formats import describe_supported, is_supported
+from rag_lab.formats import describe_supported, is_office, is_supported
 
 # ==============================
 # 常數與例外
@@ -280,6 +284,24 @@ class IngestSummary:
     description_error: str | None = None
 
 
+def _office_output_dir(parser_output_dir: str, document: Path) -> Path:
+    """Office 文件專屬的解析輸出資料夾，讓主檔名相同的文件不共用轉檔 PDF 與解析結果。
+
+    RAG-Anything 把 Office 文件轉成 `<輸出資料夾>/<主檔名>.pdf`，MinerU 的解析資料夾再依這個 PDF 的路徑命名，
+    所以 `a.docx` 與 `a.pptx`（或兩份 `a.docx`）會共用同一個 PDF 與解析資料夾。資料夾名稱含原檔絕對路徑的
+    雜湊（與 RAG-Anything 對 PDF 與圖片的 `<主檔名>_<雜湊>` 做法相同），同一份文件每次都落在同一個資料夾。
+
+    Args:
+        parser_output_dir: PARSER_OUTPUT_DIR。
+        document: Office 文件路徑。
+
+    Returns:
+        `<parser_output_dir>/office/<主檔名>_<原檔絕對路徑 md5 的前 8 碼>`。
+    """
+    digest = hashlib.md5(str(document.resolve()).encode()).hexdigest()[:8]
+    return Path(parser_output_dir) / "office" / f"{document.stem}_{digest}"
+
+
 async def _ingest_one(rag: RAGAnything, document: Path) -> IngestReport:
     """匯入單篇文件；已完整處理就略過，先前未完成的先清掉舊紀錄再重匯。
 
@@ -297,7 +319,10 @@ async def _ingest_one(rag: RAGAnything, document: Path) -> IngestReport:
     timer = StageTimer()
     rag.callback_manager.register(timer)
     try:
-        parse_kwargs = {"backend": MINERU_BACKEND}
+        parse_kwargs: dict[str, object] = {"backend": MINERU_BACKEND}
+        if is_office(document):
+            # output_dir 不在 RAG-Anything 的解析快取 key 裡，所以已匯入的 Office 文件換了輸出資料夾仍認得出來、不重新解析
+            parse_kwargs["output_dir"] = str(_office_output_dir(rag.config.parser_output_dir, document))
         content_list, doc_id = await rag.parse_document(str(document), **parse_kwargs)
         if not content_list:
             raise PipelineError(f"MinerU 沒有從 {document.name} 解析出任何內容（輸出資料夾：{rag.config.parser_output_dir}）")

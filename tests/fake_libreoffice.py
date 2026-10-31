@@ -25,8 +25,11 @@
 - 轉 docx 時，輸出檔 = 假 docx 檔頭（`PK`）+ 收到的 HTML 原文，讓測試能讀出「交給 LibreOffice 的 HTML 內容」，
   比照假 Chrome。轉 PDF 的輸出不變。
 
-已知極限：轉 PDF 時不讀輸入檔的內容，也不驗證它是不是真的 Office 檔；輸出的 PDF 只有檔頭與填充（RAG-Anything 要求
-PDF 至少 100 bytes），不是可以顯示的 PDF，只有同樣不讀內容的假 mineru 會接手它。轉 docx 的輸出不是可以開啟的 Word 檔。
+- 轉 PDF 時，輸出的 PDF 在填充之後附一行 `% fake libreoffice source: <輸入檔的第一行>`。主檔名相同的兩份 Office 文件
+  （例如 `a.docx` 與 `a.pptx`）因此能轉出內容不同的 PDF，假 mineru 再把這一行帶進解析結果，測試才分辨得出兩份各自的內容。
+
+已知極限：轉 PDF 時只讀輸入檔的第一行，不驗證它是不是真的 Office 檔；輸出的 PDF 只有檔頭、填充與那一行（RAG-Anything 要求
+PDF 至少 100 bytes），不是可以顯示的 PDF，只有假 mineru 會接手它。轉 docx 的輸出不是可以開啟的 Word 檔。
 
 Dependencies: 僅標準函式庫。
 """
@@ -37,6 +40,8 @@ from urllib.parse import unquote
 
 # RAG-Anything 把小於 100 bytes 的轉檔結果當成空檔
 _PDF_BYTES = b"%PDF-1.4\n" + b"% fake libreoffice output\n" * 8
+# 轉出的 PDF 在這個標記後附上來源文件的第一行文字，假 mineru 據此分辨 PDF 是從哪份 Office 文件轉來的（tests/fake_mineru.py 用同一個標記）
+_SOURCE_MARKER = b"% fake libreoffice source: "
 _DOCX_HEADER = b"PK\x03\x04 fake libreoffice output\n"
 _DOCX_TARGET = "docx:MS Word 2007 XML"
 _PROFILE_PREFIX = "-env:UserInstallation=file://"
@@ -68,7 +73,8 @@ def main(argv: list[str]) -> int:
         print(f"fake libreoffice: cannot convert {source.name}", file=sys.stderr)
         return 1
     if target == "pdf":
-        (outdir / f"{source.stem}.pdf").write_bytes(_PDF_BYTES)
+        first_line = source.read_bytes().splitlines()[0] if source.stat().st_size else b""
+        (outdir / f"{source.stem}.pdf").write_bytes(_PDF_BYTES + _SOURCE_MARKER + first_line + b"\n")
     else:
         (outdir / f"{source.stem}.docx").write_bytes(_DOCX_HEADER + source.read_bytes())
     return 0
