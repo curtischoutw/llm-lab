@@ -57,3 +57,19 @@ ASSUMPTION：
 - 下載區列表失敗時沒有下載區的網址，無法判斷重複，這些 PDF 會下載進權益附件資料夾；`scripts/fetch_taishin.py:1344`。
 - 清單新增兩個結果值「外部網域略過」「重複略過」（`scripts/fetch_taishin.py:222`、`scripts/fetch_taishin.py:223`）；外部網域與重複的紀錄，檔名欄是假如下載時會用的本地檔名，沒有對應的檔案，`sha256` 為空字串（和「格式不支援略過」的做法相同）。
 - 判斷「同網域」比較 netloc（含連接埠），www 前綴被環境變數替換時以替換值為準；`scripts/fetch_taishin.py:1341`。
+
+## 實機下載（2026-10-31）
+
+合併到 integration（2ff90ff）後，對真的官網跑一次。主 repo 的 `data/` 正在被全量匯入讀取，所以先把 `data/taishin_credit_card/` 複製到 job 暫存資料夾，再對副本執行 `scripts/fetch_taishin.py --out <副本>`。結束碼 1，因為有下面 4 個失敗。
+
+- 權益子頁找到 20 個 PDF 連結：
+  - 已下載 17 份，全部以 `%PDF-` 開頭，大小 187 KB 到 588 KB；
+  - 外部網域略過 1 份（`icash2_contract.pdf`）；
+  - 重複略過 1 份（`_115_001final.pdf`）；
+  - 失敗 1 份：`_202003.pdf`（right0503 連到的 `/TSB/personal/.categories/download/credit/rights/_202003.pdf`）回 HTTP 404。這是官網上已失效的連結，不是腳本的問題。
+- 其他類別：
+  - 卡片 16、權益 43、下載 19、活動圖片 8 都是已存在略過；
+  - 權益仍是 Visa、Mastercard、JCB 3 頁轉址到外部網域而失敗，與 ticket 06 相同。
+- 範圍外：刷卡優惠列表在 2026-10-31 找到 209 個活動頁，比 2026-10-30 多 8 個。副本裡新下載了這 8 個活動，主 repo 的 `data/` 沒有。
+
+權益附件要等全量匯入（ticket 08）結束後，再對主 repo 的 `data/` 執行下載與匯入。
