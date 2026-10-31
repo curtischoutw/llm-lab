@@ -4,7 +4,7 @@
 
 **Blocked by:** None
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 ## 背景（2026-11-01，ticket 09 的根本原因調查）
 
@@ -24,18 +24,42 @@
 
 ## 驗收
 
-- [ ] 新增兩個設定 `QUERY_MAX_ENTITY_TOKENS`、`QUERY_MAX_RELATION_TOKENS`，沿用現有設定欄位的規則：必填、缺漏或格式錯誤時 CLI 在啟動時中止。
+- [x] 新增兩個設定 `QUERY_MAX_ENTITY_TOKENS`、`QUERY_MAX_RELATION_TOKENS`，沿用現有設定欄位的規則：必填、缺漏或格式錯誤時 CLI 在啟動時中止。
   - 值要是 0 以上的整數，而且兩者相加要小於 `QUERY_MAX_TOTAL_TOKENS`。違反時的錯誤訊息要指出是哪個欄位、為什麼不合法。
   - 0 是合法值：LightRAG 照常執行，只是不放 entity 或 relation 的描述。這點在診斷時已實測過。
-- [ ] `query`、`eval`、Python API（`Session.query`、`pipeline.query`、`evaluate`），以及 VLM 增強查詢，都用這兩個設定，取代原本依比例縮放的計算。
-- [ ] `.env.example` 加上這兩個欄位：
+- [x] `query`、`eval`、Python API（`Session.query`、`pipeline.query`、`evaluate`），以及 VLM 增強查詢，都用這兩個設定，取代原本依比例縮放的計算。
+- [x] `.env.example` 加上這兩個欄位：
   - 值是 500 與 500，註解寫出上面的實測與理由。
   - 測試檢查 `.env.example` 的欄位和設定欄位相同，要跟著通過。
-- [ ] eval 對照表的「固定查詢設定」那幾行要寫出 entity／relation 上限，讓之後的 eval 可以比較。
-- [ ] 以 CLI 子行程與 Python API 兩個既有的縫測試。假 OpenAI server 已經記錄收到的請求；送給 LightRAG 的參數若不能直接觀察，就用最高的縫觀察得到的行為來驗證，並在實作結果說明怎麼驗證的。
-- [ ] README（設定說明、第 5 節有提到比例縮放的地方）與 `docs/architecture.md` 一併更新。
-- [ ] 主測試套件全綠。
+- [x] eval 對照表的「固定查詢設定」那幾行要寫出 entity／relation 上限，讓之後的 eval 可以比較。
+- [x] 以 CLI 子行程與 Python API 兩個既有的縫測試。假 OpenAI server 已經記錄收到的請求；送給 LightRAG 的參數若不能直接觀察，就用最高的縫觀察得到的行為來驗證，並在實作結果說明怎麼驗證的。
+- [x] README（設定說明、第 5 節有提到比例縮放的地方）與 `docs/architecture.md` 一併更新。
+- [x] 主測試套件全綠。
 - [ ] 實機驗證，由主對話做，implementer 不跑：
   1. 使用者在 `.env` 加上這兩行；
   2. 刪掉 `kv_store_llm_response_cache.json` 裡 key 含 `:query:` 的項目；
   3. 重跑完整的 20 題 eval，用和 ticket 09 相同的判讀方式比較，原本答對的題目也要檢查有沒有變差。
+
+## 實作結果（2026-11-01）
+
+**做了什麼**
+- `rag_lab/config.py`：`Settings` 新增 `query_max_entity_tokens`、`query_max_relation_tokens`，兩者必填、0 以上的整數；兩者相加大於等於 `QUERY_MAX_TOTAL_TOKENS` 時以 `ConfigError` 中止，欄位寫 `QUERY_MAX_ENTITY_TOKENS`，原因寫出另外兩個欄位名稱，不含欄位值。
+- `rag_lab/pipeline.py`：`query_kwargs(settings)`、`query_param(mode, settings)` 直接取三個設定，移除比例縮放與 `DEFAULT_MAX_*` 的 import。`_answer`（`query`、`evaluate`、`Session.query` 共用）與 VLM 增強查詢（`aquery_vlm_enhanced`）都走 `query_kwargs`。
+- `rag_lab/__main__.py`：eval 對照表表頭加上 `QUERY_MAX_ENTITY_TOKENS`、`QUERY_MAX_RELATION_TOKENS` 兩行（`固定查詢設定` 那組設定的來源在這裡，不在 `evaluation.py`）。
+- `.env.example`（500／500 與實測理由）、README（設定說明、第 5 節兩處記錄比例縮放的數據、第 6 節欄位表）、`docs/architecture.md` 第 5 節。
+
+**怎麼驗證參數真的送到 LightRAG**：QueryParam 看不到，所以用假 server 記下的答案請求 prompt 驗證。假 server 抽出的圖譜只有 Alpha、Beta 兩個 entity 與一條 relation，三段描述文字不會出現在文字 chunk；entity 上限設 0 時 prompt 沒有 entity 描述但有 relation 描述，relation 上限設 0 時相反。這個檢查涵蓋 CLI `query`（local、mix）、`query --vlm-enhanced`（mix，VLM 請求的 prompt）、CLI `eval`（五種模式）、Python API 的 `pipeline.query`／`pipeline.evaluate`／`Session.query`／`Session.evaluate`。
+
+**紅燈**（改程式前）：`tests.test_cli` 新增的 6 個斷言失敗（負數與非整數的 token 上限結束碼 2 而不是 3、`.env.example` 缺兩個欄位）；`QueryKnowledgeGraphBudgetTest` 的 entity／relation 為 0 的測試失敗，`'Fake Entity Alpha is a made-up concept.' unexpectedly found in …`（舊程式依比例縮放，6000／8000 的上限下描述還在 prompt）；`EvalQueryBudgetTest`、Python API 的 `QueryBudgetTest` 對舊的 `pipeline.py`／`__main__.py` 同樣失敗（6 個失敗），表頭缺 `QUERY_MAX_ENTITY_TOKENS：500`。
+
+**最後一次主套件**：`/Users/curtis/GitHub/llm-lab/.venv/bin/python -m unittest`，`Ran 146 tests in 524.808s`，`OK`。
+
+**發現與疑慮**
+- 兩個上限同時為 0 時，local、global、hybrid 沒有任何 context，LightRAG 回報 `Query returned no results`，查詢失敗；mix 與 naive 有文字 chunk，可以執行。ticket 寫的「0 是合法值，LightRAG 照常執行」只在其中一個為 0（或模式是 mix／naive）時成立。設定檢查沒有擋掉 0／0（ticket 的規則只要求相加小於總上限，且診斷表有 0／0 的資料）；已寫進 `.env.example` 與 README。
+- 既有的 `QueryBudgetTest.test_query_context_follows_query_max_total_tokens` 把總上限降到 4,000，而基準設定的 6000／8000 相加超過它，現在會被設定檢查擋下；測試改成同時把兩個上限設 500。
+- 實機驗證（ticket 最後一項）沒做：沒有讀 `.env`，沒有對 127.0.0.1:8080／8081 發請求。使用者的 `.env` 沒有新增兩個欄位前，所有 CLI 命令都會因缺欄位而中止。
+
+**ASSUMPTION**
+- 設定檢查違反時只丟一個 `ConfigError`，欄位寫 `QUERY_MAX_ENTITY_TOKENS`、訊息提到另外兩個欄位。
+- `valid_env` 的基準值用 6000／8000（對 30000），與舊程式在 30000 下算出的值相同。
+- README 第 5 節的歷史數據（2,400／3,200 時的結果）保留，只加註當時的上限。
