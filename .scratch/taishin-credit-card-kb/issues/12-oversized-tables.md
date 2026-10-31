@@ -40,7 +40,7 @@
   - 假 mineru 可以加一種主檔名前綴，輸出一張大表格；假 OpenAI server 記錄收到的請求，測試用它檢查每個描述 prompt 的大小與小表的數量。
   - 描述失敗與寫入失敗要用假 server 模擬。
 - [x] 主測試套件全綠。
-- [ ] 實機驗證：主對話用真的 server 重匯 `attachment_SPECIAL_2026.pdf`，確認 server 沒有停掉、最大的 prompt 在上限內、小表的描述都寫進知識庫。這一項由主對話做，implementer 不跑真的 server。
+- [x] 實機驗證：主對話用真的 server 重匯 `attachment_SPECIAL_2026.pdf`，確認 server 沒有停掉、最大的 prompt 在上限內、小表的描述都寫進知識庫。這一項由主對話做，implementer 不跑真的 server。
 
 ## 實作結果（2026-10-31）
 
@@ -92,3 +92,18 @@
 - 已知極限：只處理 HTML 的 `table_body`；表頭本身或單獨一列超過 800 token 時沒辦法再拆。
 - 寫入失敗的計數掛在 RAG-Anything 的私有方法 `_process_multimodal_content_batch_type_aware`，改記狀態用私有方法 `_upsert_doc_status`；升級 RAG-Anything 時要檢查這兩個。批次處理失敗後備援的逐項處理若成功，文件仍記成失敗（保守，重跑時 LLM 快取讓重做便宜）；逐項處理自己的單項失敗不另外計數。
 - ticket 12 之前匯入、而且描述失敗過的文件，仍是 `processed`＋`multimodal_processed=True`，不會自動重試（README 已寫明）。
+
+## 實機驗證（2026-10-31，主對話）
+
+合併到 integration（51bba3e）之後，用真的 server 單獨重匯 `attachment_SPECIAL_2026.pdf`。log 在 `output/taishin_full/ingest_special_2026.log`，server log 在 `output/taishin_full/lm_server3.log`，watchdog 在 `output/taishin_full/watchdog3/`。
+
+- 結束碼 0。`Generated descriptions for 25/25 multimodal items`，沒有描述失敗，也沒有寫入失敗。
+- 文件狀態是 processed，有 26 個 chunk（1 段文字、25 張小表），`multimodal_processed=True`。
+- 從 server 重開、刪除紀錄到這次重匯結束，LLM server 收到的最大 prompt 是 4,293 token。出事那次是 20,731，全量匯入的最大值是 7,099。
+- wired 記憶體最高 12 GB，兩個 server 都還在執行。
+- 報告寫這份文件耗時 2,911.5 s，多模態階段卻是 11,333.6 s，比文件耗時還長。原因是 19:00 到 21:25 Mac 合上蓋子，進入睡眠：
+  - 文件耗時用 `time.perf_counter`，不計睡眠的時間；
+  - 各階段的計時含睡眠。
+  - 這是範圍外的觀察，沒有修。
+- 圖譜從實體 14,184、關係 28,301，增加到實體 15,321、關係 30,404。增加的部分包含權益附件其他 8 份。
+- 附帶發生的事：上次被中斷而卡在 processing 的 `attachment_TSCC-11312.pdf`，這次被 LightRAG 順便處理完文字，狀態變成 processed，但沒有 `multimodal_processed`。下次匯入資料夾時，rag_lab 會把它當成未完成，清掉紀錄後重匯。
