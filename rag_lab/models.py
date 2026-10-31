@@ -17,12 +17,14 @@
 - 表格與公式描述走 llm_model_func，失敗同樣被吞掉。所以另外提供 count_description_failures，
   由 pipeline 包在每個 modal processor 的 caption 函式上，計數（description_stats）涵蓋
   圖／表／公式所有描述失敗；ingest 的成敗以它為準，vision_stats 只用來顯示 VLM 呼叫數。
+- 描述完的內容寫入索引（儲存、embedding、實體抽取、合併）失敗，RAG-Anything 也吞掉（改走逐項處理的備援流程）。
+  pipeline 覆寫批次處理的方法，失敗時呼叫 record_write_failure 計入 description_stats.write_failed。
 
 - vision_stats、description_stats 是模組層級狀態，由 pipeline 在每次 ingest 開始時以 reset_stats()
   原地清零；同一時間只有一個 Session（見 pipeline.Session），所以不會有兩次 ingest 同時寫入。
 
-已知極限：只計數 caption 呼叫本身的例外；呼叫成功但回覆內容解析失敗（RAG-Anything 內部另有 fallback）
-不會被計到。
+已知極限：描述只計數 caption 呼叫本身的例外；呼叫成功但回覆內容解析失敗（RAG-Anything 內部另有 fallback）
+不會被計到。寫入只計批次處理的失敗，備援的逐項處理自己的單項失敗不計。
 
 Dependencies: lightrag-hku、raganything（由 raganything 帶入）；tenacity 為 lightrag 的相依。
 """
@@ -116,15 +118,20 @@ vision_stats = VisionStats()
 
 @dataclass
 class DescriptionStats:
-    """圖／表／公式描述（所有 modal processor）失敗的計數。
+    """RAG-Anything 吞掉的多模態失敗計數：圖／表／公式描述（所有 modal processor），與描述後的內容寫入索引。
 
     Attributes:
         failed: 描述呼叫失敗次數（RAG-Anything 吞掉失敗、改寫入 fallback 實體的次數）。
-        last_error: 最近一次失敗的訊息（EndpointError 帶端點名稱與位址）。
+        last_error: 最近一次描述失敗的訊息（EndpointError 帶端點名稱與位址）。
+        write_failed: 多模態內容（描述完的 chunk）寫入索引失敗次數（儲存、embedding、實體抽取、合併任一步失敗；
+            RAG-Anything 吞掉失敗後改走逐項處理的備援流程，文件仍被標成已完成）。
+        last_write_error: 最近一次寫入失敗的訊息。
     """
 
     failed: int = 0
     last_error: str | None = None
+    write_failed: int = 0
+    last_write_error: str | None = None
 
 
 description_stats = DescriptionStats()
@@ -138,8 +145,8 @@ def reset_stats() -> None:
     """
     vision_stats.ok = vision_stats.failed = 0
     vision_stats.last_error = vision_stats.sample = None
-    description_stats.failed = 0
-    description_stats.last_error = None
+    description_stats.failed = description_stats.write_failed = 0
+    description_stats.last_error = description_stats.last_write_error = None
 
 
 def count_description_failures(caption_func: Any) -> Any:
@@ -165,6 +172,43 @@ def count_description_failures(caption_func: Any) -> Any:
             raise
 
     return counted
+
+
+def record_write_failure(exc: Exception) -> None:
+    """記一次多模態內容寫入索引的失敗（RAG-Anything 之後會吞掉這個例外）。
+
+    Args:
+        exc: 寫入過程拋出的例外。
+    """
+    description_stats.write_failed += 1
+    description_stats.last_write_error = str(exc) if isinstance(exc, EndpointError) else _describe(exc)
+
+
+def failure_counts() -> tuple[int, int]:
+    """目前累計的描述失敗與寫入失敗次數，供呼叫端取前後差。
+
+    Returns:
+        (描述失敗次數, 寫入失敗次數)。
+    """
+    return description_stats.failed, description_stats.write_failed
+
+
+def describe_failures(description_failed: int, write_failed: int) -> str:
+    """把描述失敗與寫入失敗的次數和最近一次的錯誤寫成一句話。
+
+    Args:
+        description_failed: 描述失敗次數。
+        write_failed: 寫入失敗次數。
+
+    Returns:
+        例如「圖／表／公式描述呼叫失敗 2 次（最近錯誤：…）；多模態內容寫入索引失敗 1 次（最近錯誤：…）」。
+    """
+    parts = []
+    if description_failed:
+        parts.append(f"圖／表／公式描述呼叫失敗 {description_failed} 次（最近錯誤：{description_stats.last_error}）")
+    if write_failed:
+        parts.append(f"多模態內容寫入索引失敗 {write_failed} 次（最近錯誤：{description_stats.last_write_error}）")
+    return "；".join(parts)
 
 
 # ==============================

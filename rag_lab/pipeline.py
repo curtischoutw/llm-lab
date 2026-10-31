@@ -15,10 +15,19 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   上次已成功的 chunk 重跑時直接命中快取。
 - 開始處理前先確認要用的端點連得上（models.check_reachable），不可達就指出名稱與位址並立即
   失敗，不要等到解析完才發現。圖／表／公式的描述失敗不會讓 RAG-Anything 報錯（processor 吞掉
-  後寫入 fallback 實體），所以匯入時把每個 modal processor 的 caption 函式包上計數
-  （models.count_description_failures），匯入後依 models.description_stats 判斷。有失敗時不拋例外
-  （拋了就看不到逐篇報告與其他篇的錯誤），而是記在 IngestSummary.description_error（含端點與
-  位址），由 CLI 印完報告後以非零碼結束。
+  後寫入 fallback 實體），描述後的內容寫入索引（儲存、embedding、實體抽取、合併）失敗也一樣：批次處理的例外被吞掉，
+  改走逐項處理的備援流程，最後文件仍標成 processed 且 multimodal_processed=True。所以匯入時把每個 modal processor
+  的 caption 函式包上計數（models.count_description_failures），LabRAGAnything 覆寫批次處理的方法計寫入失敗
+  （models.record_write_failure），匯入後依 models.description_stats 判斷。有失敗的文件在整批結束後改記成 failed
+  （_mark_swallowed_failures；批次途中改會被後面文件的插入蓋掉：LightRAG 插入新文件時會順便重跑索引裡 failed 的文件），
+  報告的 error 寫出原因，重新執行時不會被略過、會先清掉舊紀錄再重匯。有失敗時不拋例外（拋了就看不到逐篇報告與其他篇的
+  錯誤），而是記在該篇的 IngestReport.error 與 IngestSummary.description_error（含端點與位址），由 CLI 印完報告後
+  以非零碼結束。
+- 太大的表格（LabRAGAnything.parse_document，演算法見 rag_lab.tables）：RAG-Anything 把整張表放進同一個描述 prompt
+  與同一個 chunk，80 列 × 21 欄的表格讓 mlx_lm.server 記憶體不足而停掉。掛勾點選在 parse_document 的回傳值：
+  RAG-Anything 先依原始 content list 算好文件 ID、存好解析快取，LabRAGAnything 只改回傳給呼叫端的那一份，
+  所以文件 ID、快取 key 與快取內容都不變，已匯入的文件照常被略過；process_document_complete 與 _ingest_one 都經由
+  它取得 content list，每張小表因此是一個獨立的 table 項目，各自描述、各自成為一個 chunk。
 - 查詢走 LightRAG 的 aquery_llm（回 status 與 message），不用 aquery：後者在 LLM 失敗
   時回 None、非法模式也回 None。status 不是 success 或沒有答案內容一律當失敗。
 - 查詢預設 vlm_enhanced=False（只走 LLM、不讓 VLM 改寫答案；與 spec 一致，五種模式的答案才由
@@ -75,8 +84,11 @@ CLI 只負責參數與輸出格式，這裡負責行為。
 - VLM 增強查詢（aquery_vlm_enhanced）沒有 aquery_llm 的 status／message：LLM 失敗時只回 None，
   這裡只能報「沒有回傳答案內容」，看不到原例外文字（VLM 失敗則有端點與位址）。
 - 描述失敗不會讓 RAG-Anything 匯入失敗（圖片描述退成原始 dict 文字、表格與公式退成原始內容）；
-  這裡只能事後依 models.description_stats 計數判斷並回報，已寫入索引的退化描述不會自動修復，
-  文件也已被標為完整處理（重跑會略過，要刪索引重來）。
+  這裡只能事後依 models.description_stats 計數判斷並回報。文件改記成 failed，重新執行時先清掉舊紀錄再重匯
+  （已寫入索引的退化描述一併清掉）；批次途中程序被中斷時，還沒改記的文件仍是 processed（重跑會略過）。
+- 寫入失敗的計數在 RAGAnything 的私有方法 _process_multimodal_content_batch_type_aware 上：批次處理失敗後
+  RAG-Anything 會用逐項處理的備援流程重做一次，備援成功時文件也照樣記成失敗（保守，重跑時 LLM 快取讓重做很便宜）；
+  逐項處理本身的單項失敗不另外計數。改記狀態用私有方法 _upsert_doc_status。
 - Session 讀的是開啟當下的索引：開著的期間另一個 process 匯入的內容，這個 Session 看不到。
 - Session 是同步介面，不能直接在 Jupyter 或 async 函式裡使用（例外訊息附 asyncio.to_thread 的替代寫法）。
 - 呼叫途中被中斷（KeyboardInterrupt）後不保證 Session 狀態一致；中斷後應關閉 Session 再開新的。
@@ -102,7 +114,7 @@ from lightrag.kg.shared_storage import finalize_share_data
 from raganything import RAGAnything, RAGAnythingConfig
 from raganything.callbacks import ProcessingCallback
 
-from rag_lab import models
+from rag_lab import models, tables
 from rag_lab.config import Settings, get_settings
 from rag_lab.evaluation import RETRIEVAL_MODES, Cell, Question
 from rag_lab.formats import describe_supported, is_office, is_supported
@@ -139,6 +151,48 @@ def ensure_mineru_on_path() -> None:
         os.environ["PATH"] = os.pathsep.join(entries)
 
 
+class LabRAGAnything(RAGAnything):
+    """parse_document 之後把太大的表格縮短、切成小表的 RAGAnything（見 rag_lab.tables）。"""
+
+    async def parse_document(self, *args, **kwargs):
+        """解析文件（走解析快取），回傳的 content list 裡太大的表格已縮短或切成小表。
+
+        文件 ID 與解析快取都是 RAG-Anything 依原始 content list 算好、存好的：這裡只改回傳給呼叫端的那一份，
+        所以 ID、快取 key 與快取內容不變。
+
+        Args:
+            *args: 轉給 RAGAnything.parse_document。
+            **kwargs: 轉給 RAGAnything.parse_document。
+
+        Returns:
+            (content_list, doc_id)；doc_id 是原始 content list 的內容雜湊。
+        """
+        content_list, doc_id = await super().parse_document(*args, **kwargs)
+
+        def count_tokens(text: str) -> int:
+            return len(self.lightrag.tokenizer.encode(text))
+
+        return tables.limit_table_sizes(content_list, count_tokens), doc_id
+
+    async def _process_multimodal_content_batch_type_aware(self, *args, **kwargs):
+        """多模態內容的批次處理（描述完的 chunk 寫入索引）；失敗時先計數再照常重拋。
+
+        RAG-Anything 會吞掉這裡的例外、改走逐項處理的備援流程，最後仍把文件標成已完成，所以失敗要在這裡記下來。
+
+        Args:
+            *args: 轉給 RAGAnything 的同名方法。
+            **kwargs: 轉給 RAGAnything 的同名方法。
+
+        Raises:
+            Exception: 原本的例外，原樣往外拋（由 RAG-Anything 自己處理）。
+        """
+        try:
+            return await super()._process_multimodal_content_batch_type_aware(*args, **kwargs)
+        except Exception as exc:
+            models.record_write_failure(exc)
+            raise
+
+
 def build_rag(settings: Settings) -> RAGAnything:
     """依設定建立 RAGAnything 實例（尚未初始化儲存）。
 
@@ -154,7 +208,7 @@ def build_rag(settings: Settings) -> RAGAnything:
         parser="mineru",
         parse_method="auto",
     )
-    return RAGAnything(
+    return LabRAGAnything(
         config=config,
         llm_model_func=models.llm_model_func,
         vision_model_func=models.vision_model_func,
@@ -244,6 +298,8 @@ class IngestReport:
         total_seconds: 這一篇從開始到結束的總耗時。
         error: 失敗時的「型別：訊息」；None 表示成功。
         description_failed: 這一篇的圖／表／公式描述失敗次數。
+        write_failed: 這一篇的多模態內容寫入索引失敗次數。
+        doc_id: 內容雜湊的文件 ID（RAG-Anything 的 doc- 開頭）；解析前就失敗的文件為 None。
     """
 
     document: Path
@@ -255,6 +311,8 @@ class IngestReport:
     total_seconds: float = 0.0
     error: str | None = None
     description_failed: int = 0
+    write_failed: int = 0
+    doc_id: str | None = None
 
 
 @dataclass
@@ -270,7 +328,7 @@ class IngestSummary:
         vlm_ok: VLM 成功呼叫次數。
         vlm_failed: VLM 失敗呼叫次數。
         vlm_sample: 第一則 VLM 圖片描述（供人工判斷與原圖是否相符）。
-        description_error: 有圖／表／公式描述失敗時的完整說明（含端點與位址）；None 表示沒有。
+        description_error: 有圖／表／公式描述或多模態內容寫入失敗時的完整說明（含端點與位址）；None 表示沒有。
     """
 
     reports: list[IngestReport] = field(default_factory=list)
@@ -310,13 +368,15 @@ async def _ingest_one(rag: RAGAnything, document: Path) -> IngestReport:
         document: 文件路徑。
 
     Returns:
-        這一篇的 IngestReport（total_seconds 與 description_failed 由呼叫端填入）。
+        這一篇的 IngestReport（total_seconds、description_failed、write_failed 由呼叫端填入）。圖／表／公式描述
+        或多模態內容寫入失敗時，文件在索引裡改記成 failed（重新執行不會被略過），report.error 寫出原因。
 
     Raises:
         PipelineError: 解析不出內容，或清除舊紀錄失敗。
         Exception: MinerU、LLM 等匯入過程的失敗（由 _ingest 轉成該篇的 report.error）。
     """
     timer = StageTimer()
+    description_before, write_before = models.failure_counts()
     rag.callback_manager.register(timer)
     try:
         parse_kwargs: dict[str, object] = {"backend": MINERU_BACKEND}
@@ -327,7 +387,7 @@ async def _ingest_one(rag: RAGAnything, document: Path) -> IngestReport:
         if not content_list:
             raise PipelineError(f"MinerU 沒有從 {document.name} 解析出任何內容（輸出資料夾：{rag.config.parser_output_dir}）")
         if await rag.is_document_fully_processed(doc_id):
-            return IngestReport(document, skipped=True, parse_seconds=timer.parse_seconds or 0.0)
+            return IngestReport(document, skipped=True, parse_seconds=timer.parse_seconds or 0.0, doc_id=doc_id)
         if await rag.lightrag.doc_status.get_by_id(doc_id) is not None:
             deletion = await rag.lightrag.adelete_by_doc_id(doc_id)
             if deletion.status != "success":
@@ -337,14 +397,45 @@ async def _ingest_one(rag: RAGAnything, document: Path) -> IngestReport:
         await rag.process_document_complete(str(document), **parse_kwargs)
     finally:
         rag.callback_manager.unregister(timer)
-    return IngestReport(
+    report = IngestReport(
         document,
         skipped=False,
         parse_seconds=timer.parse_seconds or 0.0,
         graph_seconds=timer.text_insert_seconds,
         multimodal_seconds=timer.multimodal_seconds,
         multimodal_items=timer.multimodal_items,
+        doc_id=doc_id,
     )
+    description_after, write_after = models.failure_counts()
+    if description_after > description_before or write_after > write_before:
+        # RAG-Anything 吞掉這些失敗，仍把文件標成 processed 且 multimodal_processed=True；
+        # 這裡只寫出原因，_ingest 在整批結束後把它改記成 failed
+        report.error = (
+            models.describe_failures(description_after - description_before, write_after - write_before)
+            + "。文件已記成失敗，修好端點後重新執行 ingest 會重試這份文件"
+        )
+    return report
+
+
+async def _mark_swallowed_failures(rag: RAGAnything, reports: list[IngestReport]) -> None:
+    """把圖／表／公式描述或多模態寫入失敗的文件改記成 failed，下次 ingest 就不會略過它們。
+
+    要等整批結束才改：LightRAG 每次插入新文件時會順便重跑索引裡所有 failed 的文件，並把狀態改回 processed
+    （而且不帶 multimodal_processed），在批次途中改記會被後面的文件蓋掉。
+
+    Args:
+        rag: 已初始化的 RAGAnything。
+        reports: 這一批的報告；有 doc_id 且有 error 的才處理（解析前就失敗的沒有 doc_id）。
+    """
+    for report in reports:
+        if report.doc_id is not None and report.error is not None:
+            await rag._upsert_doc_status(
+                report.doc_id,
+                str(report.document),
+                status=DocStatus.FAILED,
+                error_msg=report.error,
+                multimodal_processed=False,
+            )
 
 
 async def _graph_stats(rag: RAGAnything) -> tuple[int, int, int]:
@@ -432,7 +523,7 @@ async def _ingest(rag: RAGAnything, documents: list[Path], settings: Settings) -
     models.reset_stats()
     summary = IngestSummary()
     for document in documents:
-        failed_before = models.description_stats.failed
+        description_before, write_before = models.failure_counts()
         started = time.perf_counter()
         try:
             report = await _ingest_one(rag, document)
@@ -440,19 +531,21 @@ async def _ingest(rag: RAGAnything, documents: list[Path], settings: Settings) -
             # 單篇失敗不中斷整批：記下是哪一篇、為什麼，CLI 據此印出並以非零碼結束
             report = IngestReport(document, skipped=False, parse_seconds=0.0, error=f"{type(exc).__name__}: {exc}")
         report.total_seconds = time.perf_counter() - started
-        report.description_failed = models.description_stats.failed - failed_before
+        report.description_failed = models.description_stats.failed - description_before
+        report.write_failed = models.description_stats.write_failed - write_before
         summary.reports.append(report)
+    await _mark_swallowed_failures(rag, summary.reports)
     summary.entities, summary.relations, summary.belongs_to = await _graph_stats(rag)
     summary.status_counts = await _status_counts(rag)
     stats = models.vision_stats
     summary.vlm_ok, summary.vlm_failed, summary.vlm_sample = stats.ok, stats.failed, stats.sample
     described = models.description_stats
-    if described.failed:
+    if described.failed or described.write_failed:
+        affected = sum(1 for report in summary.reports if report.description_failed or report.write_failed)
         summary.description_error = (
-            f"匯入完成，但有 {described.failed} 次圖／表／公式描述呼叫失敗；RAG-Anything 不會因此報錯，"
-            f"受影響項目的描述已退化成原始內容並寫入索引，文件仍標為完整處理（重新執行會略過）。"
-            f"最近錯誤：{described.last_error}。"
-            f"請修好端點後刪除 {settings.working_dir} 與 {settings.parser_output_dir} 再重新匯入。"
+            f"有 {affected} 份文件的圖／表／公式描述或多模態內容寫入失敗（{models.describe_failures(described.failed, described.write_failed)}）。"
+            f"RAG-Anything 不會因此報錯；這些文件已記成失敗，修好端點後重新執行同一個 ingest 就會重試，"
+            f"不需要刪除 {settings.working_dir} 或 {settings.parser_output_dir}。"
         )
     return summary
 

@@ -160,7 +160,7 @@ def _run_ingest(raw_path: str) -> int:
         raw_path: 命令列的文件或資料夾路徑。
 
     Returns:
-        結束碼：0 成功；EXIT_USAGE 輸入路徑不合法；EXIT_FAILURE 有任何一篇匯入失敗或有描述失敗。
+        結束碼：0 成功；EXIT_USAGE 輸入路徑不合法；EXIT_FAILURE 有任何一篇匯入失敗，或有圖／表／公式描述、多模態寫入失敗。
     """
     try:
         documents, unsupported = _collect_documents(raw_path)
@@ -185,8 +185,6 @@ def _run_ingest(raw_path: str) -> int:
         print(f"  {parse_label}：{report.parse_seconds:.1f} s（MinerU backend={pipeline.MINERU_BACKEND}）")
         print(f"  建圖（文字切塊、實體抽取、向量）：{report.graph_seconds:.1f} s")
         print(f"  多模態（圖／表／公式描述）：{report.multimodal_seconds:.1f} s，{report.multimodal_items} 項")
-        if report.description_failed:
-            print(f"  其中 {report.description_failed} 項描述失敗（詳見 stderr）")
     failures = [report for report in summary.reports if report.error]
     print(f"VLM 呼叫：成功 {summary.vlm_ok}，失敗 {summary.vlm_failed}")
     if summary.vlm_sample:

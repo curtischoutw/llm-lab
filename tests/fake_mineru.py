@@ -16,6 +16,11 @@
   RAG-Anything 會先轉成 `<主檔名>_converted.png` 再交給 mineru，所以主檔名會多一個 `_converted`。
 - 主檔名以 `broken` 開頭時以非零碼結束，模擬解析失敗。主檔名以 `multichunk` 開頭時
   多輸出 8 段長文字，讓 LightRAG 切出多個 chunk，測試能觀察多個 LLM 請求同時進行的情境。
+- 主檔名以 `bigtable` 開頭時，把固定的小表格換成 `big_table_html()` 的大表格（MinerU 的寫法：每個儲存格都帶
+  `rowspan=1 colspan=1`，一組跨兩列的儲存格），測試用它檢查太大的表格會縮短並拆成小表。主檔名以 `spans` 開頭時，
+  小表格的儲存格帶 `rowspan=1 colspan=1`，測試用它確認不大的表格送去描述的內容不變。主檔名以 `bigspan` 開頭時，
+  大表格的第 20 列第一格 rowspan 跨到表尾（像道路救援那張表的空儲存格 rowspan=57），測試用它確認被 rowspan 連在一起、
+  單獨就超過上限的列也會切開。
 
 已知極限：除了上述標記行，不讀檔案內容，也不驗證它是不是真的 PDF 或圖片；圖片不會真的做 OCR。
 
@@ -33,6 +38,46 @@ from pathlib import Path
 _PNG_1X1 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 )
+
+
+BIG_TABLE_COLUMNS = 6
+BIG_TABLE_ROWS = 60
+
+
+BIG_TABLE_SPAN_START = 20
+
+
+def big_table_html(span_to_end: bool = False) -> str:
+    """MinerU 寫法的大表格：一列表頭加 BIG_TABLE_ROWS 列資料，每個儲存格帶預設的 rowspan／colspan。
+
+    儲存格文字是 `R<列>C<欄>`，表頭是 `H<欄>`。列號是 10 的倍數的那一列，第一格 rowspan=2 跨到下一列，
+    下一列就少一格（和 MinerU 輸出合併儲存格的方式相同）。
+
+    Args:
+        span_to_end: True 時改成第 BIG_TABLE_SPAN_START 列的第一格 rowspan 跨到表尾，之後每一列都少第一格。
+
+    Returns:
+        完整的 `<table>...</table>` 字串。
+    """
+
+    def cell(text: str, rowspan: int = 1) -> str:
+        return f"<td rowspan={rowspan} colspan=1>{text}</td>"
+
+    rows = ["<tr>" + "".join(cell(f"H{c}") for c in range(BIG_TABLE_COLUMNS)) + "</tr>"]
+    for r in range(BIG_TABLE_ROWS):
+        cells = []
+        for c in range(BIG_TABLE_COLUMNS):
+            if span_to_end:
+                if c == 0 and r > BIG_TABLE_SPAN_START:
+                    continue
+                rowspan = BIG_TABLE_ROWS - r if c == 0 and r == BIG_TABLE_SPAN_START else 1
+            else:
+                if c == 0 and r % 10 == 1:
+                    continue
+                rowspan = 2 if c == 0 and r % 10 == 0 else 1
+            cells.append(cell(f"R{r}C{c}", rowspan=rowspan))
+        rows.append("<tr>" + "".join(cells) + "</tr>")
+    return "<table>" + "".join(rows) + "</table>"
 
 
 def main(argv: list[str]) -> int:
@@ -86,6 +131,13 @@ def main(argv: list[str]) -> int:
         },
         {"type": "equation", "text": "E = mc^2", "text_format": "latex", "page_idx": 1},
     ]
+    if stem.startswith("bigtable") or stem.startswith("bigspan"):
+        content[3]["table_body"] = big_table_html(span_to_end=stem.startswith("bigspan"))
+    elif stem.startswith("spans"):
+        content[3]["table_body"] = (
+            "<table><tr><td rowspan=1 colspan=1>a</td><td rowspan=1 colspan=1>b</td></tr>"
+            "<tr><td rowspan=1 colspan=1>1</td><td rowspan=1 colspan=1>2</td></tr></table>"
+        )
     marker = b"% fake libreoffice source: "
     pdf_lines = Path(args.path).read_bytes().splitlines() if Path(args.path).suffix.lower() == ".pdf" else []
     for line in pdf_lines:
