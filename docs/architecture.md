@@ -59,7 +59,7 @@ rag_storage/   知識圖譜＋向量庫＋快取（＝知識庫本體）
 | `data/corpus/` | 前一版知識庫匯入論文用的資料夾，放指向 `data/papers/` 其中 3 篇的 symlink；2026-10-30 已刪除 | 否 | README 第 4 節的 `ln -sf` | 可以，不影響已建好的知識庫 |
 | `rag_storage/` | **知識庫本體**：知識圖譜、向量庫、文件狀態、LLM 快取（路徑由 `.env` 的 `WORKING_DIR` 決定） | 否 | `ingest` | 刪了就要重新 `ingest`。前一版知識庫（3 篇論文約 1.7 小時，6 份文件約 0.7 小時）已在 2026-10-30 刪除，台新信用卡知識庫建立中 |
 | `rag_storage.before-formats/` | 前一版知識庫匯入 `data/documents/` 之前的備份；2026-10-30 已刪除 | 否 | ticket 06 手動複製 | — |
-| `output/<文件>_<雜湊>/`、`output/<主檔名>.pdf` | MinerU 的解析結果：Markdown、content list、切出來的圖片；Office 文件由 LibreOffice 轉出的 PDF（路徑由 `PARSER_OUTPUT_DIR` 決定） | 否 | `ingest` | 不建議：知識庫記錄的是這裡圖片的絕對路徑，`--vlm-enhanced` 查詢要讀這些圖片 |
+| `output/<文件>_<雜湊>/`、`output/office/<主檔名>_<雜湊>/`、`output/<主檔名>.pdf` | MinerU 的解析結果：Markdown、content list、切出來的圖片（路徑由 `PARSER_OUTPUT_DIR` 決定）。PDF 與圖片在 `<文件>_<雜湊>/`；Office 文件從 ticket 10 起，LibreOffice 轉出的 PDF 與解析結果都在 `office/<主檔名>_<雜湊>/`，雜湊是原檔絕對路徑 md5 的前 8 碼；ticket 10 之前匯入的 Office 文件，轉出的 PDF 留在 `output/<主檔名>.pdf` | 否 | `ingest` | 不建議：知識庫記錄的是這裡圖片的絕對路徑，`--vlm-enhanced` 查詢要讀這些圖片 |
 | `output/` 其他子目錄 | 開發過程的量測紀錄與 log（`ticket03_run/`、`ticket05_run/`、`formats_check_run/`、`formats_main_run/`、`crash_repro/`、`backend_bench/` 等），ticket 的實測段落引用它們當證據；`crash_repro/tools/watchdog.sh` 是記憶體監控腳本 | 否 | 開發時手動產生 | 可以，但會失去原始證據 |
 | `eval_results/` | `eval` 產生的 Markdown 對照表，檔名 `eval_<時間戳記>.md` | 否 | `eval` | 可以 |
 | `.claude/` | Claude Code 的本機設定與 subagent 用的 worktree | 否 | Claude Code | 不影響專案的程式 |
@@ -128,8 +128,8 @@ __main__ ──► config
 |---|---|
 | `__init__.py` | 測試套件的說明：測試從子行程進入、模型用假 server |
 | `fake_openai_server.py` | 假的 OpenAI 相容 server：chat、vision、embedding 都回固定且合法的內容，並記錄收到的請求 |
-| `fake_mineru.py` | 假的 `mineru` 指令：依主檔名寫出固定的解析結果（PDF、圖片與假 LibreOffice 轉出的 PDF 相同）（文字、一張圖、一個表、一條公式）；設了 `FAKE_MINERU_VERSION_LOG` 時記錄每次 `--version`，用來計算初始化次數 |
-| `fake_libreoffice.py` | 假的 `libreoffice`／`soffice` 指令：收到 `--headless --convert-to pdf --outdir <dir> <檔案>` 時在 `<dir>` 寫出 `<主檔名>.pdf`；引數形式不符時以非零碼結束；主檔名以 `broken` 開頭時以非零碼結束，模擬轉檔失敗。`test_pipeline.py` 的 `PipelineCase` 以兩個名稱放在 PATH 最前面；「沒有 LibreOffice」的測試把 PATH 改成只有假 mineru 的資料夾 |
+| `fake_mineru.py` | 假的 `mineru` 指令：依主檔名寫出固定的解析結果（PDF、圖片與假 LibreOffice 轉出的 PDF 相同）（文字、一張圖、一個表、一條公式）；PDF 裡有假 LibreOffice 寫的來源標記行時，多輸出一段 `Converted from Office document: <來源第一行>`，讓主檔名相同的 Office 文件分辨得出來；設了 `FAKE_MINERU_VERSION_LOG` 時記錄每次 `--version`，用來計算初始化次數 |
+| `fake_libreoffice.py` | 假的 `libreoffice`／`soffice` 指令：收到 `--headless --convert-to pdf --outdir <dir> <檔案>` 時在 `<dir>` 寫出 `<主檔名>.pdf`，內容含輸入檔第一行的來源標記；引數形式不符時以非零碼結束；主檔名以 `broken` 開頭時以非零碼結束，模擬轉檔失敗。`test_pipeline.py` 的 `PipelineCase` 以兩個名稱放在 PATH 最前面；「沒有 LibreOffice」的測試把 PATH 改成只有假 mineru 的資料夾 |
 | `test_cli.py` | 設定驗證、子命令註冊、結束碼；提供其他測試共用的 `run_cli`、`valid_env` |
 | `test_fake_server.py` | 以 `scripts/smoke_test.py` 當客戶端對假 server 執行，確認假 server 符合同一份介面（smoke test 曾對真 server 通過，所以把它當作介面的定義）；不連真 server |
 | `test_pipeline.py` | `ingest`、`query` 的完整流程（含各種圖片與 Office 格式、資料夾挑選與略過、不支援格式的錯誤、沒有 LibreOffice 的錯誤、轉檔失敗、重複匯入、失敗重試、端點不可達、查詢 token 上限）；提供共用的 `PipelineCase`、產生各格式小圖的 `write_image`（用 Pillow）與寫出 Office 替身檔的 `write_office`（內容是一行文字，不是真的 Office 檔：假 LibreOffice 與假 mineru 都不讀內容） |
