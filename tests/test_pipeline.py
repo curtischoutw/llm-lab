@@ -187,6 +187,38 @@ def table_bodies(requests: list[dict]) -> list[str]:
     return bodies
 
 
+# 假 server 抽出的圖譜固定是 Alpha、Beta 兩個 entity 與一條 relation。這三段描述只會出現在圖譜 context，
+# 不會出現在文字 chunk，所以查詢 prompt 含不含它們，就是 LightRAG 實際用了哪個 entity／relation 上限的觀察結果。
+ALPHA_DESCRIPTION = "Fake Entity Alpha is a made-up concept."
+BETA_DESCRIPTION = "Fake Entity Beta is a made-up method."
+LINK_DESCRIPTION = "Alpha is related to Beta."
+
+
+def query_prompts(requests: list[dict]) -> list[str]:
+    """取出查詢時送給模型產生答案的 prompt 文字（不含關鍵字抽取請求）。
+
+    Args:
+        requests: 假 server 記錄的請求。
+
+    Returns:
+        每個答案請求（純文字或帶圖片）所有訊息的文字串接。
+    """
+    prompts = []
+    for request in requests:
+        payload = request["payload"]
+        if request["path"] != "/v1/chat/completions" or payload.get("response_format"):
+            continue
+        texts = []
+        for message in payload["messages"]:
+            content = message["content"]
+            if isinstance(content, list):
+                texts.extend(part["text"] for part in content if part.get("type") == "text")
+            else:
+                texts.append(content)
+        prompts.append("\n".join(texts))
+    return prompts
+
+
 class PipelineCase(unittest.TestCase):
     """提供假 server、假 mineru、暫存資料夾與 CLI 執行輔助的測試基底。"""
 
@@ -1120,7 +1152,15 @@ class QueryBudgetTest(PipelineCase):
             答案請求所有訊息的字元數總和。
         """
         before = len(self.server.requests)
-        result = self.query(question, "--mode", "naive", QUERY_MAX_TOTAL_TOKENS=budget)
+        # naive 模式沒有圖譜 context；entity／relation 上限只是要小於最小的總上限（設定檢查要求相加小於總上限）
+        result = self.query(
+            question,
+            "--mode",
+            "naive",
+            QUERY_MAX_TOTAL_TOKENS=budget,
+            QUERY_MAX_ENTITY_TOKENS="500",
+            QUERY_MAX_RELATION_TOKENS="500",
+        )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         answers = [
             r
@@ -1136,6 +1176,68 @@ class QueryBudgetTest(PipelineCase):
         # 英文約 4 字元一個 token；4000 token 的上限換算不會超過 4 * 4000 字元
         self.assertLess(small, 4 * 4000)
         self.assertGreater(large, 2 * small)
+
+
+class QueryKnowledgeGraphBudgetTest(PipelineCase):
+    """QUERY_MAX_ENTITY_TOKENS／QUERY_MAX_RELATION_TOKENS 決定圖譜 context 放多少 entity 與 relation 描述。"""
+
+    def setUp(self):
+        super().setUp()
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+        self.asked = 0
+
+    def answer_prompt(self, mode: str, *extra: str, **limits: str) -> str:
+        """以指定的 entity／relation 上限查詢一次，回傳答案請求的 prompt 文字。
+
+        Args:
+            mode: 檢索模式。
+            *extra: 額外的命令列引數。
+            **limits: 覆蓋的環境變數（QUERY_MAX_ENTITY_TOKENS、QUERY_MAX_RELATION_TOKENS）。
+
+        Returns:
+            答案請求的 prompt 文字。每次的題目不同，LightRAG 的 LLM 快取 key 不含 token 上限。
+        """
+        self.asked += 1
+        before = len(self.server.requests)
+        result = self.query(f"What is Fake Entity Alpha? ({self.asked})", "--mode", mode, *extra, **limits)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        prompts = query_prompts(self.server.requests[before:])
+        self.assertEqual(len(prompts), 1)
+        return prompts[0]
+
+    def test_graph_context_has_entities_and_relations_when_both_limits_are_large(self):
+        for mode in ("local", "mix"):
+            with self.subTest(mode=mode):
+                prompt = self.answer_prompt(mode, QUERY_MAX_ENTITY_TOKENS="2000", QUERY_MAX_RELATION_TOKENS="2000")
+                for text in (ALPHA_DESCRIPTION, BETA_DESCRIPTION, LINK_DESCRIPTION):
+                    self.assertIn(text, prompt)
+
+    def test_zero_entity_limit_leaves_out_entity_descriptions_only(self):
+        for mode in ("local", "mix"):
+            with self.subTest(mode=mode):
+                prompt = self.answer_prompt(mode, QUERY_MAX_ENTITY_TOKENS="0", QUERY_MAX_RELATION_TOKENS="2000")
+                self.assertNotIn(ALPHA_DESCRIPTION, prompt)
+                self.assertNotIn(BETA_DESCRIPTION, prompt)
+                self.assertIn(LINK_DESCRIPTION, prompt)
+
+    def test_zero_relation_limit_leaves_out_relation_descriptions_only(self):
+        for mode in ("local", "mix"):
+            with self.subTest(mode=mode):
+                prompt = self.answer_prompt(mode, QUERY_MAX_ENTITY_TOKENS="2000", QUERY_MAX_RELATION_TOKENS="0")
+                self.assertIn(ALPHA_DESCRIPTION, prompt)
+                self.assertNotIn(LINK_DESCRIPTION, prompt)
+
+    def test_vlm_enhanced_query_uses_the_same_limits(self):
+        large = self.answer_prompt("mix", "--vlm-enhanced", QUERY_MAX_ENTITY_TOKENS="2000", QUERY_MAX_RELATION_TOKENS="2000")
+        for text in (ALPHA_DESCRIPTION, BETA_DESCRIPTION, LINK_DESCRIPTION):
+            self.assertIn(text, large)
+        no_entities = self.answer_prompt("mix", "--vlm-enhanced", QUERY_MAX_ENTITY_TOKENS="0", QUERY_MAX_RELATION_TOKENS="2000")
+        self.assertNotIn(ALPHA_DESCRIPTION, no_entities)
+        self.assertIn(LINK_DESCRIPTION, no_entities)
+        no_relations = self.answer_prompt("mix", "--vlm-enhanced", QUERY_MAX_ENTITY_TOKENS="2000", QUERY_MAX_RELATION_TOKENS="0")
+        self.assertIn(ALPHA_DESCRIPTION, no_relations)
+        self.assertNotIn(LINK_DESCRIPTION, no_relations)
 
 
 # ==============================

@@ -24,7 +24,14 @@ from pathlib import Path
 
 from tests.fake_openai_server import CHAT_REPLY
 from tests.test_cli import REPO_ROOT, SECRET, run_cli
-from tests.test_pipeline import INGEST_TIMEOUT, PipelineCase, closed_port_url
+from tests.test_pipeline import (
+    ALPHA_DESCRIPTION,
+    INGEST_TIMEOUT,
+    LINK_DESCRIPTION,
+    PipelineCase,
+    closed_port_url,
+    query_prompts,
+)
 
 EXAMPLE_FILE = REPO_ROOT / "eval" / "questions.example.jsonl"
 MODES = ("naive", "local", "global", "hybrid", "mix")
@@ -343,6 +350,57 @@ class EvalRunTest(IngestedEvalCase):
 # ==============================
 # 結果檔
 # ==============================
+
+
+class EvalQueryBudgetTest(IngestedEvalCase):
+    def prompts_for(self, question: str, **limits: str) -> list[str]:
+        """以指定的 entity／relation 上限跑一題 eval，回傳這次送出的答案 prompt。
+
+        Args:
+            question: 題目文字；每次要不同，LightRAG 的 LLM 快取 key 不含 token 上限。
+            **limits: 覆蓋的環境變數。
+
+        Returns:
+            五種模式各一個答案 prompt。
+        """
+        before = len(self.server.requests)
+        result = self.run_eval(self.write_questions(question_line(question=question)), **limits)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        prompts = query_prompts(self.server.requests[before:])
+        self.assertEqual(len(prompts), 5)
+        return prompts
+
+    def test_every_mode_uses_the_entity_and_relation_limits(self):
+        # 兩個上限同時為 0 時，local／global／hybrid 沒有任何 context，LightRAG 回報查詢失敗；所以一次只關一個
+        large = self.prompts_for(
+            "What is Fake Entity Alpha? (large)", QUERY_MAX_ENTITY_TOKENS="2000", QUERY_MAX_RELATION_TOKENS="2000"
+        )
+        self.assertTrue([p for p in large if ALPHA_DESCRIPTION in p and LINK_DESCRIPTION in p])
+        no_entities = self.prompts_for(
+            "What is Fake Entity Alpha? (no entities)", QUERY_MAX_ENTITY_TOKENS="0", QUERY_MAX_RELATION_TOKENS="2000"
+        )
+        self.assertTrue([p for p in no_entities if LINK_DESCRIPTION in p])
+        for prompt in no_entities:
+            self.assertNotIn(ALPHA_DESCRIPTION, prompt)
+        no_relations = self.prompts_for(
+            "What is Fake Entity Alpha? (no relations)", QUERY_MAX_ENTITY_TOKENS="2000", QUERY_MAX_RELATION_TOKENS="0"
+        )
+        self.assertTrue([p for p in no_relations if ALPHA_DESCRIPTION in p])
+        for prompt in no_relations:
+            self.assertNotIn(LINK_DESCRIPTION, prompt)
+
+    def test_result_file_header_lists_the_three_query_token_limits(self):
+        result = self.run_eval(
+            self.write_questions(question_line()),
+            QUERY_MAX_TOTAL_TOKENS="12000",
+            QUERY_MAX_ENTITY_TOKENS="500",
+            QUERY_MAX_RELATION_TOKENS="400",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        header = self.result_files()[0].read_text(encoding="utf-8")
+        self.assertIn("- QUERY_MAX_TOTAL_TOKENS：12000", header)
+        self.assertIn("- QUERY_MAX_ENTITY_TOKENS：500", header)
+        self.assertIn("- QUERY_MAX_RELATION_TOKENS：400", header)
 
 
 class EvalResultFileTest(IngestedEvalCase):

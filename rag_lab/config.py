@@ -6,6 +6,9 @@
 關鍵設計決策：
 - 欄位缺漏或格式錯誤一律在啟動時以 ConfigError 中止，不給預設值掩蓋。
 - EMBED_DIM 必須明確填寫：它決定向量庫維度，與索引綁定，換 embedding 模型要重建索引。
+- 查詢 context 的 token 分配由三個欄位決定：QUERY_MAX_TOTAL_TOKENS 是總上限，QUERY_MAX_ENTITY_TOKENS
+  與 QUERY_MAX_RELATION_TOKENS 是圖譜 context 裡 entity 與 relation 各自的上限，其餘留給文字 chunk。
+  後兩者可以是 0（LightRAG 照常執行，只是不放該類描述），但兩者相加必須小於總上限，否則 chunk 分不到 token。
 - EMBED_QUERY_PREFIX 只套用在查詢端（LightRAG 會以 context="query" 呼叫），
   文件端不加前綴；Qwen3-Embedding 的官方用法即為此非對稱形式。
 
@@ -62,6 +65,17 @@ def _positive_int(name: str) -> int:
     return value
 
 
+def _non_negative_int(name: str) -> int:
+    raw = _required(name)
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ConfigError(name, "必須是整數") from exc
+    if value < 0:
+        raise ConfigError(name, "必須大於或等於 0")
+    return value
+
+
 # ==============================
 # 設定物件
 # ==============================
@@ -90,6 +104,8 @@ class Settings:
     llm_max_tokens: int
     vlm_max_tokens: int
     query_max_total_tokens: int
+    query_max_entity_tokens: int
+    query_max_relation_tokens: int
 
 
 @lru_cache(maxsize=1)
@@ -103,6 +119,14 @@ def get_settings() -> Settings:
         ConfigError: 任一必要欄位缺漏或格式不合法。
     """
     load_dotenv()
+    query_max_total_tokens = _positive_int("QUERY_MAX_TOTAL_TOKENS")
+    query_max_entity_tokens = _non_negative_int("QUERY_MAX_ENTITY_TOKENS")
+    query_max_relation_tokens = _non_negative_int("QUERY_MAX_RELATION_TOKENS")
+    if query_max_entity_tokens + query_max_relation_tokens >= query_max_total_tokens:
+        raise ConfigError(
+            "QUERY_MAX_ENTITY_TOKENS",
+            "加上 QUERY_MAX_RELATION_TOKENS 必須小於 QUERY_MAX_TOTAL_TOKENS，否則文字 chunk 分不到 token",
+        )
     return Settings(
         llm_base_url=_url("LLM_BASE_URL"),
         llm_model=_required("LLM_MODEL"),
@@ -123,5 +147,7 @@ def get_settings() -> Settings:
         llm_max_async=_positive_int("LLM_MAX_ASYNC"),
         llm_max_tokens=_positive_int("LLM_MAX_TOKENS"),
         vlm_max_tokens=_positive_int("VLM_MAX_TOKENS"),
-        query_max_total_tokens=_positive_int("QUERY_MAX_TOTAL_TOKENS"),
+        query_max_total_tokens=query_max_total_tokens,
+        query_max_entity_tokens=query_max_entity_tokens,
+        query_max_relation_tokens=query_max_relation_tokens,
     )
