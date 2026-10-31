@@ -24,8 +24,11 @@ import unittest
 from tests.fake_openai_server import CHAT_REPLY
 from tests.test_cli import OPTIONAL_FIELDS, REPO_ROOT, REQUIRED_FIELDS
 from tests.test_pipeline import (
+    ALPHA_DESCRIPTION,
     INGEST_TIMEOUT,
+    LINK_DESCRIPTION,
     PipelineCase,
+    query_prompts,
     parsed_office_sources,
     table_bodies,
     write_image,
@@ -180,13 +183,14 @@ class PythonApiCase(PipelineCase):
             return 0
         return len(self.version_log.read_text(encoding="utf-8").splitlines())
 
-    def run_api(self, *steps: str, mode: str = "functions") -> subprocess.CompletedProcess:
+    def run_api(self, *steps: str, mode: str = "functions", **overrides: str) -> subprocess.CompletedProcess:
         """以子行程在同一個 process 內依序執行步驟。
 
         Args:
             *steps: ingest、stats:<檔名>、doc:<檔名>、reject:<檔名>,…、query、evaluate、instances、second、closed、thread、loop、
                 bad_mode、orphan、init_fail、forget 的任意序列。
             mode: functions 呼叫模組函式；session 在同一個 Session 裡呼叫。
+            **overrides: 覆蓋的環境變數。
 
         Returns:
             CompletedProcess（text 模式，已擷取 stdout／stderr）。
@@ -202,7 +206,7 @@ class PythonApiCase(PipelineCase):
         }
         questions.write_text(json.dumps(record) + "\n", encoding="utf-8")
         env = {k: v for k, v in os.environ.items() if k not in REQUIRED_FIELDS + OPTIONAL_FIELDS}
-        env.update(self.env(FAKE_MINERU_VERSION_LOG=str(self.version_log)))
+        env.update(self.env(FAKE_MINERU_VERSION_LOG=str(self.version_log), **overrides))
         return subprocess.run(
             [sys.executable, "-c", DRIVER, str(self.document), str(questions), mode, *steps],
             cwd=REPO_ROOT,
@@ -230,6 +234,53 @@ class ExistingIndexTest(PythonApiCase):
         # 題目檔 1 題，五種模式各一格
         every_mode = " ".join([CHAT_REPLY] * 5)
         self.assertEqual(result.stdout.splitlines(), [f"evaluate {every_mode}", f"query {CHAT_REPLY}"])
+
+
+class QueryBudgetTest(PythonApiCase):
+    """模組函式與 Session 的 query、evaluate 都用 QUERY_MAX_ENTITY_TOKENS／QUERY_MAX_RELATION_TOKENS。"""
+
+    def setUp(self):
+        super().setUp()
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+        self.copies = 0
+
+    def prompts(self, step: str, mode: str, **limits: str) -> list[str]:
+        """在索引的一份副本上跑一個步驟，回傳這次送出的答案 prompt。
+
+        Args:
+            step: query 或 evaluate。
+            mode: functions 或 session。
+            **limits: 覆蓋的環境變數。
+
+        Returns:
+            答案請求的 prompt 文字；query 是 1 個，evaluate 是五種模式各 1 個。
+        """
+        # LightRAG 的 LLM 快取 key 不含 token 上限，同一題在同一份索引上第二次會命中快取而不送答案請求，所以每次用新副本
+        self.copies += 1
+        copy = self.tmp / f"rag_storage_copy_{self.copies}"
+        shutil.copytree(self.working_dir, copy)
+        before = len(self.server.requests)
+        result = self.run_api(step, mode=mode, WORKING_DIR=str(copy), **limits)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return query_prompts(self.server.requests[before:])
+
+    def test_query_and_evaluate_follow_the_entity_and_relation_limits(self):
+        # 兩個上限同時為 0 時，local／global／hybrid 沒有任何 context，LightRAG 回報查詢失敗；所以一次只關一個
+        for mode in ("functions", "session"):
+            for step in ("query", "evaluate"):
+                with self.subTest(mode=mode, step=step):
+                    large = self.prompts(step, mode, QUERY_MAX_ENTITY_TOKENS="2000", QUERY_MAX_RELATION_TOKENS="2000")
+                    self.assertTrue([p for p in large if ALPHA_DESCRIPTION in p and LINK_DESCRIPTION in p])
+                    no_entities = self.prompts(step, mode, QUERY_MAX_ENTITY_TOKENS="0", QUERY_MAX_RELATION_TOKENS="2000")
+                    self.assertEqual(len(no_entities), len(large))
+                    self.assertTrue([p for p in no_entities if LINK_DESCRIPTION in p])
+                    for prompt in no_entities:
+                        self.assertNotIn(ALPHA_DESCRIPTION, prompt)
+                    no_relations = self.prompts(step, mode, QUERY_MAX_ENTITY_TOKENS="2000", QUERY_MAX_RELATION_TOKENS="0")
+                    self.assertTrue([p for p in no_relations if ALPHA_DESCRIPTION in p])
+                    for prompt in no_relations:
+                        self.assertNotIn(LINK_DESCRIPTION, prompt)
 
 
 class EmptyIndexTest(PythonApiCase):

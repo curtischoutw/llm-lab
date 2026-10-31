@@ -35,6 +35,8 @@ INT_FIELDS = (
     "VLM_MAX_TOKENS",
     "QUERY_MAX_TOTAL_TOKENS",
 )
+# 0 以上的整數：0 表示 LightRAG 照常執行、只是不放該類描述
+NON_NEGATIVE_INT_FIELDS = ("QUERY_MAX_ENTITY_TOKENS", "QUERY_MAX_RELATION_TOKENS")
 TEXT_FIELDS = (
     "LLM_MODEL",
     "LLM_API_KEY",
@@ -45,7 +47,7 @@ TEXT_FIELDS = (
     "WORKING_DIR",
     "PARSER_OUTPUT_DIR",
 )
-REQUIRED_FIELDS = URL_FIELDS + INT_FIELDS + TEXT_FIELDS
+REQUIRED_FIELDS = URL_FIELDS + INT_FIELDS + NON_NEGATIVE_INT_FIELDS + TEXT_FIELDS
 OPTIONAL_FIELDS = ("EMBED_QUERY_PREFIX",)
 
 SECRET = "sk-TOP-SECRET-0123"
@@ -75,6 +77,8 @@ def valid_env(base_url: str = "http://127.0.0.1:9/v1") -> dict[str, str]:
             "LLM_MAX_TOKENS": "4096",
             "VLM_MAX_TOKENS": "1024",
             "QUERY_MAX_TOTAL_TOKENS": "30000",
+            "QUERY_MAX_ENTITY_TOKENS": "6000",
+            "QUERY_MAX_RELATION_TOKENS": "8000",
             "LLM_MODEL": "fake-llm",
             "LLM_API_KEY": SECRET,
             "VLM_MODEL": "fake-vlm",
@@ -169,6 +173,33 @@ class ConfigValidationTest(unittest.TestCase):
                 with self.subTest(field=field, value=bad):
                     result = run_cli(["eval", "q.jsonl"], {field: bad})
                     self.assert_config_rejected(result, field)
+
+    def test_negative_or_non_integer_token_limit_names_the_field(self):
+        for field in NON_NEGATIVE_INT_FIELDS:
+            for bad in ("-1", "abc", "1.5"):
+                with self.subTest(field=field, value=bad):
+                    result = run_cli(["eval", "q.jsonl"], {field: bad})
+                    self.assert_config_rejected(result, field)
+
+    def test_zero_token_limit_is_valid(self):
+        for field in NON_NEGATIVE_INT_FIELDS:
+            with self.subTest(field=field):
+                result = run_cli(["eval", "q.jsonl"], {field: "0"})
+                self.assertIn("輸入錯誤", result.stderr)
+                self.assertNotIn("設定錯誤", result.stderr)
+
+    def test_entity_and_relation_limits_must_sum_to_less_than_the_total(self):
+        # 相加等於總上限時，文字 chunk 一個 token 都沒有
+        overrides = {"QUERY_MAX_TOTAL_TOKENS": "12000", "QUERY_MAX_ENTITY_TOKENS": "5000"}
+        for relation in ("7000", "7001"):
+            with self.subTest(relation=relation):
+                result = run_cli(["eval", "q.jsonl"], {**overrides, "QUERY_MAX_RELATION_TOKENS": relation})
+                self.assertEqual(result.returncode, 3)
+                self.assertIn("設定錯誤", result.stderr)
+                for field in ("QUERY_MAX_ENTITY_TOKENS", "QUERY_MAX_RELATION_TOKENS", "QUERY_MAX_TOTAL_TOKENS"):
+                    self.assertIn(field, result.stderr)
+        result = run_cli(["eval", "q.jsonl"], {**overrides, "QUERY_MAX_RELATION_TOKENS": "6999"})
+        self.assertNotIn("設定錯誤", result.stderr)
 
     def test_error_output_never_contains_field_values(self):
         leaky = {

@@ -134,7 +134,7 @@ __main__ ──► config
 | `fake_libreoffice.py` | 假的 `libreoffice`／`soffice` 指令：收到 `--headless --convert-to pdf --outdir <dir> <檔案>` 時在 `<dir>` 寫出 `<主檔名>.pdf`，內容含輸入檔第一行的來源標記；引數形式不符時以非零碼結束；主檔名以 `broken` 開頭時以非零碼結束，模擬轉檔失敗。`test_pipeline.py` 的 `PipelineCase` 以兩個名稱放在 PATH 最前面；「沒有 LibreOffice」的測試把 PATH 改成只有假 mineru 的資料夾 |
 | `test_cli.py` | 設定驗證、子命令註冊、結束碼；提供其他測試共用的 `run_cli`、`valid_env` |
 | `test_fake_server.py` | 以 `scripts/smoke_test.py` 當客戶端對假 server 執行，確認假 server 符合同一份介面（smoke test 曾對真 server 通過，所以把它當作介面的定義）；不連真 server |
-| `test_pipeline.py` | `ingest`、`query` 的完整流程（含各種圖片與 Office 格式、資料夾挑選與略過、不支援格式的錯誤、沒有 LibreOffice 的錯誤、轉檔失敗、重複匯入、失敗重試、大表格切成小表、描述與寫入失敗、端點不可達、查詢 token 上限）；提供共用的 `PipelineCase`、產生各格式小圖的 `write_image`（用 Pillow）與寫出 Office 替身檔的 `write_office`（內容是一行文字，不是真的 Office 檔：假 LibreOffice 與假 mineru 都不讀內容） |
+| `test_pipeline.py` | `ingest`、`query` 的完整流程（含各種圖片與 Office 格式、資料夾挑選與略過、不支援格式的錯誤、沒有 LibreOffice 的錯誤、轉檔失敗、重複匯入、失敗重試、大表格切成小表、描述與寫入失敗、端點不可達、查詢總 token 上限與 entity／relation 上限）；提供共用的 `PipelineCase`、產生各格式小圖的 `write_image`（用 Pillow）與寫出 Office 替身檔的 `write_office`（內容是一行文字，不是真的 Office 檔：假 LibreOffice 與假 mineru 都不讀內容） |
 | `test_graph.py` | `graph` 指令的抽樣與可重現性 |
 | `test_eval.py` | `eval` 指令的題目檔驗證與結果表 |
 | `test_python_api.py` | 在同一個 process 裡依序呼叫 `rag_lab.pipeline` 的模組函式與 `Session`：連續呼叫、每次 ingest 的統計獨立、同一個 `Session` 只初始化一次並在關閉後釋放實例、誤用時的 `SessionError`、開 `Session` 失敗後不留狀態、忘了 `close()` 時的收尾、匯入圖片與 Office 文件、不支援的格式整批被拒絕、大表格切成小表與描述失敗後的重試 |
@@ -242,3 +242,5 @@ with Session() as session:
 ## 5. 設定
 
 所有欄位與註解在 `.env.example`；搬機器、換模型時要改哪些欄位，見 README 第 6 節。改程式之外的東西（端點、模型、路徑、並行數、查詢 token 上限）都只改 `.env`。
+
+查詢 context 的 token 分配由三個欄位決定：`QUERY_MAX_TOTAL_TOKENS`（總上限）、`QUERY_MAX_ENTITY_TOKENS` 與 `QUERY_MAX_RELATION_TOKENS`（圖譜 context 裡 entity 與 relation 描述各自的上限），其餘留給文字 chunk。`config.get_settings` 檢查兩個上限是 0 以上的整數、相加小於總上限；`pipeline.query_kwargs` 把三個值原樣交給 LightRAG 的 `QueryParam`（CLI 的 `query` 與 `eval`、`Session.query`、`pipeline.query`、`pipeline.evaluate`、VLM 增強查詢都走同一個函式），不依 LightRAG 預設比例縮放。

@@ -156,6 +156,8 @@ VLM 與 embedding（同一個 server，port 8081）：
 
 **32 GB 機器的記憶體限制**（ticket 03 實測）：`.env` 的 `LLM_MAX_ASYNC` 要設 1，設 2 時兩個長生成請求同時進行會讓 `mlx_lm.server` GPU 記憶體不足；`QUERY_MAX_TOTAL_TOKENS` 設 12000，LightRAG 預設的 30000 會讓 mix 查詢的 prompt 到 29.7k token，同樣記憶體不足。
 
+**查詢 context 的 token 分配**：`QUERY_MAX_TOTAL_TOKENS` 是 context 的總上限；`QUERY_MAX_ENTITY_TOKENS` 與 `QUERY_MAX_RELATION_TOKENS` 是其中 entity 與 relation 描述各自的上限，總上限扣掉這兩項，剩下的 token 全部留給文字 chunk。三個欄位都必填，兩個上限是 0 以上的整數、相加必須小於總上限，否則 CLI 在啟動時中止。`.env.example` 的值是 12000／500／500。程式不再依 LightRAG 預設比例（6,000／8,000 對 30,000）縮放：那個比例在 12,000 下是 2,400／3,200，mix 模式的 context 只剩 3–8 個文字 chunk（ticket 13）。兩個上限都設 0 時，mix 與 naive 照常執行，local、global、hybrid 沒有任何 context，LightRAG 回報查詢失敗。`eval` 的對照表表頭會記下這三個值。
+
 ## 4. 使用
 
 不需要先 activate venv，直接用 venv 的 python 執行。
@@ -283,7 +285,7 @@ with Session() as session:
 
 以下是前一版知識庫的量測（RAG 論文與文件，2026-10-30 刪除），記憶體與耗時仍可作為參考。
 
-模型組合：LLM `Qwen3-4B-Instruct-2507-4bit`、VLM `Qwen3-VL-4B-Instruct-4bit`、embedding `Qwen3-Embedding-0.6B-8bit`；MinerU backend `pipeline`；`LLM_MAX_ASYNC=1`、`EMBED_MAX_ASYNC=1`、`QUERY_MAX_TOTAL_TOKENS=12000`；M2 Pro 32 GB。2410.05779 是 2026-10-26 單篇匯入時量測，另外兩篇是 2026-10-27 以資料夾匯入時量測（紀錄在 `.scratch/rag-anything-lab/issues/03-*.md` 與 `05-*.md`）。
+模型組合：LLM `Qwen3-4B-Instruct-2507-4bit`、VLM `Qwen3-VL-4B-Instruct-4bit`、embedding `Qwen3-Embedding-0.6B-8bit`；MinerU backend `pipeline`；`LLM_MAX_ASYNC=1`、`EMBED_MAX_ASYNC=1`、`QUERY_MAX_TOTAL_TOKENS=12000`（當時 entity／relation 上限依預設比例縮放成 2,400／3,200，ticket 13 之前）；M2 Pro 32 GB。2410.05779 是 2026-10-26 單篇匯入時量測，另外兩篇是 2026-10-27 以資料夾匯入時量測（紀錄在 `.scratch/rag-anything-lab/issues/03-*.md` 與 `05-*.md`）。
 
 | 論文 | 頁數 | MinerU 解析 | 建圖 | 圖／表／公式描述 | 合計 |
 |---|---|---|---|---|---|
@@ -323,7 +325,7 @@ PPT、Word、圖片（主知識庫，在 3 篇論文之後匯入 `data/documents
 - 6 份從開始到結束 2461 s（各份耗時相加 2457 s，差額是初始化與收尾），VLM 呼叫 29 次全部成功。匯入期間 wired 記憶體最高 19 GB，之後的 `eval` 期間最高 20 GB。
 - 圖譜從實體 1358、關係 1835 增加到實體 1838、關係 2873（belongs_to 邊從 735 條增加到 1237 條）。
 - `eval/questions.formats.jsonl` 10 題 × 5 種模式（2628 s）。各模式完全答對的題數：naive 4、local 3、global 3、hybrid 2、mix 4。mix 模式下，`docling_arch.pptx` 與兩份 `.docx` 都至少答對 1 題；`RAGHack-EvaluatingAChatApp.pptx` 與兩張圖片沒有任何一題完全答對。逐格判讀在 `output/formats_main_run/judgement.md`。
-- 沒答對的題目，答案原文都在知識庫裡，但沒有被送進 LLM：`QUERY_MAX_TOTAL_TOKENS=12000` 時，mix 模式在放完圖譜的實體與關係後只剩 5–6 個切塊的空間，被選進來的論文切塊每塊 1,500–6,300 字元，名次在前面時就會用完這個空間。有些切塊的向量名次也太低（RAGHack 投影片「Evaluation approach」那一頁和範例對話在同一個切塊裡，排在 100 名外；auto-tune 流程圖的描述排第 26）。RAGHack 投影片有一張表，「Can run without ground truth?」那一欄的打勾記號在解析時遺失。
+- 沒答對的題目，答案原文都在知識庫裡，但沒有被送進 LLM：`QUERY_MAX_TOTAL_TOKENS=12000`、entity／relation 上限 2,400／3,200（依比例縮放，ticket 13 之前）時，mix 模式在放完圖譜的實體與關係後只剩 5–6 個切塊的空間，被選進來的論文切塊每塊 1,500–6,300 字元，名次在前面時就會用完這個空間。有些切塊的向量名次也太低（RAGHack 投影片「Evaluation approach」那一頁和範例對話在同一個切塊裡，排在 100 名外；auto-tune 流程圖的描述排第 26）。RAGHack 投影片有一張表，「Can run without ground truth?」那一欄的打勾記號在解析時遺失。
 - 擴充後的知識庫，用刪掉 `:query:` 快取的副本重跑 `eval/questions.example.jsonl`，10 格都答對，和擴充前相同。
 
 圖譜品質（LightRAG 論文單篇，詳見 `.scratch/rag-anything-lab/issues/04-graph-quality-report.md`）：
@@ -344,7 +346,7 @@ PPT、Word、圖片（主知識庫，在 3 篇論文之後匯入 `data/documents
 | `LLM_API_KEY`、`VLM_API_KEY`、`EMBED_API_KEY` | 雲端 API 填真的金鑰；本機 MLX server 填任意非空字串 |
 | `LLM_MAX_ASYNC`、`EMBED_MAX_ASYNC` | 記憶體較大的機器或雲端 API 可以調高 |
 | `LLM_MAX_TOKENS`、`VLM_MAX_TOKENS` | 依新模型的輸出上限調整 |
-| `QUERY_MAX_TOTAL_TOKENS` | 依新 LLM 的 context 長度與記憶體調整 |
+| `QUERY_MAX_TOTAL_TOKENS`、`QUERY_MAX_ENTITY_TOKENS`、`QUERY_MAX_RELATION_TOKENS` | 總上限依新 LLM 的 context 長度與記憶體調整；entity／relation 上限相加要小於總上限，其餘留給文字 chunk |
 | `EMBED_MODEL`、`EMBED_DIM` | **不能改**，除非重建索引 |
 
 - **embedding 模型與維度在建索引後鎖定。** 要換的話，`WORKING_DIR` 也要改到新的資料夾再重新 ingest：LightRAG 預設的向量檔名不含模型名稱或維度，沿用舊資料夾會讓新舊向量混在同一個庫。

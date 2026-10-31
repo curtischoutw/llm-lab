@@ -34,16 +34,17 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   同一個模型產生、可比較），並固定 enable_rerank=False（spec 不用 reranker，預設值會讓每次
   查詢都警告）。vlm_enhanced=True 時改走 RAGAnything.aquery_vlm_enhanced，並多檢查 VLM 端點。
 - eval（evaluate）在同一個 Session（同一個 RAGAnything 實例）上，依題目順序、五種模式順序依序查詢，
-  不是每格重新初始化。每格沿用 query 的 _answer（aquery_llm、QUERY_MAX_TOTAL_TOKENS、vlm_enhanced=False、
+  不是每格重新初始化。每格沿用 query 的 _answer（aquery_llm、三個查詢 token 上限、vlm_enhanced=False、
   enable_rerank=False）；單格失敗（含沒有答案內容）記在該格的 Cell.error，不中斷其餘格。
   開始前只檢查 LLM 與 Embedding 端點可達（eval 不走 VLM）。
 - 多篇匯入時單篇失敗不中斷整批：失敗記在該篇的 IngestReport.error，其餘照常處理並保留，
   由 CLI 印出是哪一篇並以非零碼結束。重新執行時已完整處理的篇略過、失敗的篇重試。
-- 查詢 context 的 token 上限由 QUERY_MAX_TOTAL_TOKENS 決定：LightRAG 預設 30000，在 32 GB
-  的機器上 mlx_lm.server 處理 29.7k token 的 prompt 會 GPU 記憶體不足。LightRAG 的總上限不是
-  硬上限：chunk 預算＝總上限 − KG context，而 KG context 另受 entity／relation 上限（預設
-  6000／8000）限制。只降總上限時 chunk 預算可能變成負數、prompt 仍超過總上限，所以
-  entity／relation 上限照 LightRAG 預設對總上限的比例一起縮放（ASSUMPTION：沿用預設比例）。
+- 查詢 context 的 token 分配由三個設定決定：QUERY_MAX_TOTAL_TOKENS（總上限）、QUERY_MAX_ENTITY_TOKENS 與
+  QUERY_MAX_RELATION_TOKENS（圖譜 context 裡 entity 與 relation 各自的上限）。LightRAG 預設總上限 30000，
+  在 32 GB 的機器上 mlx_lm.server 處理 29.7k token 的 prompt 會 GPU 記憶體不足，所以總上限用 12000。
+  LightRAG 的總上限不是硬上限：chunk 預算＝總上限 − KG context，KG context 另受 entity／relation 上限
+  （預設 6000／8000）限制，所以三者直接取自設定、不依比例推算（ticket 13：依預設比例縮放時 mix 模式
+  在 12000 下只剩 3–8 個 chunk 的空間）。設定檢查保證 entity ＋ relation 小於總上限。
 - embedding 並行數由 EMBED_MAX_ASYNC 經 lightrag_kwargs 明確傳入，不依賴 LightRAG 自己讀的
   EMBEDDING_FUNC_MAX_ASYNC 環境變數：那個預設值在 import lightrag 時就決定，晚於 import 才載入的
   .env 不會生效。
@@ -109,7 +110,6 @@ from pathlib import Path
 
 from lightrag import QueryParam
 from lightrag.base import DocStatus
-from lightrag.constants import DEFAULT_MAX_ENTITY_TOKENS, DEFAULT_MAX_RELATION_TOKENS, DEFAULT_MAX_TOTAL_TOKENS
 from lightrag.kg.shared_storage import finalize_share_data
 from raganything import RAGAnything, RAGAnythingConfig
 from raganything.callbacks import ProcessingCallback
@@ -576,34 +576,34 @@ def ingest(documents: list[Path]) -> IngestSummary:
 # ==============================
 
 
-def query_kwargs(max_total_tokens: int) -> dict[str, object]:
-    """組出 QueryParam 的共用參數，entity／relation 的 token 上限依 LightRAG 預設比例隨總上限縮放。
+def query_kwargs(settings: Settings) -> dict[str, object]:
+    """組出 QueryParam 的共用參數，token 上限直接取自設定。
 
     Args:
-        max_total_tokens: 查詢 context 的總 token 上限（QUERY_MAX_TOTAL_TOKENS）。
+        settings: 已驗證的設定（取 QUERY_MAX_TOTAL_TOKENS、QUERY_MAX_ENTITY_TOKENS、QUERY_MAX_RELATION_TOKENS）。
 
     Returns:
         可展開給 QueryParam（或 RAGAnything.aquery_vlm_enhanced）的參數 dict，不含 mode。
     """
     return {
         "enable_rerank": False,
-        "max_total_tokens": max_total_tokens,
-        "max_entity_tokens": max_total_tokens * DEFAULT_MAX_ENTITY_TOKENS // DEFAULT_MAX_TOTAL_TOKENS,
-        "max_relation_tokens": max_total_tokens * DEFAULT_MAX_RELATION_TOKENS // DEFAULT_MAX_TOTAL_TOKENS,
+        "max_total_tokens": settings.query_max_total_tokens,
+        "max_entity_tokens": settings.query_max_entity_tokens,
+        "max_relation_tokens": settings.query_max_relation_tokens,
     }
 
 
-def query_param(mode: str, max_total_tokens: int) -> QueryParam:
+def query_param(mode: str, settings: Settings) -> QueryParam:
     """組出查詢參數（見 query_kwargs）。
 
     Args:
         mode: 檢索模式。
-        max_total_tokens: 查詢 context 的總 token 上限（QUERY_MAX_TOTAL_TOKENS）。
+        settings: 已驗證的設定。
 
     Returns:
         QueryParam。
     """
-    return QueryParam(mode=mode, **query_kwargs(max_total_tokens))
+    return QueryParam(mode=mode, **query_kwargs(settings))
 
 
 async def _answer(rag: RAGAnything, question: str, mode: str, settings: Settings) -> str:
@@ -613,7 +613,7 @@ async def _answer(rag: RAGAnything, question: str, mode: str, settings: Settings
         rag: 已完成 _initialize 的實例。
         question: 問題文字。
         mode: 檢索模式。
-        settings: 已驗證的設定（取 QUERY_MAX_TOTAL_TOKENS）。
+        settings: 已驗證的設定（取三個查詢 token 上限）。
 
     Returns:
         答案文字（非空字串）。
@@ -621,7 +621,7 @@ async def _answer(rag: RAGAnything, question: str, mode: str, settings: Settings
     Raises:
         PipelineError: LightRAG 回報查詢失敗（訊息含原例外文字），或成功但沒有答案內容。
     """
-    result = await rag.lightrag.aquery_llm(question, query_param(mode, settings.query_max_total_tokens))
+    result = await rag.lightrag.aquery_llm(question, query_param(mode, settings))
     if result.get("status") != "success":
         raise PipelineError(f"查詢失敗（mode={mode}）：{result.get('message')}")
     answer = (result.get("llm_response") or {}).get("content")
@@ -653,7 +653,7 @@ async def _query(rag: RAGAnything, question: str, mode: str, vlm_enhanced: bool,
     # RAG-Anything 的 VLM 增強路徑：先取回檢索 prompt、把圖片路徑換成 base64 圖片再交給 VLM。
     # 它沒有 aquery_llm 的 status 欄位；失敗時回 None（LLM 失敗的訊息 LightRAG 已吞掉），
     # VLM 失敗則拋 EndpointError（含端點與位址）。
-    answer = await rag.aquery_vlm_enhanced(question, mode=mode, **query_kwargs(settings.query_max_total_tokens))
+    answer = await rag.aquery_vlm_enhanced(question, mode=mode, **query_kwargs(settings))
     if not answer or not isinstance(answer, str):
         raise PipelineError(f"查詢沒有回傳答案內容（mode={mode}，vlm_enhanced=True）")
     return answer
@@ -720,7 +720,7 @@ def evaluate(questions: list[Question]) -> list[list[Cell]]:
     """對每一題以五種檢索模式各查詢一次：開一個 Session、跑完全部題目、關閉。
 
     五個模式與所有題目共用同一個 RAGAnything 實例，依題目順序、模式順序依序執行。
-    查詢固定 vlm_enhanced=False、enable_rerank=False，並沿用 query 的 QUERY_MAX_TOTAL_TOKENS。
+    查詢固定 vlm_enhanced=False、enable_rerank=False，並沿用 query 的三個查詢 token 上限。
 
     Args:
         questions: 已驗證的題目。
