@@ -23,7 +23,14 @@ import unittest
 
 from tests.fake_openai_server import CHAT_REPLY
 from tests.test_cli import OPTIONAL_FIELDS, REPO_ROOT, REQUIRED_FIELDS
-from tests.test_pipeline import INGEST_TIMEOUT, PipelineCase, parsed_office_sources, write_image, write_office
+from tests.test_pipeline import (
+    INGEST_TIMEOUT,
+    PipelineCase,
+    parsed_office_sources,
+    table_bodies,
+    write_image,
+    write_office,
+)
 
 # 依 argv 的步驟依序呼叫公開函式；每一步印一行結果。
 # argv[1] 是文件路徑，argv[2] 是題目檔，argv[3] 是 functions（模組函式）或 session（同一個 Session），其餘是步驟。
@@ -462,6 +469,56 @@ class IngestStatsTest(PythonApiCase):
                 "stats b.pdf vlm_ok=0 vlm_failed=1 description_failed=1 description_error=True",
             ],
         )
+
+
+class OversizedTableTest(PythonApiCase):
+    """太大的表格拆成小表、描述失敗時文件記成失敗：Python API 與 CLI 行為相同。"""
+
+    def setUp(self):
+        super().setUp()
+        (self.tmp / "bigtable.pdf").write_bytes(b"%PDF-1.4 big table")
+        (self.tmp / "other.pdf").write_bytes(b"%PDF-1.4 other")
+
+    def test_session_describes_a_big_table_as_several_small_tables_and_skips_it_the_second_time(self):
+        result = self.run_api("doc:bigtable.pdf", "doc:bigtable.pdf", mode="session")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["doc bigtable.pdf skipped=False error=None", "doc bigtable.pdf skipped=True error=None"],
+        )
+        bodies = table_bodies(self.server.requests)
+        self.assertGreater(len(bodies), 1)
+        self.assertTrue(all("rowspan=1" not in body for body in bodies))
+
+    def test_a_failed_description_is_a_failed_report_that_a_later_call_retries_while_other_documents_are_kept(self):
+        self.server.fail_chat_containing = "R59C1"
+        failed = self.run_api("doc:bigtable.pdf", "doc:other.pdf", mode="session")
+        self.assertEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+        first, second = [line for line in failed.stdout.splitlines() if line.startswith("doc ")]
+        self.assertRegex(first, r"^doc bigtable\.pdf skipped=False error=圖／表／公式描述呼叫失敗 \d+ 次.*injected chat failure")
+        self.assertEqual(second, "doc other.pdf skipped=False error=None")
+
+        self.server.fail_chat_containing = None
+        retried = self.run_api("doc:bigtable.pdf", "doc:other.pdf", "doc:bigtable.pdf", mode="session")
+        self.assertEqual(retried.returncode, 0, retried.stdout + retried.stderr)
+        self.assertEqual(
+            retried.stdout.splitlines(),
+            [
+                "doc bigtable.pdf skipped=False error=None",
+                "doc other.pdf skipped=True error=None",
+                "doc bigtable.pdf skipped=True error=None",
+            ],
+        )
+
+    def test_a_failed_write_to_the_index_is_a_failed_report_in_the_module_function_too(self):
+        self.server.fail_embed_containing = "Table Analysis:"
+        failed = self.run_api("doc:bigtable.pdf")
+        self.assertEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+        self.assertRegex(failed.stdout, r"error=多模態內容寫入索引失敗 \d+ 次.*injected embedding failure")
+
+        self.server.fail_embed_containing = None
+        retried = self.run_api("doc:bigtable.pdf")
+        self.assertEqual(retried.stdout.splitlines(), ["doc bigtable.pdf skipped=False error=None"])
 
 
 if __name__ == "__main__":

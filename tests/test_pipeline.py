@@ -29,10 +29,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from html.parser import HTMLParser
 from pathlib import Path
 
+import tiktoken
 from PIL import Image
 
+from tests.fake_mineru import BIG_TABLE_COLUMNS, BIG_TABLE_ROWS, BIG_TABLE_SPAN_START, big_table_html
 from tests.fake_openai_server import CHAT_REPLY, VISION_REPLY, FakeOpenAIServer
 from tests.test_cli import REPO_ROOT, SECRET, run_cli, valid_env
 
@@ -55,6 +58,8 @@ SUPPORTED_EXTENSIONS = (
     ".gif",
     ".webp",
 )
+# 表格送去描述的內容（table_body）的 token 上限；這是 ticket 12 決定的上限值，不從 rag_lab 取值，測試的期望要有獨立的來源
+TABLE_BODY_MAX_TOKENS = 800
 # 端點失敗後應在這個秒數內結束（正常約 10 秒，含 LightRAG 限流器 shutdown 最多等 5 秒）
 HANG_TIMEOUT = 60
 # .env 內以字面 \n 表示換行；CLI 讀進來後是真正的換行
@@ -123,6 +128,65 @@ def parsed_office_sources(output_dir: Path) -> list[str]:
     return sorted(sources)
 
 
+class _CellReader(HTMLParser):
+    """把 HTML 表格讀成「每列是 (文字, rowspan, colspan) 的清單」；沒寫的 rowspan／colspan 當作 1。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: list[list[tuple[str, int, int]]] = []
+        self._cell: list | None = None
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if tag == "tr":
+            self.rows.append([])
+        elif tag == "td":
+            self._cell = ["", int(attributes.get("rowspan", 1)), int(attributes.get("colspan", 1))]
+
+    def handle_data(self, data):
+        if self._cell is not None:
+            self._cell[0] += data
+
+    def handle_endtag(self, tag):
+        if tag == "td" and self._cell is not None:
+            self.rows[-1].append((self._cell[0], self._cell[1], self._cell[2]))
+            self._cell = None
+
+
+def table_rows(html: str) -> list[list[tuple[str, int, int]]]:
+    """讀出表格每一列的儲存格。
+
+    Args:
+        html: `<table>...</table>`。
+
+    Returns:
+        每列一個 (文字, rowspan, colspan) 清單。
+    """
+    reader = _CellReader()
+    reader.feed(html)
+    return reader.rows
+
+
+def table_bodies(requests: list[dict]) -> list[str]:
+    """取出每個表格描述請求裡的 table_body（prompt 中 `Body:` 之後的 `<table>...</table>`）。
+
+    Args:
+        requests: FakeOpenAIServer.requests。
+
+    Returns:
+        依請求順序排列的 table_body；不是表格描述的請求不列入。
+    """
+    bodies = []
+    for request in requests:
+        if request["path"] != "/v1/chat/completions":
+            continue
+        for message in request["payload"]["messages"]:
+            match = re.search(r"Body: (<table>.*</table>)", message["content"], re.DOTALL) if isinstance(message["content"], str) else None
+            if match:
+                bodies.append(match.group(1))
+    return bodies
+
+
 class PipelineCase(unittest.TestCase):
     """提供假 server、假 mineru、暫存資料夾與 CLI 執行輔助的測試基底。"""
 
@@ -182,6 +246,189 @@ class PipelineCase(unittest.TestCase):
     def query(self, question: str = "What is Fake Entity Alpha?", *extra: str, **overrides: str):
         """執行 `query`。"""
         return run_cli(["query", question, *extra], self.env(**overrides), timeout=INGEST_TIMEOUT)
+
+
+# ==============================
+# 太大的表格
+# ==============================
+
+
+class OversizedTableTest(PipelineCase):
+    def setUp(self):
+        super().setUp()
+        self.big = self.tmp / "bigtable.pdf"
+        self.big.write_bytes(b"%PDF-1.4 big table")
+
+    def test_a_big_table_is_described_as_several_small_tables_that_together_cover_every_row(self):
+        result = self.ingest(self.big)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        bodies = table_bodies(self.server.requests)
+        self.assertGreater(len(bodies), 1, "太大的表格應該拆成多張小表，每張各送一次描述")
+        encoding = tiktoken.encoding_for_model("gpt-4o-mini")
+        for body in bodies:
+            self.assertLessEqual(len(encoding.encode(body)), TABLE_BODY_MAX_TOKENS)
+            for column in range(BIG_TABLE_COLUMNS):
+                self.assertIn(f">H{column}<", body, "每張小表都要重複表頭列")
+        joined = "\n".join(bodies)
+        for row in range(BIG_TABLE_ROWS):
+            self.assertIn(f">R{row}C1<", joined, f"第 {row} 列沒有出現在任何一張小表")
+
+    def test_cell_text_and_merged_cells_are_unchanged_after_shortening_and_splitting(self):
+        self.assertEqual(self.ingest(self.big).returncode, 0)
+        original_rows = table_rows(big_table_html())
+        header, data_rows = original_rows[0], original_rows[1:]
+        described_rows = []
+        for body in table_bodies(self.server.requests):
+            rows = table_rows(body)
+            self.assertEqual(rows[0], header)
+            described_rows.extend(rows[1:])
+        self.assertEqual(described_rows, data_rows)
+
+    def test_rows_joined_by_a_rowspan_that_alone_exceeds_the_limit_are_split_with_the_spanning_cell_repeated(self):
+        spanning = self.tmp / "bigspan.pdf"
+        spanning.write_bytes(b"%PDF-1.4 big span")
+        self.assertEqual(self.ingest(spanning).returncode, 0)
+        bodies = table_bodies(self.server.requests)
+        encoding = tiktoken.encoding_for_model("gpt-4o-mini")
+        self.assertGreater(len(bodies), 2)
+        for body in bodies:
+            self.assertLessEqual(len(encoding.encode(body)), TABLE_BODY_MAX_TOKENS)
+            # 每一列的欄數（含上方 rowspan 佔到的欄）都是 BIG_TABLE_COLUMNS：切開後欄位仍然對齊
+            occupied: dict[int, int] = {}
+            for index, row in enumerate(table_rows(body)):
+                width = sum(colspan for _, _, colspan in row) + sum(1 for last in occupied.values() if last >= index)
+                self.assertEqual(width, BIG_TABLE_COLUMNS, f"第 {index} 列欄數不對：{row}")
+                for column, (_, rowspan, _) in enumerate(row):
+                    if rowspan > 1:
+                        occupied[100 + column] = index + rowspan - 1
+        described = [row for body in bodies for row in table_rows(body)[1:]]
+        for row_number in range(BIG_TABLE_ROWS):
+            self.assertTrue(
+                any((f"R{row_number}C1", 1, 1) in row for row in described), f"第 {row_number} 列沒有出現在任何一張小表"
+            )
+        # 跨列的那一格：文字出現在每一張涵蓋它的小表，沒有被丟掉
+        for body in bodies:
+            if f">R{BIG_TABLE_SPAN_START + 1}C1<" in body:
+                self.assertIn(f">R{BIG_TABLE_SPAN_START}C0<", body)
+
+    def test_default_span_attributes_are_dropped_but_real_spans_stay(self):
+        self.assertEqual(self.ingest(self.big).returncode, 0)
+        joined = "\n".join(table_bodies(self.server.requests))
+        self.assertNotIn("rowspan=1", joined)
+        self.assertNotIn("colspan=1", joined)
+        self.assertIn("rowspan=2", joined)
+
+    def test_rows_joined_by_a_rowspan_stay_in_the_same_small_table(self):
+        self.assertEqual(self.ingest(self.big).returncode, 0)
+        for body in table_bodies(self.server.requests):
+            for first in range(0, BIG_TABLE_ROWS, 10):
+                # 第 first 列的第一格 rowspan=2，跨到第 first+1 列
+                self.assertEqual(f">R{first}C0<" in body, f">R{first + 1}C1<" in body, f"跨列的兩列被拆開：{first}")
+
+    def test_a_small_table_is_described_with_its_body_unchanged(self):
+        # 不大的表格連預設的 rowspan=1 colspan=1 都不動：已匯入文件重新處理時送去描述的內容和以前一樣
+        small = self.tmp / "spans.pdf"
+        small.write_bytes(b"%PDF-1.4 small table")
+        self.assertEqual(self.ingest(small).returncode, 0)
+        self.assertEqual(
+            table_bodies(self.server.requests),
+            [
+                "<table><tr><td rowspan=1 colspan=1>a</td><td rowspan=1 colspan=1>b</td></tr>"
+                "<tr><td rowspan=1 colspan=1>1</td><td rowspan=1 colspan=1>2</td></tr></table>"
+            ],
+        )
+
+    def test_document_id_and_parse_cache_come_from_the_original_table(self):
+        self.assertEqual(self.ingest(self.big).returncode, 0)
+        content_list_path = next(self.output_dir.rglob("bigtable_content_list.json"))
+        original = json.loads(content_list_path.read_text(encoding="utf-8"))
+        # RAG-Anything 的文件 ID 規則：各區塊的識別文字用換行串起來取 md5，前綴 doc-（不從 rag_lab 取值）
+        parts = []
+        for block in original:
+            if block["type"] == "text":
+                parts.append(block["text"].strip())
+            elif block["type"] == "image":
+                # RAG-Anything 讀進來時把圖片的相對路徑換成絕對路徑
+                parts.append(f"image:{(content_list_path.parent / block['img_path']).resolve()}")
+            elif block["type"] == "table":
+                parts.append(f"table:{block['table_body']}")
+            else:
+                parts.append(f"equation:{block['text']}")
+        expected_id = "doc-" + hashlib.md5("\n".join(parts).encode()).hexdigest()
+        statuses = json.loads((self.working_dir / "kv_store_doc_status.json").read_text(encoding="utf-8"))
+        self.assertEqual(list(statuses), [expected_id])
+        cache = json.loads((self.working_dir / "kv_store_parse_cache.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(cache), 1)
+        (entry,) = cache.values()
+        self.assertEqual(entry["doc_id"], expected_id)
+        cached_tables = [block for block in entry["content_list"] if block["type"] == "table"]
+        self.assertEqual([block["table_body"] for block in cached_tables], [original[3]["table_body"]])
+
+    def test_reingesting_a_document_with_a_big_table_skips_it_and_calls_no_model(self):
+        self.assertEqual(self.ingest(self.big).returncode, 0)
+        requests_after_first = len(self.server.requests)
+        second = self.ingest(self.big)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertIn("略過", second.stdout)
+        self.assertEqual(len(self.server.requests), requests_after_first)
+
+
+class DescriptionFailureTest(PipelineCase):
+    """圖／表／公式描述失敗、多模態內容寫入索引失敗：文件記成失敗，重新執行會重試。"""
+
+    def doc_statuses(self) -> dict[str, dict]:
+        return json.loads((self.working_dir / "kv_store_doc_status.json").read_text(encoding="utf-8"))
+
+    def assert_failed_then_retried(self, failed):
+        """failed 是失敗的那次 ingest；確認它被記成失敗，修好 server 後重新執行會重試並完成。"""
+        self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+        self.assertIn("匯入失敗：paper.pdf", failed.stderr)
+        self.assertIn("重新執行", failed.stderr)
+        self.assertIn("不需要刪除", failed.stderr, "文件已記成失敗，重新執行就會重試；要告訴使用者不必刪資料重來")
+        self.assertNotIn("請修好端點後刪除", failed.stderr)
+        self.assertEqual([record["status"] for record in self.doc_statuses().values()], ["failed"])
+
+        self.server.fail_chat_containing = None
+        self.server.fail_embed_containing = None
+        requests_before = len(self.server.requests)
+        retried = self.ingest()
+        self.assertEqual(retried.returncode, 0, retried.stdout + retried.stderr)
+        self.assertNotIn("略過", retried.stdout, "失敗的文件不能被當成已完成而略過")
+        self.assertGreater(len(self.server.requests), requests_before)
+        self.assertEqual([record["status"] for record in self.doc_statuses().values()], ["processed"])
+        again = self.ingest()
+        self.assertIn("略過", again.stdout)
+
+    def test_a_failed_table_description_marks_the_document_failed_and_a_rerun_retries_it(self):
+        self.server.fail_chat_containing = "Body: <table>"
+        failed = self.ingest()
+        self.assertIn("injected chat failure", failed.stderr)
+        self.assert_failed_then_retried(failed)
+
+    def test_a_failed_equation_description_marks_the_document_failed_and_a_rerun_retries_it(self):
+        self.server.fail_chat_containing = "mc^2"
+        self.assert_failed_then_retried(self.ingest())
+
+    def test_a_failed_write_of_the_described_content_marks_the_document_failed_and_a_rerun_retries_it(self):
+        # 描述成功，但表格 chunk 寫入向量索引時 embedding 失敗；RAG-Anything 吞掉這個錯誤
+        self.server.fail_embed_containing = "Table Analysis:"
+        failed = self.ingest()
+        self.assertIn("寫入", failed.stderr)
+        self.assertIn("injected embedding failure", failed.stderr)
+        self.assert_failed_then_retried(failed)
+
+    def test_other_documents_in_the_same_batch_are_still_ingested(self):
+        folder = self.tmp / "papers"
+        folder.mkdir()
+        (folder / "bigtable.pdf").write_bytes(b"%PDF-1.4 big")
+        (folder / "other.pdf").write_bytes(b"%PDF-1.4 other")
+        self.server.fail_chat_containing = "R59C1"
+        result = self.ingest(folder)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertRegex(result.stderr, r"匯入失敗：bigtable\.pdf")
+        self.assertNotRegex(result.stderr, r"匯入失敗：other\.pdf")
+        statuses = self.doc_statuses()
+        self.assertEqual(sorted(record["status"] for record in statuses.values()), ["failed", "processed"], statuses)
 
 
 # ==============================

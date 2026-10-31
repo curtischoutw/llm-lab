@@ -24,6 +24,8 @@ ticket 的 CLI 測試都共用它。涵蓋 chat、vision、embeddings 三種能�
 - fail_chat_containing 只讓訊息文字含指定字串的 chat 請求失敗（模擬單一題目失敗）；
   fail_keywords 只讓關鍵字抽取請求（帶 response_format）失敗，naive 模式不做關鍵字抽取，
   所以只有其餘四種檢索模式的查詢會失敗（模擬單一模式失敗）。
+- fail_embed_containing 讓輸入文字含指定字串的 embeddings 請求回 500（模擬某個 chunk 寫入索引時 embedding 失敗，
+  其餘文字的 embedding 正常）。
 - die_after_chat 模擬 mlx_lm.server 生成執行緒死掉（GPU 記憶體不足時實測）：正在生成的那個
   請求永遠不回應，之後的請求回 404 generation thread died。不回應的請求在 stop() 時才放開。
 
@@ -263,6 +265,9 @@ class _Handler(BaseHTTPRequestHandler):
         if not isinstance(texts, list) or not texts or not all(isinstance(t, str) for t in texts):
             self._send_error(400, "input must be a string or a non-empty list of strings")
             return
+        if self.server.fail_embed_containing and any(self.server.fail_embed_containing in text for text in texts):
+            self._send_error(500, "injected embedding failure")
+            return
         if self.server.embed_delay:
             time.sleep(self.server.embed_delay)
         use_base64 = payload.get("encoding_format") == "base64"
@@ -296,6 +301,7 @@ class _Server(ThreadingHTTPServer):
         self.fail_vision = False
         self.fail_chat_containing: str | None = None
         self.fail_keywords = False
+        self.fail_embed_containing: str | None = None
         self.chat_delay = 0.0
         self.embed_delay = 0.0
         self.die_after_chat: int | None = None
@@ -405,6 +411,15 @@ class FakeOpenAIServer:
     @fail_keywords.setter
     def fail_keywords(self, value: bool) -> None:
         self._server.fail_keywords = value
+
+    @property
+    def fail_embed_containing(self) -> str | None:
+        """設為字串時，輸入文字含該字串的 embeddings 請求回 500，其他請求正常。"""
+        return self._server.fail_embed_containing
+
+    @fail_embed_containing.setter
+    def fail_embed_containing(self, value: str | None) -> None:
+        self._server.fail_embed_containing = value
 
     @property
     def chat_delay(self) -> float:
