@@ -73,3 +73,17 @@ ASSUMPTION：
 - 範圍外：刷卡優惠列表在 2026-10-31 找到 209 個活動頁，比 2026-10-30 多 8 個。副本裡新下載了這 8 個活動，主 repo 的 `data/` 沒有。
 
 權益附件要等全量匯入（ticket 08）結束後，再對主 repo 的 `data/` 執行下載與匯入。
+
+## 匯入（2026-10-31）
+
+ticket 08 結束後，對主 repo 的 `data/` 重跑下載，結果與副本那次相同：權益附件 17 份、新活動 8 份。匯入的 log 都在 `output/taishin_full/`。
+
+- 第一次匯入權益附件時，`SPECIAL_2026` 的大表格讓 LLM server 記憶體不足而停掉，所以先做了 ticket 12，再繼續匯入。
+- 第二次匯入權益附件（`ingest_rights_attachments2.log`）：
+  - 17 份裡，8 份已完成而略過；`TSCC-11312` 上次被中斷，這次清掉舊紀錄後重匯；另外 8 份是新的。
+  - 48:59，failed=0。VLM 呼叫 12 次，全部成功。
+- 新活動 8 份逐份匯入（`ingest_new_offers.log`）：22:29 到 22:51，每份 108–324 s，全部成功。
+- 匯入後的知識庫：
+  - 文件 311 份，全部 processed，每份都有 `multimodal_processed=True`；
+  - 實體 15,747，關係 31,239，其中 belongs_to 邊 11,352。
+- 從 server 重開到結束，LLM server 收到的最大 prompt 是 4,293 token，wired 記憶體最高 16 GB。
