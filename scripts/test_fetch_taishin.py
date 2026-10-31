@@ -150,6 +150,20 @@ def pdf_bytes(path: str) -> bytes:
     return b"%PDF-1.4\n" + path.encode() + b"\n%%EOF\n"
 
 
+def rights_page_with_pdfs(label: str, hrefs: list[str]) -> str:
+    """產生權益子頁：主內容區裡有指向 PDF 的連結（真實的聯名卡、雙幣卡、企業卡子頁就是這樣連到條款 PDF）。
+
+    Args:
+        label: 放進主內容區的文字，讓各頁內容不同。
+        hrefs: PDF 連結的 href（相對路徑，或其他網域的絕對網址）。
+
+    Returns:
+        權益子頁的 HTML，主內容區結構和 card_html 相同。
+    """
+    anchors = "".join(f'<a href="{href}" title="x" class="oval-style" target="_blank">條款</a>' for href in hrefs)
+    return card_html(label).replace('<img src="/img/a.gif">', f'<img src="/img/a.gif"><p>{anchors}</p>')
+
+
 def card_html(label: str) -> str:
     """產生卡片頁：主內容區含收合區塊、彈窗與未關閉的標籤，主內容區外有導覽選單與頁尾。
 
@@ -554,6 +568,13 @@ FEES = FILES_DIR + "fees.pdf"
 # 真實的檔名有以 - 或 _ 開頭的，以 - 開頭的名字當命令列參數會被當成選項
 DASH_NAMED = FILES_DIR + "-_11407.pdf"
 UNDERSCORE_NAMED = FILES_DIR + "__11507.pdf"
+
+# 權益子頁連到的條款 PDF：聯名卡子頁連到 /personal/credit/intro/rights/right/... 底下，雙幣卡連到 files/ 底下
+CO_BRAND_PAGE = RIGHTS_PATH_FORMAT.format(group="right", page="right0702")
+DUAL_PAGE = RIGHTS_PATH_FORMAT.format(group="right", page="right0704")
+CO_BRAND_PDF = "/TSB/export/sites/TSB/personal/credit/intro/rights/right/right0702/TSCC-11312.pdf"
+DUAL_PDF = FILES_DIR + "dual-card_01.pdf"
+DUAL_PDF_2 = FILES_DIR + "dual-card_02.pdf"
 
 
 def download_page_path(number: int) -> str:
@@ -2149,6 +2170,272 @@ class ActiveContentTests(ScriptTestCase):
                     "AFTER &amp; ENTITY &copy; 2026",
                 ):
                     self.assertIn(text, received)
+
+
+class RightsAttachmentTests(ScriptTestCase):
+    def test_pdfs_linked_from_rights_subpages_are_saved_unchanged_into_their_own_folder(self) -> None:
+        self.serve_rights(
+            {
+                CO_BRAND_PAGE: rights_page_with_pdfs("CO_BRAND", [CO_BRAND_PDF]),
+                DUAL_PAGE: rights_page_with_pdfs("DUAL", [DUAL_PDF, DUAL_PDF_2]),
+            }
+        )
+        for path in (CO_BRAND_PDF, DUAL_PDF, DUAL_PDF_2):
+            self.routes[path] = (200, pdf_bytes(path))
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            [f for f in self.files_under_out() if f.startswith("rights_attachments/")],
+            [
+                "rights_attachments/attachment_TSCC-11312.pdf",
+                "rights_attachments/attachment_dual-card_01.pdf",
+                "rights_attachments/attachment_dual-card_02.pdf",
+            ],
+        )
+        for path in (CO_BRAND_PDF, DUAL_PDF, DUAL_PDF_2):
+            saved = self.out / "rights_attachments" / f"attachment_{path.rsplit('/', 1)[1]}"
+            self.assertEqual(saved.read_bytes(), pdf_bytes(path))
+
+    def test_pdf_on_another_domain_is_not_requested_and_is_recorded_as_skipped(self) -> None:
+        external = "https://www.icash.invalid/pdf/icash2_contract.pdf"
+        self.serve_rights({CO_BRAND_PAGE: rights_page_with_pdfs("CO_BRAND", [CO_BRAND_PDF, external])})
+        self.routes[CO_BRAND_PDF] = (200, pdf_bytes(CO_BRAND_PDF))
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            [f for f in self.files_under_out() if f.startswith("rights_attachments/")],
+            ["rights_attachments/attachment_TSCC-11312.pdf"],
+        )
+        skipped = [r for r in self.manifest() if r["result"] == "外部網域略過"]
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0]["url"], external)
+        self.assertEqual(skipped[0]["category"], "權益附件")
+        self.assertEqual(skipped[0]["sha256"], "")
+        self.assertIn("www.icash.invalid", skipped[0]["detail"])
+
+    def test_pdf_already_in_the_download_area_is_not_downloaded_again_and_the_record_names_the_download_file(self) -> None:
+        self.serve_downloads([[DUAL_PDF]])
+        self.serve_rights({DUAL_PAGE: rights_page_with_pdfs("DUAL", [DUAL_PDF, DUAL_PDF_2])})
+        self.routes[DUAL_PDF_2] = (200, pdf_bytes(DUAL_PDF_2))
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.server.paths().count(DUAL_PDF), 1)
+        self.assertEqual(
+            [f for f in self.files_under_out() if f.endswith(".pdf")],
+            ["downloads/download_dual-card_01.pdf", "rights_attachments/attachment_dual-card_02.pdf"],
+        )
+        duplicates = [r for r in self.manifest() if r["result"] == "重複略過"]
+        self.assertEqual(len(duplicates), 1)
+        self.assertEqual(duplicates[0]["url"], self.server.base_url + DUAL_PDF)
+        self.assertEqual(duplicates[0]["category"], "權益附件")
+        self.assertEqual(duplicates[0]["sha256"], "")
+        self.assertIn("download_dual-card_01.pdf", duplicates[0]["detail"])
+
+    def test_existing_attachments_are_skipped_without_requesting_them_or_the_subpage(self) -> None:
+        self.serve_rights({DUAL_PAGE: rights_page_with_pdfs("DUAL", [DUAL_PDF, DUAL_PDF_2])})
+        for path in (DUAL_PDF, DUAL_PDF_2):
+            self.routes[path] = (200, pdf_bytes(path))
+        self.assertEqual(self.run_script().returncode, 0)
+        first = {r["filename"]: r for r in self.manifest() if r["category"] == "權益附件"}
+        self.server.requests.clear()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, DOWNLOAD_PAGE_1, *EMPTY_OFFER_REQUESTS])
+        second = {r["filename"]: r for r in self.manifest() if r["category"] == "權益附件"}
+        self.assertEqual(sorted(second), sorted(first))
+        for name, record in second.items():
+            self.assertEqual(record["result"], "已存在略過")
+            self.assertEqual(record["sha256"], first[name]["sha256"])
+
+    def test_existing_subpage_is_read_from_the_saved_html_and_not_requested_again(self) -> None:
+        self.serve_rights({DUAL_PAGE: rights_page_with_pdfs("DUAL", [DUAL_PDF])})
+        self.routes[DUAL_PDF] = (200, pdf_bytes(DUAL_PDF))
+        self.assertEqual(self.run_script().returncode, 0)
+        shutil.rmtree(self.out / "rights_attachments")
+        # 子頁已存在而略過；官網上的子頁現在已經沒有這個連結，但存下來的原始 HTML 還有
+        self.routes[DUAL_PAGE] = (200, rights_page_with_pdfs("DUAL", []).encode())
+        self.server.requests.clear()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, DOWNLOAD_PAGE_1, DUAL_PDF, *EMPTY_OFFER_REQUESTS])
+        self.assertEqual(
+            (self.out / "rights_attachments" / "attachment_dual-card_01.pdf").read_bytes(), pdf_bytes(DUAL_PDF)
+        )
+        self.assertEqual([r["result"] for r in self.manifest() if r["category"] == "權益"], ["已存在略過"])
+
+    def test_subpage_whose_conversion_failed_still_contributes_its_pdf_links(self) -> None:
+        self.serve_rights({DUAL_PAGE: rights_page_with_pdfs("DUAL", [DUAL_PDF])})
+        self.routes[DUAL_PDF] = (200, pdf_bytes(DUAL_PDF))
+        empty = self.tmp / "empty_path"
+        empty.mkdir()
+        result = self.run_script(path=str(empty))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("LibreOffice", result.stderr)
+        self.assertTrue((self.out / "rights_attachments" / "attachment_dual-card_01.pdf").is_file())
+
+    def test_failed_attachment_is_downloaded_again_on_the_next_run(self) -> None:
+        self.serve_rights({DUAL_PAGE: rights_page_with_pdfs("DUAL", [DUAL_PDF])})
+        self.routes[DUAL_PDF] = (500, b"boom")
+        self.assertEqual(self.run_script().returncode, 1)
+        self.routes[DUAL_PDF] = (200, pdf_bytes(DUAL_PDF))
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([r["result"] for r in self.manifest() if r["category"] == "權益附件"], ["已下載"])
+
+    def test_a_pdf_linked_from_several_subpages_is_downloaded_once(self) -> None:
+        self.serve_rights(
+            {
+                CO_BRAND_PAGE: rights_page_with_pdfs("CO_BRAND", [DUAL_PDF, CO_BRAND_PDF]),
+                DUAL_PAGE: rights_page_with_pdfs("DUAL", [DUAL_PDF, DUAL_PDF]),
+            }
+        )
+        for path in (CO_BRAND_PDF, DUAL_PDF):
+            self.routes[path] = (200, pdf_bytes(path))
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.server.paths().count(DUAL_PDF), 1)
+        self.assertEqual(len([r for r in self.manifest() if r["category"] == "權益附件"]), 2)
+
+    def test_names_are_unique_when_different_urls_share_a_file_name(self) -> None:
+        other_dir = "/TSB/export/sites/TSB/personal/credit/intro/payment/"
+        same_name = [FILES_DIR + "terms.pdf", other_dir + "terms.pdf", other_dir + "Terms.pdf"]
+        self.serve_rights({DUAL_PAGE: rights_page_with_pdfs("DUAL", same_name)})
+        for path in same_name:
+            self.routes[path] = (200, pdf_bytes(path))
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        records = {r["url"]: r["filename"] for r in self.manifest() if r["category"] == "權益附件"}
+        names = [records[self.server.base_url + path] for path in same_name]
+        self.assertEqual(len({n.lower() for n in names}), 3, names)
+        for name in names:
+            self.assertRegex(name, r"^attachment_[Tt]erms_[0-9a-f]{8}\.pdf$")
+        for path, name in zip(same_name, names):
+            self.assertEqual((self.out / "rights_attachments" / name).read_bytes(), pdf_bytes(path))
+
+    def test_relative_links_are_resolved_against_the_subpage_and_the_extension_is_case_insensitive(self) -> None:
+        self.serve_rights({CO_BRAND_PAGE: rights_page_with_pdfs("CO_BRAND", ["terms.PDF", "../notes.pdf#page=2"])})
+        self.routes[CO_BRAND_PAGE + "terms.PDF"] = (200, pdf_bytes("terms"))
+        self.routes[CO_BRAND_PAGE.rsplit("right0702/", 1)[0] + "notes.pdf"] = (200, pdf_bytes("notes"))
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            [f for f in self.files_under_out() if f.startswith("rights_attachments/")],
+            ["rights_attachments/attachment_notes.pdf", "rights_attachments/attachment_terms.pdf"],
+        )
+
+    def test_links_that_are_not_pdfs_are_ignored(self) -> None:
+        hrefs = ["/TSB/personal/credit/intro/overview/", FILES_DIR + "form.docx", FILES_DIR + "pdf-guide.html"]
+        self.serve_rights({CO_BRAND_PAGE: rights_page_with_pdfs("CO_BRAND", hrefs)})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([r for r in self.manifest() if r["category"] == "權益附件"], [])
+        self.assertIn("權益子頁找到 0 個 PDF 連結", result.stdout)
+
+    def test_prints_the_number_of_pdf_links_found_including_the_skipped_ones(self) -> None:
+        external = "https://www.icash.invalid/pdf/icash2_contract.pdf"
+        self.serve_downloads([[DUAL_PDF]])
+        self.serve_rights({DUAL_PAGE: rights_page_with_pdfs("DUAL", [DUAL_PDF, DUAL_PDF_2, external])})
+        self.routes[DUAL_PDF_2] = (200, pdf_bytes(DUAL_PDF_2))
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("權益子頁找到 3 個 PDF 連結", result.stdout)
+        self.assertEqual(
+            sorted(r["result"] for r in self.manifest() if r["category"] == "權益附件"),
+            sorted(["已下載", "外部網域略過", "重複略過"]),
+        )
+
+
+class RightsAttachmentManifestTests(ScriptTestCase):
+    def test_record_has_the_same_fields_as_the_other_categories_and_no_html_sha256(self) -> None:
+        self.serve_cards({RICHART: card_html("RICHART")})
+        self.serve_rights({DUAL_PAGE: rights_page_with_pdfs("DUAL", [DUAL_PDF])})
+        self.routes[DUAL_PDF] = (200, pdf_bytes(DUAL_PDF))
+        self.assertEqual(self.run_script().returncode, 0)
+        records = {r["filename"]: r for r in self.manifest()}
+        record = records["attachment_dual-card_01.pdf"]
+        self.assertEqual(record["url"], self.server.base_url + DUAL_PDF)
+        self.assertEqual(record["category"], "權益附件")
+        self.assertEqual(record["format"], "PDF")
+        self.assertEqual(record["downloaded_at"], time.strftime("%Y-%m-%d"))
+        self.assertEqual(record["sha256"], hashlib.sha256(pdf_bytes(DUAL_PDF)).hexdigest())
+        self.assertEqual(record["html_sha256"], "")
+        self.assertEqual(record["result"], "已下載")
+        self.assertEqual(record["period"], "")
+        self.assertEqual(set(record), set(records["card_cg047_card001.pdf"]))
+        self.assertFalse((self.out / "_meta" / "html" / "attachment_dual-card_01.html").exists())
+
+
+class RightsAttachmentFailureTests(ScriptTestCase):
+    def test_pdf_http_error_fails_that_pdf_only(self) -> None:
+        self.serve_rights({DUAL_PAGE: rights_page_with_pdfs("DUAL", [DUAL_PDF, DUAL_PDF_2])})
+        self.routes[DUAL_PDF_2] = (200, pdf_bytes(DUAL_PDF_2))
+        self.routes[DUAL_PDF] = (500, b"boom")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("attachment_dual-card_01.pdf", result.stderr)
+        self.assertIn("500", result.stderr)
+        self.assertEqual(
+            [f for f in self.files_under_out() if f.startswith("rights_attachments/")],
+            ["rights_attachments/attachment_dual-card_02.pdf"],
+        )
+        failed = [r for r in self.manifest() if r["result"] == "失敗"]
+        self.assertEqual([r["filename"] for r in failed], ["attachment_dual-card_01.pdf"])
+        self.assertEqual(failed[0]["sha256"], "")
+
+    def test_content_that_does_not_start_with_pdf_magic_is_a_failure_and_is_not_saved(self) -> None:
+        self.serve_rights({DUAL_PAGE: rights_page_with_pdfs("DUAL", [DUAL_PDF, DUAL_PDF_2])})
+        self.routes[DUAL_PDF] = (200, b"<html><body>Service Unavailable</body></html>")
+        self.routes[DUAL_PDF_2] = (200, pdf_bytes(DUAL_PDF_2))
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("attachment_dual-card_01.pdf", result.stderr)
+        self.assertIn("不是 PDF", result.stderr)
+        self.assertEqual(
+            [f for f in self.files_under_out() if f.startswith("rights_attachments/")],
+            ["rights_attachments/attachment_dual-card_02.pdf"],
+        )
+
+    def test_a_subpage_that_could_not_be_fetched_does_not_stop_the_attachments_of_the_others(self) -> None:
+        self.serve_rights(
+            {
+                CO_BRAND_PAGE: rights_page_with_pdfs("CO_BRAND", [CO_BRAND_PDF]),
+                DUAL_PAGE: rights_page_with_pdfs("DUAL", [DUAL_PDF]),
+            }
+        )
+        self.routes[DUAL_PDF] = (200, pdf_bytes(DUAL_PDF))
+        self.routes[CO_BRAND_PAGE] = (500, b"boom")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(
+            [f for f in self.files_under_out() if f.startswith("rights_attachments/")],
+            ["rights_attachments/attachment_dual-card_01.pdf"],
+        )
+
+    def test_rights_list_failure_leaves_no_attachments_and_the_failure_is_reported_once(self) -> None:
+        self.routes[RIGHTS_LIST_PATH] = (500, b"boom")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(result.stderr.count("列表「信用卡權益」"), 1)
+        self.assertNotIn("權益附件", result.stderr)
+        self.assertEqual([r for r in self.manifest() if r["category"] == "權益附件"], [])
+
+
+class RightsAttachmentRequestPolicyTests(ScriptTestCase):
+    def test_attachment_requests_carry_the_user_agent_and_are_spaced_by_the_interval(self) -> None:
+        self.serve_rights({DUAL_PAGE: rights_page_with_pdfs("DUAL", [DUAL_PDF, DUAL_PDF_2])})
+        for path in (DUAL_PDF, DUAL_PDF_2):
+            self.routes[path] = (200, pdf_bytes(path))
+        interval = 0.3
+        self.assertEqual(self.run_script(interval=str(interval)).returncode, 0)
+        requests = self.server.requests
+        # 總覽頁 1、權益頁 1、子頁 1、下載頁 1、PDF 2 份、刷卡優惠列表 9 個分類各 1 頁，共 15 個請求
+        self.assertEqual(len(requests), 15)
+        for earlier, later in zip(requests, requests[1:]):
+            self.assertGreaterEqual(later[1] - earlier[1], interval - 0.02)
+        self.assertTrue(all(user_agent.startswith("llm-lab-fetch-taishin/") for _p, _t, user_agent in requests))
 
 
 if __name__ == "__main__":
