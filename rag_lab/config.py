@@ -10,7 +10,7 @@
   與 QUERY_MAX_RELATION_TOKENS 是圖譜 context 裡 entity 與 relation 各自的上限，其餘留給文字 chunk。
   後兩者可以是 0（LightRAG 照常執行，只是不放該類描述），但兩者相加必須小於總上限，否則 chunk 分不到 token。
 - RERANK_BASE_URL／RERANK_MODEL／RERANK_API_KEY 三個欄位必填、規則與其他端點相同：查詢一律用 rerank，
-  沒有開關；chunk_top_k 與分數門檻不在這裡設定，維持 LightRAG 的預設值。
+  沒有開關；chunk_top_k 與分數門檻不在這裡設定，由 pipeline 固定為 20 與 0.0，不受行程環境的 CHUNK_TOP_K、MIN_RERANK_SCORE 影響。
 - EMBED_QUERY_PREFIX 只套用在查詢端（LightRAG 會以 context="query" 呼叫），
   文件端不加前綴；Qwen3-Embedding 的官方用法即為此非對稱形式。
 

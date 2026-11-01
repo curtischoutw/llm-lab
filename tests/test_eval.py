@@ -313,6 +313,7 @@ class EvalRunTest(IngestedEvalCase):
         preamble = markdown.split("| id |")[0]
         self.assertIn("vlm_enhanced=False", preamble)
         self.assertIn("enable_rerank=True", preamble)
+        self.assertIn("chunk_top_k=20", preamble)
         self.assertIn("fake-llm", preamble)
         self.assertIn("- RERANK_MODEL：fake-rerank", preamble)
 

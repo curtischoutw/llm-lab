@@ -1427,6 +1427,42 @@ class QueryRerankFailureTest(PipelineCase):
                 self.assertEqual(query_prompts(self.server.requests[before:]), [])
 
 
+class QueryRerankEnvironmentTest(PipelineCase):
+    """行程環境的 CHUNK_TOP_K、MIN_RERANK_SCORE（LightRAG 會讀）不會改變 rerank 的行為：rag_lab 明確指定 20 與 0.0。"""
+
+    # LightRAG 的預設值；刻意不從 rag_lab 取值，測試的期望要有獨立的來源（spec 的 rerank 規則）
+    CHUNK_TOP_K = 20
+    HOSTILE_ENV = {"MIN_RERANK_SCORE": "0.9", "CHUNK_TOP_K": "1"}
+
+    def setUp(self):
+        super().setUp()
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+        # 每個候選都給 0.5 分、筆數是 min(20, 候選數)：分數低於環境的 0.9 但高於預設的 0.0，只有環境變數生效時才會被濾掉
+        self.server.rerank_results = lambda count: [
+            {"index": i, "relevance_score": 0.5} for i in range(min(count, self.CHUNK_TOP_K))
+        ]
+
+    def test_rerank_asks_for_twenty_results_whatever_chunk_top_k_the_environment_says(self):
+        for mode in ("naive", "mix"):
+            with self.subTest(mode=mode):
+                before = len(self.server.requests)
+                result = self.query("What is Fake Entity Alpha?", "--mode", mode, **self.HOSTILE_ENV)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                calls = rerank_requests(self.server.requests[before:])
+                self.assertTrue(calls)
+                self.assertEqual([call["payload"].get("top_n") for call in calls], [self.CHUNK_TOP_K] * len(calls))
+
+    def test_chunks_scored_below_the_environments_min_rerank_score_still_reach_the_prompt(self):
+        for mode in ("naive", "mix"):
+            with self.subTest(mode=mode):
+                before = len(self.server.requests)
+                result = self.query(f"Which entity works together with Fake Entity Beta? ({mode})", "--mode", mode, **self.HOSTILE_ENV)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                (prompt,) = query_prompts(self.server.requests[before:])
+                self.assertIn("Fake Entity Alpha works together with Fake Entity Beta.", prompt)
+
+
 class QueryRerankFailureCacheTest(PipelineCase):
     """rerank 失敗不能在 LLM 快取留下沒經過 rerank 的答案：同一題之後 rerank 成功時要用 rerank 後的順序重新生成。"""
 

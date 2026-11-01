@@ -35,7 +35,8 @@ CLI 只負責參數與輸出格式，這裡負責行為。
 - 所有查詢一律 enable_rerank=True（沒有開關）：LightRAG 在依 token 上限截斷之前，先把候選 chunk 送到本機
   reranker 重新排序（models.rerank_model_func）。rerank 函式必須在 build_rag 建立 LightRAG 時傳入：mix 等圖譜模式
   處理 chunk 時讀的是儲存層初始化時拿到的設定副本，初始化之後才設不會生效（LightRAG 1.4.16）。匯入不用 rerank。
-  chunk_top_k、min_rerank_score 維持 LightRAG 的預設值。
+  chunk_top_k 固定 20、min_rerank_score 固定 0.0（等於 LightRAG 的預設值，但明確傳入：LightRAG 會讀行程環境的
+  CHUNK_TOP_K 與 MIN_RERANK_SCORE，不指定的話使用者 shell 裡的環境變數會悄悄改變查詢與 eval 的結果）。
 - rerank 失敗讓該次查詢失敗：LightRAG 在 rerank 例外、空結果、index 超出範圍時都會改用原本的排序、查詢照常成功，
   使用者會拿到沒經過 rerank 的答案卻不知道。做法比照寫入失敗：models.rerank_model_func 自己判定失敗並記進清單
   （models.collect_rerank_failures），_answer 與 VLM 增強路徑在 LightRAG 查詢結束後檢查清單，有失敗就拋 PipelineError
@@ -139,6 +140,11 @@ MINERU_BACKEND = "pipeline"
 # 統計文件狀態時每頁讀幾筆（LightRAG 的上限是 200）
 STATUS_PAGE_SIZE = 200
 
+# rerank 之後保留的 chunk 數與分數門檻。數值等於 LightRAG 的預設值，但 LightRAG 會讀行程環境的 CHUNK_TOP_K 與
+# MIN_RERANK_SCORE（import 時決定預設），所以明確傳入，查詢行為才不受使用者 shell 裡的環境變數影響。
+CHUNK_TOP_K = 20
+MIN_RERANK_SCORE = 0.0
+
 
 class PipelineError(RuntimeError):
     """匯入或查詢流程的可預期失敗；訊息直接給使用者看。"""
@@ -232,6 +238,7 @@ def build_rag(settings: Settings) -> RAGAnything:
             # rerank 函式必須在建立 LightRAG 時傳入：mix 等圖譜模式處理 chunk 時讀的是儲存層初始化時拿到的
             # 設定副本，初始化之後才設不會生效（LightRAG 1.4.16）。匯入不會用到它。
             "rerank_model_func": models.rerank_model_func,
+            "min_rerank_score": MIN_RERANK_SCORE,
         },
     )
 
@@ -600,6 +607,7 @@ def query_kwargs(settings: Settings) -> dict[str, object]:
     """
     return {
         "enable_rerank": True,
+        "chunk_top_k": CHUNK_TOP_K,
         "max_total_tokens": settings.query_max_total_tokens,
         "max_entity_tokens": settings.query_max_entity_tokens,
         "max_relation_tokens": settings.query_max_relation_tokens,
