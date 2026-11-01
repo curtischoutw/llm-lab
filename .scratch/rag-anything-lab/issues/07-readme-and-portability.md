@@ -22,4 +22,4 @@ README 中的每個指令都在 2026-10-27 執行過，結果全部 rc=0，紀�
 - 需要 server：以 README 的指令啟動兩個 server，再依序執行 `smoke_test.py`、`ingest` 單篇、`mkdir`／`ln -sf`／`ingest data/corpus`、兩個 `query`、`eval`。
 - `unittest`：Ran 69 tests OK。
 
-由 fresh-context agent 核對 README 與紀錄後，修正了 4 處：漏列 `graph` 子命令、重複實體漏寫「後綴」、耗時未說明量測條件，以及 LLM 建議規格寫錯（LightRAG 1.4.16 文件建議至少 32B 參數、context 至少 32K，不是「本地下限 Qwen3-30B-A3B」）。
+由 fresh-context agent 核對 README 與紀錄後，修正了 4 處：漏列 `graph` 子命令、重複實體漏寫「後綴」、耗時未說明量測條件，以及 LLM 建議規格寫錯（LightRAG 1.4.16 文件建議至少 32B 參數、context length 至少 32KB，不是「本地下限 Qwen3-30B-A3B」）。

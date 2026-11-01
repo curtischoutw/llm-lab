@@ -13,7 +13,7 @@
 - [x] README：新知識庫的實測數據（匯入耗時、記憶體、圖譜大小、問答結果），以及重建知識庫的完整指令順序。
 - [x] 架構文件：目錄表加入新的資料夾、下載腳本、新題目檔。
 - [x] 派一個沒參與撰寫的 agent，對照 repo 對 README、架構文件、`GLOSSARY.md` 做 read-back，結果不能有任何不符；無法確認的項目要列出理由。
-- [ ] 驗證完關閉 server 與 watchdog；輸出與 log 存在 `output/` 底下。
+- [x] 驗證完關閉 server 與 watchdog；輸出與 log 存在 `output/` 底下。
 - [x] 文字符合使用者的寫作規則。
 
 ## 評估結果（2026-11-01）
@@ -55,4 +55,4 @@
 - 約定條款（terms-01 △、terms-02 ✗）、跨卡比較（cross-01 △、cross-02 ✗）未通過。已知原因：terms-02 需要的 chunk 一直沒進 context；terms-01、cross-01、cross-02 的資料在 context 裡，但 4B 模型答錯（混入別張卡的條款、看錯例外清單）。
 - README 補上：台新知識庫的重建指令順序（第 4 節）、追加匯入到 311 份（第 5 節）、驗收結論。架構文件的目錄表補上 `data/taishin_credit_card/`、`questions.taishin.jsonl`、`.scratch/local-reranker/`、`.scratch/lightrag-env-overrides/` 與 `output/` 的台新子目錄。
 - read-back（2026-11-02）：沒參與撰寫的 agent 對照 repo 檢查 3 輪。第 1 輪 10 處不符、第 2 輪 7 處，修正後第 3 輪 6 句全部相符。沒修的 2 處與理由：`rag_storage/` 標成「知識庫本體」是在說明資料夾的內容，不是拿資料夾名稱稱呼知識庫；前一版知識庫「3 篇論文約 1.7 小時」出自 README 第 5 節的表格（1,472＋2,113＋2,676 s）。
-- 還沒勾的：「關閉 server 與 watchdog」，使用者要求先開著。
+- 2026-11-02 使用者同意後關閉兩個 server 與 watchdog（`output/taishin_full/lm_server3.log`、`vlm_server4.log`、`watchdog3/`）。
