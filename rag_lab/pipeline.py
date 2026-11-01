@@ -13,28 +13,48 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   LightRAG 的 adelete_by_doc_id 刪掉舊紀錄與部分結果，再重新匯入。LightRAG 遇到已存在的
   doc ID 不會重新排入，只會另寫一筆 status=failed 的 dup- 紀錄；刪除時保留 LLM 快取，
   上次已成功的 chunk 重跑時直接命中快取。
-- 開始處理前先確認要用的端點連得上（models.check_reachable），不可達就指出名稱與位址並立即
+- 開始處理前先確認要用的端點連得上（models.check_reachable；匯入檢查 LLM、VLM、Embedding，查詢另加 Rerank），不可達就指出名稱與位址並立即
   失敗，不要等到解析完才發現。圖／表／公式的描述失敗不會讓 RAG-Anything 報錯（processor 吞掉
-  後寫入 fallback 實體），所以匯入時把每個 modal processor 的 caption 函式包上計數
-  （models.count_description_failures），匯入後依 models.description_stats 判斷。有失敗時不拋例外
-  （拋了就看不到逐篇報告與其他篇的錯誤），而是記在 IngestSummary.description_error（含端點與
-  位址），由 CLI 印完報告後以非零碼結束。
+  後寫入 fallback 實體），描述後的內容寫入索引（儲存、embedding、實體抽取、合併）失敗也一樣：批次處理的例外被吞掉，
+  改走逐項處理的備援流程，最後文件仍標成 processed 且 multimodal_processed=True。所以匯入時把每個 modal processor
+  的 caption 函式包上計數（models.count_description_failures），LabRAGAnything 覆寫批次處理的方法計寫入失敗
+  （models.record_write_failure），匯入後依 models.description_stats 判斷。有失敗的文件在整批結束後改記成 failed
+  （_mark_swallowed_failures；批次途中改會被後面文件的插入蓋掉：LightRAG 插入新文件時會順便重跑索引裡 failed 的文件），
+  報告的 error 寫出原因，重新執行時不會被略過、會先清掉舊紀錄再重匯。有失敗時不拋例外（拋了就看不到逐篇報告與其他篇的
+  錯誤），而是記在該篇的 IngestReport.error 與 IngestSummary.description_error（含端點與位址），由 CLI 印完報告後
+  以非零碼結束。
+- 太大的表格（LabRAGAnything.parse_document，演算法見 rag_lab.tables）：RAG-Anything 把整張表放進同一個描述 prompt
+  與同一個 chunk，80 列 × 21 欄的表格讓 mlx_lm.server 記憶體不足而停掉。掛勾點選在 parse_document 的回傳值：
+  RAG-Anything 先依原始 content list 算好文件 ID、存好解析快取，LabRAGAnything 只改回傳給呼叫端的那一份，
+  所以文件 ID、快取 key 與快取內容都不變，已匯入的文件照常被略過；process_document_complete 與 _ingest_one 都經由
+  它取得 content list，每張小表因此是一個獨立的 table 項目，各自描述、各自成為一個 chunk。
 - 查詢走 LightRAG 的 aquery_llm（回 status 與 message），不用 aquery：後者在 LLM 失敗
   時回 None、非法模式也回 None。status 不是 success 或沒有答案內容一律當失敗。
 - 查詢預設 vlm_enhanced=False（只走 LLM、不讓 VLM 改寫答案；與 spec 一致，五種模式的答案才由
-  同一個模型產生、可比較），並固定 enable_rerank=False（spec 不用 reranker，預設值會讓每次
-  查詢都警告）。vlm_enhanced=True 時改走 RAGAnything.aquery_vlm_enhanced，並多檢查 VLM 端點。
+  同一個模型產生、可比較）。vlm_enhanced=True 時改走 RAGAnything.aquery_vlm_enhanced，並多檢查 VLM 端點。
+- 所有查詢一律 enable_rerank=True（沒有開關）：LightRAG 在依 token 上限截斷之前，先把候選 chunk 送到本機
+  reranker 重新排序（models.rerank_model_func）。rerank 函式必須在 build_rag 建立 LightRAG 時傳入：mix 等圖譜模式
+  處理 chunk 時讀的是儲存層初始化時拿到的設定副本，初始化之後才設不會生效（LightRAG 1.4.16）。匯入不用 rerank。
+  chunk_top_k 固定 20、min_rerank_score 固定 0.0（等於 LightRAG 的預設值，但明確傳入：LightRAG 會讀行程環境的
+  CHUNK_TOP_K 與 MIN_RERANK_SCORE，不指定的話使用者 shell 裡的環境變數會悄悄改變查詢與 eval 的結果）。
+- rerank 失敗讓該次查詢在產生答案之前中止：LightRAG 在 rerank 例外、空結果、index 超出範圍時都會改用原本的排序、查詢照常成功，
+  還會把沒經過 rerank 的答案寫進 LLM 快取（key 不含 rerank 結果），之後同一題 rerank 成功時命中這筆舊答案。做法：
+  models.rerank_model_func 判定失敗後拋出繼承 BaseException 的 models.RerankFailure，穿過 LightRAG（它只攔 Exception），
+  _answer 與 VLM 增強路徑攔下並轉成 PipelineError（訊息含端點位址與端點回報的錯誤，不含 API key）。因為 rerank 發生在答案
+  LLM 與 VLM 呼叫之前，中止時不會送出答案請求，也不會寫入答案快取。失敗只屬於那一次查詢：eval 的某一格失敗記在該格的
+  Cell.error，下一格重新開始。rerank 與 LightRAG 自己同時會失敗時只報 rerank（查詢在 rerank 就中止，後面的階段不會執行）。
 - eval（evaluate）在同一個 Session（同一個 RAGAnything 實例）上，依題目順序、五種模式順序依序查詢，
-  不是每格重新初始化。每格沿用 query 的 _answer（aquery_llm、QUERY_MAX_TOTAL_TOKENS、vlm_enhanced=False、
-  enable_rerank=False）；單格失敗（含沒有答案內容）記在該格的 Cell.error，不中斷其餘格。
-  開始前只檢查 LLM 與 Embedding 端點可達（eval 不走 VLM）。
+  不是每格重新初始化。每格沿用 query 的 _answer（aquery_llm、三個查詢 token 上限、vlm_enhanced=False、
+  enable_rerank=True）；單格失敗（含沒有答案內容）記在該格的 Cell.error，不中斷其餘格。
+  開始前檢查 LLM、Embedding 與 Rerank 端點可達（eval 不走 VLM）。
 - 多篇匯入時單篇失敗不中斷整批：失敗記在該篇的 IngestReport.error，其餘照常處理並保留，
   由 CLI 印出是哪一篇並以非零碼結束。重新執行時已完整處理的篇略過、失敗的篇重試。
-- 查詢 context 的 token 上限由 QUERY_MAX_TOTAL_TOKENS 決定：LightRAG 預設 30000，在 32 GB
-  的機器上 mlx_lm.server 處理 29.7k token 的 prompt 會 GPU 記憶體不足。LightRAG 的總上限不是
-  硬上限：chunk 預算＝總上限 − KG context，而 KG context 另受 entity／relation 上限（預設
-  6000／8000）限制。只降總上限時 chunk 預算可能變成負數、prompt 仍超過總上限，所以
-  entity／relation 上限照 LightRAG 預設對總上限的比例一起縮放（ASSUMPTION：沿用預設比例）。
+- 查詢 context 的 token 分配由三個設定決定：QUERY_MAX_TOTAL_TOKENS（總上限）、QUERY_MAX_ENTITY_TOKENS 與
+  QUERY_MAX_RELATION_TOKENS（圖譜 context 裡 entity 與 relation 各自的上限）。LightRAG 預設總上限 30000，
+  在 32 GB 的機器上 mlx_lm.server 處理 29.7k token 的 prompt 會 GPU 記憶體不足，所以總上限用 12000。
+  LightRAG 的總上限不是硬上限：chunk 預算＝總上限 − KG context，KG context 另受 entity／relation 上限
+  （預設 6000／8000）限制，所以三者直接取自設定、不依比例推算（ticket 13：依預設比例縮放時 mix 模式
+  在 12000 下只剩 3–8 個 chunk 的空間）。設定檢查保證 entity ＋ relation 小於總上限。
 - embedding 並行數由 EMBED_MAX_ASYNC 經 lightrag_kwargs 明確傳入，不依賴 LightRAG 自己讀的
   EMBEDDING_FUNC_MAX_ASYNC 環境變數：那個預設值在 import lightrag 時就決定，晚於 import 才載入的
   .env 不會生效。
@@ -59,6 +79,9 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   時在同一個 loop 上完整收尾並在 stderr 警告；正常 close 後取消，實例才能被回收。
 - 每次 ingest 開始時把 models 的 VLM 與描述統計清零，報告只計這一次；描述失敗計數的包裝在 Session
   初始化後只包一次（每次 ingest 都包會疊成多層，同一次失敗被計多次）。
+- Office 文件解析輸出的路徑含原檔路徑雜湊（_office_output_dir）：RAG-Anything 把 Office 轉成
+  `<輸出資料夾>/<主檔名>.pdf`，主檔名相同的文件會互相覆蓋。只對 Office 文件另給 output_dir；PDF 與圖片的
+  解析路徑（RAG-Anything 自己加 `<主檔名>_<雜湊>`）與解析快取 key 都不變，已匯入的文件重匯仍被略過。
 - 計時用 RAG-Anything 的 ProcessingCallback：解析＝第一次 parse_document（之後 process
   內的 parse 是快取命中）；建圖＝文字插入（含 LightRAG 實體抽取）；多模態＝圖表公式描述。
 - mineru 以 subprocess 依 PATH 尋找：PATH 上找不到時，把目前 Python 所在的 bin 目錄
@@ -67,13 +90,18 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   `mineru --version` 檢查 parser，查詢不解析文件也一樣要通過。
 
 已知極限：
+- rerank 失敗的偵測在 models.rerank_model_func：只涵蓋回應的格式與內容（請求例外、HTTP 錯誤、空結果、筆數、index、分數是否合法）。
+  格式正確但排序品質差，這裡看不出來。
 - 使用 RAGAnything 的私有方法 _ensure_lightrag_initialized：官方沒有公開的等價 API，
   但不先初始化就查詢會直接拋 ValueError。
 - VLM 增強查詢（aquery_vlm_enhanced）沒有 aquery_llm 的 status／message：LLM 失敗時只回 None，
   這裡只能報「沒有回傳答案內容」，看不到原例外文字（VLM 失敗則有端點與位址）。
 - 描述失敗不會讓 RAG-Anything 匯入失敗（圖片描述退成原始 dict 文字、表格與公式退成原始內容）；
-  這裡只能事後依 models.description_stats 計數判斷並回報，已寫入索引的退化描述不會自動修復，
-  文件也已被標為完整處理（重跑會略過，要刪索引重來）。
+  這裡只能事後依 models.description_stats 計數判斷並回報。文件改記成 failed，重新執行時先清掉舊紀錄再重匯
+  （已寫入索引的退化描述一併清掉）；批次途中程序被中斷時，還沒改記的文件仍是 processed（重跑會略過）。
+- 寫入失敗的計數在 RAGAnything 的私有方法 _process_multimodal_content_batch_type_aware 上：批次處理失敗後
+  RAG-Anything 會用逐項處理的備援流程重做一次，備援成功時文件也照樣記成失敗（保守，重跑時 LLM 快取讓重做很便宜）；
+  逐項處理本身的單項失敗不另外計數。改記狀態用私有方法 _upsert_doc_status。
 - Session 讀的是開啟當下的索引：開著的期間另一個 process 匯入的內容，這個 Session 看不到。
 - Session 是同步介面，不能直接在 Jupyter 或 async 函式裡使用（例外訊息附 asyncio.to_thread 的替代寫法）。
 - 呼叫途中被中斷（KeyboardInterrupt）後不保證 Session 狀態一致；中斷後應關閉 Session 再開新的。
@@ -83,6 +111,7 @@ Dependencies: raganything、lightrag-hku（由 raganything 帶入）。
 
 import asyncio
 import atexit
+import hashlib
 import os
 import shutil
 import sys
@@ -93,15 +122,14 @@ from pathlib import Path
 
 from lightrag import QueryParam
 from lightrag.base import DocStatus
-from lightrag.constants import DEFAULT_MAX_ENTITY_TOKENS, DEFAULT_MAX_RELATION_TOKENS, DEFAULT_MAX_TOTAL_TOKENS
 from lightrag.kg.shared_storage import finalize_share_data
 from raganything import RAGAnything, RAGAnythingConfig
 from raganything.callbacks import ProcessingCallback
 
-from rag_lab import models
+from rag_lab import models, tables
 from rag_lab.config import Settings, get_settings
 from rag_lab.evaluation import RETRIEVAL_MODES, Cell, Question
-from rag_lab.formats import describe_supported, is_supported
+from rag_lab.formats import describe_supported, is_office, is_supported
 
 # ==============================
 # 常數與例外
@@ -112,6 +140,11 @@ MINERU_BACKEND = "pipeline"
 
 # 統計文件狀態時每頁讀幾筆（LightRAG 的上限是 200）
 STATUS_PAGE_SIZE = 200
+
+# rerank 之後保留的 chunk 數與分數門檻。數值等於 LightRAG 的預設值，但 LightRAG 會讀行程環境的 CHUNK_TOP_K 與
+# MIN_RERANK_SCORE（import 時決定預設），所以明確傳入，查詢行為才不受使用者 shell 裡的環境變數影響。
+CHUNK_TOP_K = 20
+MIN_RERANK_SCORE = 0.0
 
 
 class PipelineError(RuntimeError):
@@ -135,6 +168,48 @@ def ensure_mineru_on_path() -> None:
         os.environ["PATH"] = os.pathsep.join(entries)
 
 
+class LabRAGAnything(RAGAnything):
+    """parse_document 之後把太大的表格縮短、切成小表的 RAGAnything（見 rag_lab.tables）。"""
+
+    async def parse_document(self, *args, **kwargs):
+        """解析文件（走解析快取），回傳的 content list 裡太大的表格已縮短或切成小表。
+
+        文件 ID 與解析快取都是 RAG-Anything 依原始 content list 算好、存好的：這裡只改回傳給呼叫端的那一份，
+        所以 ID、快取 key 與快取內容不變。
+
+        Args:
+            *args: 轉給 RAGAnything.parse_document。
+            **kwargs: 轉給 RAGAnything.parse_document。
+
+        Returns:
+            (content_list, doc_id)；doc_id 是原始 content list 的內容雜湊。
+        """
+        content_list, doc_id = await super().parse_document(*args, **kwargs)
+
+        def count_tokens(text: str) -> int:
+            return len(self.lightrag.tokenizer.encode(text))
+
+        return tables.limit_table_sizes(content_list, count_tokens), doc_id
+
+    async def _process_multimodal_content_batch_type_aware(self, *args, **kwargs):
+        """多模態內容的批次處理（描述完的 chunk 寫入索引）；失敗時先計數再照常重拋。
+
+        RAG-Anything 會吞掉這裡的例外、改走逐項處理的備援流程，最後仍把文件標成已完成，所以失敗要在這裡記下來。
+
+        Args:
+            *args: 轉給 RAGAnything 的同名方法。
+            **kwargs: 轉給 RAGAnything 的同名方法。
+
+        Raises:
+            Exception: 原本的例外，原樣往外拋（由 RAG-Anything 自己處理）。
+        """
+        try:
+            return await super()._process_multimodal_content_batch_type_aware(*args, **kwargs)
+        except Exception as exc:
+            models.record_write_failure(exc)
+            raise
+
+
 def build_rag(settings: Settings) -> RAGAnything:
     """依設定建立 RAGAnything 實例（尚未初始化儲存）。
 
@@ -142,7 +217,7 @@ def build_rag(settings: Settings) -> RAGAnything:
         settings: 已驗證的設定。
 
     Returns:
-        接好 LLM、VLM、embedding 三個模型函式的 RAGAnything。
+        接好 LLM、VLM、embedding 三個模型函式與 rerank 函式的 RAGAnything。
     """
     config = RAGAnythingConfig(
         working_dir=settings.working_dir,
@@ -150,7 +225,7 @@ def build_rag(settings: Settings) -> RAGAnything:
         parser="mineru",
         parse_method="auto",
     )
-    return RAGAnything(
+    return LabRAGAnything(
         config=config,
         llm_model_func=models.llm_model_func,
         vision_model_func=models.vision_model_func,
@@ -161,6 +236,10 @@ def build_rag(settings: Settings) -> RAGAnything:
             # 限制，沿用同一個設定值，避免本地 server 被打爆。
             "max_parallel_insert": settings.llm_max_async,
             "embedding_func_max_async": settings.embed_max_async,
+            # rerank 函式必須在建立 LightRAG 時傳入：mix 等圖譜模式處理 chunk 時讀的是儲存層初始化時拿到的
+            # 設定副本，初始化之後才設不會生效（LightRAG 1.4.16）。匯入不會用到它。
+            "rerank_model_func": models.rerank_model_func,
+            "min_rerank_score": MIN_RERANK_SCORE,
         },
     )
 
@@ -240,6 +319,8 @@ class IngestReport:
         total_seconds: 這一篇從開始到結束的總耗時。
         error: 失敗時的「型別：訊息」；None 表示成功。
         description_failed: 這一篇的圖／表／公式描述失敗次數。
+        write_failed: 這一篇的多模態內容寫入索引失敗次數。
+        doc_id: 內容雜湊的文件 ID（RAG-Anything 的 doc- 開頭）；解析前就失敗的文件為 None。
     """
 
     document: Path
@@ -251,6 +332,8 @@ class IngestReport:
     total_seconds: float = 0.0
     error: str | None = None
     description_failed: int = 0
+    write_failed: int = 0
+    doc_id: str | None = None
 
 
 @dataclass
@@ -266,7 +349,7 @@ class IngestSummary:
         vlm_ok: VLM 成功呼叫次數。
         vlm_failed: VLM 失敗呼叫次數。
         vlm_sample: 第一則 VLM 圖片描述（供人工判斷與原圖是否相符）。
-        description_error: 有圖／表／公式描述失敗時的完整說明（含端點與位址）；None 表示沒有。
+        description_error: 有圖／表／公式描述或多模態內容寫入失敗時的完整說明（含端點與位址）；None 表示沒有。
     """
 
     reports: list[IngestReport] = field(default_factory=list)
@@ -280,6 +363,24 @@ class IngestSummary:
     description_error: str | None = None
 
 
+def _office_output_dir(parser_output_dir: str, document: Path) -> Path:
+    """Office 文件專屬的解析輸出資料夾，讓主檔名相同的文件不共用轉檔 PDF 與解析結果。
+
+    RAG-Anything 把 Office 文件轉成 `<輸出資料夾>/<主檔名>.pdf`，MinerU 的解析資料夾再依這個 PDF 的路徑命名，
+    所以 `a.docx` 與 `a.pptx`（或兩份 `a.docx`）會共用同一個 PDF 與解析資料夾。資料夾名稱含原檔絕對路徑的
+    雜湊（與 RAG-Anything 對 PDF 與圖片的 `<主檔名>_<雜湊>` 做法相同），同一份文件每次都落在同一個資料夾。
+
+    Args:
+        parser_output_dir: PARSER_OUTPUT_DIR。
+        document: Office 文件路徑。
+
+    Returns:
+        `<parser_output_dir>/office/<主檔名>_<原檔絕對路徑 md5 的前 8 碼>`。
+    """
+    digest = hashlib.md5(str(document.resolve()).encode()).hexdigest()[:8]
+    return Path(parser_output_dir) / "office" / f"{document.stem}_{digest}"
+
+
 async def _ingest_one(rag: RAGAnything, document: Path) -> IngestReport:
     """匯入單篇文件；已完整處理就略過，先前未完成的先清掉舊紀錄再重匯。
 
@@ -288,21 +389,26 @@ async def _ingest_one(rag: RAGAnything, document: Path) -> IngestReport:
         document: 文件路徑。
 
     Returns:
-        這一篇的 IngestReport（total_seconds 與 description_failed 由呼叫端填入）。
+        這一篇的 IngestReport（total_seconds、description_failed、write_failed 由呼叫端填入）。圖／表／公式描述
+        或多模態內容寫入失敗時，文件在索引裡改記成 failed（重新執行不會被略過），report.error 寫出原因。
 
     Raises:
         PipelineError: 解析不出內容，或清除舊紀錄失敗。
         Exception: MinerU、LLM 等匯入過程的失敗（由 _ingest 轉成該篇的 report.error）。
     """
     timer = StageTimer()
+    description_before, write_before = models.failure_counts()
     rag.callback_manager.register(timer)
     try:
-        parse_kwargs = {"backend": MINERU_BACKEND}
+        parse_kwargs: dict[str, object] = {"backend": MINERU_BACKEND}
+        if is_office(document):
+            # output_dir 不在 RAG-Anything 的解析快取 key 裡，所以已匯入的 Office 文件換了輸出資料夾仍認得出來、不重新解析
+            parse_kwargs["output_dir"] = str(_office_output_dir(rag.config.parser_output_dir, document))
         content_list, doc_id = await rag.parse_document(str(document), **parse_kwargs)
         if not content_list:
             raise PipelineError(f"MinerU 沒有從 {document.name} 解析出任何內容（輸出資料夾：{rag.config.parser_output_dir}）")
         if await rag.is_document_fully_processed(doc_id):
-            return IngestReport(document, skipped=True, parse_seconds=timer.parse_seconds or 0.0)
+            return IngestReport(document, skipped=True, parse_seconds=timer.parse_seconds or 0.0, doc_id=doc_id)
         if await rag.lightrag.doc_status.get_by_id(doc_id) is not None:
             deletion = await rag.lightrag.adelete_by_doc_id(doc_id)
             if deletion.status != "success":
@@ -312,14 +418,45 @@ async def _ingest_one(rag: RAGAnything, document: Path) -> IngestReport:
         await rag.process_document_complete(str(document), **parse_kwargs)
     finally:
         rag.callback_manager.unregister(timer)
-    return IngestReport(
+    report = IngestReport(
         document,
         skipped=False,
         parse_seconds=timer.parse_seconds or 0.0,
         graph_seconds=timer.text_insert_seconds,
         multimodal_seconds=timer.multimodal_seconds,
         multimodal_items=timer.multimodal_items,
+        doc_id=doc_id,
     )
+    description_after, write_after = models.failure_counts()
+    if description_after > description_before or write_after > write_before:
+        # RAG-Anything 吞掉這些失敗，仍把文件標成 processed 且 multimodal_processed=True；
+        # 這裡只寫出原因，_ingest 在整批結束後把它改記成 failed
+        report.error = (
+            models.describe_failures(description_after - description_before, write_after - write_before)
+            + "。文件已記成失敗，修好端點後重新執行 ingest 會重試這份文件"
+        )
+    return report
+
+
+async def _mark_swallowed_failures(rag: RAGAnything, reports: list[IngestReport]) -> None:
+    """把圖／表／公式描述或多模態寫入失敗的文件改記成 failed，下次 ingest 就不會略過它們。
+
+    要等整批結束才改：LightRAG 每次插入新文件時會順便重跑索引裡所有 failed 的文件，並把狀態改回 processed
+    （而且不帶 multimodal_processed），在批次途中改記會被後面的文件蓋掉。
+
+    Args:
+        rag: 已初始化的 RAGAnything。
+        reports: 這一批的報告；有 doc_id 且有 error 的才處理（解析前就失敗的沒有 doc_id）。
+    """
+    for report in reports:
+        if report.doc_id is not None and report.error is not None:
+            await rag._upsert_doc_status(
+                report.doc_id,
+                str(report.document),
+                status=DocStatus.FAILED,
+                error_msg=report.error,
+                multimodal_processed=False,
+            )
 
 
 async def _graph_stats(rag: RAGAnything) -> tuple[int, int, int]:
@@ -407,7 +544,7 @@ async def _ingest(rag: RAGAnything, documents: list[Path], settings: Settings) -
     models.reset_stats()
     summary = IngestSummary()
     for document in documents:
-        failed_before = models.description_stats.failed
+        description_before, write_before = models.failure_counts()
         started = time.perf_counter()
         try:
             report = await _ingest_one(rag, document)
@@ -415,19 +552,21 @@ async def _ingest(rag: RAGAnything, documents: list[Path], settings: Settings) -
             # 單篇失敗不中斷整批：記下是哪一篇、為什麼，CLI 據此印出並以非零碼結束
             report = IngestReport(document, skipped=False, parse_seconds=0.0, error=f"{type(exc).__name__}: {exc}")
         report.total_seconds = time.perf_counter() - started
-        report.description_failed = models.description_stats.failed - failed_before
+        report.description_failed = models.description_stats.failed - description_before
+        report.write_failed = models.description_stats.write_failed - write_before
         summary.reports.append(report)
+    await _mark_swallowed_failures(rag, summary.reports)
     summary.entities, summary.relations, summary.belongs_to = await _graph_stats(rag)
     summary.status_counts = await _status_counts(rag)
     stats = models.vision_stats
     summary.vlm_ok, summary.vlm_failed, summary.vlm_sample = stats.ok, stats.failed, stats.sample
     described = models.description_stats
-    if described.failed:
+    if described.failed or described.write_failed:
+        affected = sum(1 for report in summary.reports if report.description_failed or report.write_failed)
         summary.description_error = (
-            f"匯入完成，但有 {described.failed} 次圖／表／公式描述呼叫失敗；RAG-Anything 不會因此報錯，"
-            f"受影響項目的描述已退化成原始內容並寫入索引，文件仍標為完整處理（重新執行會略過）。"
-            f"最近錯誤：{described.last_error}。"
-            f"請修好端點後刪除 {settings.working_dir} 與 {settings.parser_output_dir} 再重新匯入。"
+            f"有 {affected} 份文件的圖／表／公式描述或多模態內容寫入失敗（{models.describe_failures(described.failed, described.write_failed)}）。"
+            f"RAG-Anything 不會因此報錯；這些文件已記成失敗，修好端點後重新執行同一個 ingest 就會重試，"
+            f"不需要刪除 {settings.working_dir} 或 {settings.parser_output_dir}。"
         )
     return summary
 
@@ -458,34 +597,48 @@ def ingest(documents: list[Path]) -> IngestSummary:
 # ==============================
 
 
-def query_kwargs(max_total_tokens: int) -> dict[str, object]:
-    """組出 QueryParam 的共用參數，entity／relation 的 token 上限依 LightRAG 預設比例隨總上限縮放。
+def query_kwargs(settings: Settings) -> dict[str, object]:
+    """組出 QueryParam 的共用參數，token 上限直接取自設定。
 
     Args:
-        max_total_tokens: 查詢 context 的總 token 上限（QUERY_MAX_TOTAL_TOKENS）。
+        settings: 已驗證的設定（取 QUERY_MAX_TOTAL_TOKENS、QUERY_MAX_ENTITY_TOKENS、QUERY_MAX_RELATION_TOKENS）。
 
     Returns:
         可展開給 QueryParam（或 RAGAnything.aquery_vlm_enhanced）的參數 dict，不含 mode。
     """
     return {
-        "enable_rerank": False,
-        "max_total_tokens": max_total_tokens,
-        "max_entity_tokens": max_total_tokens * DEFAULT_MAX_ENTITY_TOKENS // DEFAULT_MAX_TOTAL_TOKENS,
-        "max_relation_tokens": max_total_tokens * DEFAULT_MAX_RELATION_TOKENS // DEFAULT_MAX_TOTAL_TOKENS,
+        "enable_rerank": True,
+        "chunk_top_k": CHUNK_TOP_K,
+        "max_total_tokens": settings.query_max_total_tokens,
+        "max_entity_tokens": settings.query_max_entity_tokens,
+        "max_relation_tokens": settings.query_max_relation_tokens,
     }
 
 
-def query_param(mode: str, max_total_tokens: int) -> QueryParam:
+def query_param(mode: str, settings: Settings) -> QueryParam:
     """組出查詢參數（見 query_kwargs）。
 
     Args:
         mode: 檢索模式。
-        max_total_tokens: 查詢 context 的總 token 上限（QUERY_MAX_TOTAL_TOKENS）。
+        settings: 已驗證的設定。
 
     Returns:
         QueryParam。
     """
-    return QueryParam(mode=mode, **query_kwargs(max_total_tokens))
+    return QueryParam(mode=mode, **query_kwargs(settings))
+
+
+def _rerank_failed(failure: models.RerankFailure, mode: str) -> PipelineError:
+    """把穿過 LightRAG 的 RerankFailure 轉成查詢失敗的例外。
+
+    Args:
+        failure: models.rerank_model_func 拋出的 RerankFailure（訊息已含端點位址與原因，不含 API key）。
+        mode: 檢索模式（寫進錯誤訊息）。
+
+    Returns:
+        PipelineError：查詢在產生答案之前就中止。
+    """
+    return PipelineError(f"查詢失敗（mode={mode}）：rerank 失敗：{failure}")
 
 
 async def _answer(rag: RAGAnything, question: str, mode: str, settings: Settings) -> str:
@@ -495,15 +648,19 @@ async def _answer(rag: RAGAnything, question: str, mode: str, settings: Settings
         rag: 已完成 _initialize 的實例。
         question: 問題文字。
         mode: 檢索模式。
-        settings: 已驗證的設定（取 QUERY_MAX_TOTAL_TOKENS）。
+        settings: 已驗證的設定（取三個查詢 token 上限）。
 
     Returns:
         答案文字（非空字串）。
 
     Raises:
-        PipelineError: LightRAG 回報查詢失敗（訊息含原例外文字），或成功但沒有答案內容。
+        PipelineError: rerank 失敗（LightRAG 已改用原本的排序，這裡不接受），LightRAG 回報查詢失敗
+            （訊息含原例外文字），或成功但沒有答案內容。
     """
-    result = await rag.lightrag.aquery_llm(question, query_param(mode, settings.query_max_total_tokens))
+    try:
+        result = await rag.lightrag.aquery_llm(question, query_param(mode, settings))
+    except models.RerankFailure as exc:
+        raise _rerank_failed(exc, mode) from exc
     if result.get("status") != "success":
         raise PipelineError(f"查詢失敗（mode={mode}）：{result.get('message')}")
     answer = (result.get("llm_response") or {}).get("content")
@@ -527,15 +684,18 @@ async def _query(rag: RAGAnything, question: str, mode: str, vlm_enhanced: bool,
 
     Raises:
         EndpointError: 開始前端點不可達，或 VLM 呼叫失敗。
-        PipelineError: 查詢失敗（含查詢途中 LLM 失敗），或沒有答案內容。
+        PipelineError: rerank 失敗，查詢失敗（含查詢途中 LLM 失敗），或沒有答案內容。
     """
-    models.check_reachable("LLM", "Embedding", *(["VLM"] if vlm_enhanced else []))
+    models.check_reachable("LLM", "Embedding", "Rerank", *(["VLM"] if vlm_enhanced else []))
     if not vlm_enhanced:
         return await _answer(rag, question, mode, settings)
     # RAG-Anything 的 VLM 增強路徑：先取回檢索 prompt、把圖片路徑換成 base64 圖片再交給 VLM。
     # 它沒有 aquery_llm 的 status 欄位；失敗時回 None（LLM 失敗的訊息 LightRAG 已吞掉），
     # VLM 失敗則拋 EndpointError（含端點與位址）。
-    answer = await rag.aquery_vlm_enhanced(question, mode=mode, **query_kwargs(settings.query_max_total_tokens))
+    try:
+        answer = await rag.aquery_vlm_enhanced(question, mode=mode, **query_kwargs(settings))
+    except models.RerankFailure as exc:
+        raise _rerank_failed(exc, mode) from exc
     if not answer or not isinstance(answer, str):
         raise PipelineError(f"查詢沒有回傳答案內容（mode={mode}，vlm_enhanced=True）")
     return answer
@@ -554,13 +714,12 @@ def query(question: str, mode: str, vlm_enhanced: bool = False) -> str:
 
     Raises:
         ValueError: mode 不是五種檢索模式之一。
-        PipelineError: 初始化失敗、查詢失敗，或沒有答案內容。
+        PipelineError: 初始化失敗、查詢失敗（含 rerank 失敗），或沒有答案內容。
         EndpointError: 開始前端點不可達，或 VLM 呼叫失敗。
         SessionError: 已有開啟中的 Session，或在不允許的環境呼叫（見 Session）。
     """
-    if vlm_enhanced:
-        # Session 建構時只檢查 LLM 與 embedding；VLM 在開 Session 之前先檢查
-        models.check_reachable("VLM")
+    # Session 建構時只檢查 LLM 與 embedding；rerank（查詢一律用）與 VLM（vlm_enhanced 時）在開 Session 之前先檢查
+    models.check_reachable("Rerank", *(["VLM"] if vlm_enhanced else []))
     with Session() as session:
         return session.query(question, mode, vlm_enhanced)
 
@@ -582,9 +741,9 @@ async def _evaluate(rag: RAGAnything, questions: list[Question], settings: Setti
         cells[i][j] 是第 i 題在 RETRIEVAL_MODES[j] 的結果。
 
     Raises:
-        EndpointError: LLM 或 embedding 端點在開始前就不可達。
+        EndpointError: LLM、embedding 或 rerank 端點在開始前就不可達。
     """
-    models.check_reachable("LLM", "Embedding")
+    models.check_reachable("LLM", "Embedding", "Rerank")
     cells: list[list[Cell]] = []
     for question in questions:
         row: list[Cell] = []
@@ -602,7 +761,7 @@ def evaluate(questions: list[Question]) -> list[list[Cell]]:
     """對每一題以五種檢索模式各查詢一次：開一個 Session、跑完全部題目、關閉。
 
     五個模式與所有題目共用同一個 RAGAnything 實例，依題目順序、模式順序依序執行。
-    查詢固定 vlm_enhanced=False、enable_rerank=False，並沿用 query 的 QUERY_MAX_TOTAL_TOKENS。
+    查詢固定 vlm_enhanced=False、enable_rerank=True，並沿用 query 的三個查詢 token 上限。
 
     Args:
         questions: 已驗證的題目。
@@ -611,10 +770,12 @@ def evaluate(questions: list[Question]) -> list[list[Cell]]:
         cells[i][j] 是第 i 題在 RETRIEVAL_MODES[j] 的結果；單格失敗記在該格的 error。
 
     Raises:
-        EndpointError: LLM 或 embedding 端點在開始前就不可達。
+        EndpointError: LLM、embedding 或 rerank 端點在開始前就不可達。
         PipelineError: 初始化失敗。
         SessionError: 已有開啟中的 Session，或在不允許的環境呼叫（見 Session）。
     """
+    # Session 建構時只檢查 LLM 與 embedding；rerank 在開 Session 之前先檢查
+    models.check_reachable("Rerank")
     with Session() as session:
         return session.evaluate(questions)
 
@@ -768,7 +929,7 @@ class Session:
             ValueError: mode 不是五種檢索模式之一。
             SessionError: Session 已關閉，或從不允許的執行緒／環境呼叫。
             EndpointError: 開始前端點不可達，或 VLM 呼叫失敗。
-            PipelineError: 查詢失敗，或沒有答案內容。
+            PipelineError: 查詢失敗（含 rerank 失敗），或沒有答案內容。
         """
         self._check_usable()
         # LightRAG 還接受 bypass（不檢索、直接問 LLM），回來的答案看起來像 RAG 的結果；只允許五種檢索模式
@@ -787,7 +948,7 @@ class Session:
 
         Raises:
             SessionError: Session 已關閉，或從不允許的執行緒／環境呼叫。
-            EndpointError: LLM 或 embedding 端點在開始前就不可達。
+            EndpointError: LLM、embedding 或 rerank 端點在開始前就不可達。
         """
         self._check_usable()
         return self._runner.run(_evaluate(self._rag, questions, self._settings))

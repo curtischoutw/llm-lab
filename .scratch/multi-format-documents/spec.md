@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: resolved（tickets 01–06 全部完成；後續的檢索改善（B）已取消）
 
 # Spec：知識庫擴充到 PPT、Word、Excel 與圖片
 

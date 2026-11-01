@@ -18,6 +18,7 @@
 Dependencies: 標準函式庫；Pillow（RAG-Anything 的依賴，只用來產生測試用的小圖）。
 """
 
+import hashlib
 import json
 import os
 import re
@@ -28,10 +29,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from html.parser import HTMLParser
 from pathlib import Path
 
+import tiktoken
 from PIL import Image
 
+from tests.fake_mineru import BIG_TABLE_COLUMNS, BIG_TABLE_ROWS, BIG_TABLE_SPAN_START, big_table_html
 from tests.fake_openai_server import CHAT_REPLY, VISION_REPLY, FakeOpenAIServer
 from tests.test_cli import REPO_ROOT, SECRET, run_cli, valid_env
 
@@ -54,6 +58,8 @@ SUPPORTED_EXTENSIONS = (
     ".gif",
     ".webp",
 )
+# 表格送去描述的內容（table_body）的 token 上限；這是 ticket 12 決定的上限值，不從 rag_lab 取值，測試的期望要有獨立的來源
+TABLE_BODY_MAX_TOKENS = 800
 # 端點失敗後應在這個秒數內結束（正常約 10 秒，含 LightRAG 限流器 shutdown 最多等 5 秒）
 HANG_TIMEOUT = 60
 # .env 內以字面 \n 表示換行；CLI 讀進來後是真正的換行
@@ -102,6 +108,138 @@ def write_office(path: Path) -> Path:
     """
     path.write_text(f"fake office document: {path.name}\n", encoding="utf-8")
     return path
+
+
+def parsed_office_sources(output_dir: Path) -> list[str]:
+    """列出 output_dir 底下每份解析結果記下的 Office 來源（假 LibreOffice 寫進 PDF、假 mineru 帶進內容清單的那一行）。
+
+    Args:
+        output_dir: PARSER_OUTPUT_DIR。
+
+    Returns:
+        每個 `*_content_list.json` 各一個來源文字，依文字排序；沒有來源標記的內容清單（PDF、圖片）不列入。
+    """
+    prefix = "Converted from Office document: "
+    sources = []
+    for path in output_dir.rglob("*_content_list.json"):
+        for block in json.loads(path.read_text(encoding="utf-8")):
+            if block.get("text", "").startswith(prefix):
+                sources.append(block["text"].removeprefix(prefix))
+    return sorted(sources)
+
+
+class _CellReader(HTMLParser):
+    """把 HTML 表格讀成「每列是 (文字, rowspan, colspan) 的清單」；沒寫的 rowspan／colspan 當作 1。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: list[list[tuple[str, int, int]]] = []
+        self._cell: list | None = None
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if tag == "tr":
+            self.rows.append([])
+        elif tag == "td":
+            self._cell = ["", int(attributes.get("rowspan", 1)), int(attributes.get("colspan", 1))]
+
+    def handle_data(self, data):
+        if self._cell is not None:
+            self._cell[0] += data
+
+    def handle_endtag(self, tag):
+        if tag == "td" and self._cell is not None:
+            self.rows[-1].append((self._cell[0], self._cell[1], self._cell[2]))
+            self._cell = None
+
+
+def table_rows(html: str) -> list[list[tuple[str, int, int]]]:
+    """讀出表格每一列的儲存格。
+
+    Args:
+        html: `<table>...</table>`。
+
+    Returns:
+        每列一個 (文字, rowspan, colspan) 清單。
+    """
+    reader = _CellReader()
+    reader.feed(html)
+    return reader.rows
+
+
+def table_bodies(requests: list[dict]) -> list[str]:
+    """取出每個表格描述請求裡的 table_body（prompt 中 `Body:` 之後的 `<table>...</table>`）。
+
+    Args:
+        requests: FakeOpenAIServer.requests。
+
+    Returns:
+        依請求順序排列的 table_body；不是表格描述的請求不列入。
+    """
+    bodies = []
+    for request in requests:
+        if request["path"] != "/v1/chat/completions":
+            continue
+        for message in request["payload"]["messages"]:
+            match = re.search(r"Body: (<table>.*</table>)", message["content"], re.DOTALL) if isinstance(message["content"], str) else None
+            if match:
+                bodies.append(match.group(1))
+    return bodies
+
+
+# 假 server 抽出的圖譜固定是 Alpha、Beta 兩個 entity 與一條 relation。這三段描述只會出現在圖譜 context，
+# 不會出現在文字 chunk，所以查詢 prompt 含不含它們，就是 LightRAG 實際用了哪個 entity／relation 上限的觀察結果。
+ALPHA_DESCRIPTION = "Fake Entity Alpha is a made-up concept."
+BETA_DESCRIPTION = "Fake Entity Beta is a made-up method."
+LINK_DESCRIPTION = "Alpha is related to Beta."
+
+
+# multichunk 文件會切出約 20 個文字 chunk，每個約 80 句。token 上限設成只放得下一個 chunk 時，哪個 chunk 進 prompt
+# 完全由 rerank 的順序決定：RERANK_MARKER 這一句落在其中一個 chunk 的中段（不在 chunk 之間的重疊範圍），
+# 沒有 rerank 規則時（預設保持候選順序）那個 chunk 排在後面、進不了 prompt。
+RERANK_MARKER = "Fake Entity 7-200 relates to Fake Entity 7-201."
+RERANK_BUDGET_ENV = {
+    "QUERY_MAX_TOTAL_TOKENS": "3000",
+    "QUERY_MAX_ENTITY_TOKENS": "100",
+    "QUERY_MAX_RELATION_TOKENS": "100",
+}
+
+
+def query_prompts(requests: list[dict]) -> list[str]:
+    """取出查詢時送給模型產生答案的 prompt 文字（不含關鍵字抽取請求）。
+
+    Args:
+        requests: 假 server 記錄的請求。
+
+    Returns:
+        每個答案請求（純文字或帶圖片）所有訊息的文字串接。
+    """
+    prompts = []
+    for request in requests:
+        payload = request["payload"]
+        if request["path"] != "/v1/chat/completions" or payload.get("response_format"):
+            continue
+        texts = []
+        for message in payload["messages"]:
+            content = message["content"]
+            if isinstance(content, list):
+                texts.extend(part["text"] for part in content if part.get("type") == "text")
+            else:
+                texts.append(content)
+        prompts.append("\n".join(texts))
+    return prompts
+
+
+def rerank_requests(requests: list[dict]) -> list[dict]:
+    """取出送到 rerank endpoint 的請求。
+
+    Args:
+        requests: 假 server 記錄的請求。
+
+    Returns:
+        路徑為 /v1/rerank 的請求，依收到順序排列。
+    """
+    return [r for r in requests if r["path"] == "/v1/rerank"]
 
 
 class PipelineCase(unittest.TestCase):
@@ -163,6 +301,189 @@ class PipelineCase(unittest.TestCase):
     def query(self, question: str = "What is Fake Entity Alpha?", *extra: str, **overrides: str):
         """執行 `query`。"""
         return run_cli(["query", question, *extra], self.env(**overrides), timeout=INGEST_TIMEOUT)
+
+
+# ==============================
+# 太大的表格
+# ==============================
+
+
+class OversizedTableTest(PipelineCase):
+    def setUp(self):
+        super().setUp()
+        self.big = self.tmp / "bigtable.pdf"
+        self.big.write_bytes(b"%PDF-1.4 big table")
+
+    def test_a_big_table_is_described_as_several_small_tables_that_together_cover_every_row(self):
+        result = self.ingest(self.big)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        bodies = table_bodies(self.server.requests)
+        self.assertGreater(len(bodies), 1, "太大的表格應該拆成多張小表，每張各送一次描述")
+        encoding = tiktoken.encoding_for_model("gpt-4o-mini")
+        for body in bodies:
+            self.assertLessEqual(len(encoding.encode(body)), TABLE_BODY_MAX_TOKENS)
+            for column in range(BIG_TABLE_COLUMNS):
+                self.assertIn(f">H{column}<", body, "每張小表都要重複表頭列")
+        joined = "\n".join(bodies)
+        for row in range(BIG_TABLE_ROWS):
+            self.assertIn(f">R{row}C1<", joined, f"第 {row} 列沒有出現在任何一張小表")
+
+    def test_cell_text_and_merged_cells_are_unchanged_after_shortening_and_splitting(self):
+        self.assertEqual(self.ingest(self.big).returncode, 0)
+        original_rows = table_rows(big_table_html())
+        header, data_rows = original_rows[0], original_rows[1:]
+        described_rows = []
+        for body in table_bodies(self.server.requests):
+            rows = table_rows(body)
+            self.assertEqual(rows[0], header)
+            described_rows.extend(rows[1:])
+        self.assertEqual(described_rows, data_rows)
+
+    def test_rows_joined_by_a_rowspan_that_alone_exceeds_the_limit_are_split_with_the_spanning_cell_repeated(self):
+        spanning = self.tmp / "bigspan.pdf"
+        spanning.write_bytes(b"%PDF-1.4 big span")
+        self.assertEqual(self.ingest(spanning).returncode, 0)
+        bodies = table_bodies(self.server.requests)
+        encoding = tiktoken.encoding_for_model("gpt-4o-mini")
+        self.assertGreater(len(bodies), 2)
+        for body in bodies:
+            self.assertLessEqual(len(encoding.encode(body)), TABLE_BODY_MAX_TOKENS)
+            # 每一列的欄數（含上方 rowspan 佔到的欄）都是 BIG_TABLE_COLUMNS：切開後欄位仍然對齊
+            occupied: dict[int, int] = {}
+            for index, row in enumerate(table_rows(body)):
+                width = sum(colspan for _, _, colspan in row) + sum(1 for last in occupied.values() if last >= index)
+                self.assertEqual(width, BIG_TABLE_COLUMNS, f"第 {index} 列欄數不對：{row}")
+                for column, (_, rowspan, _) in enumerate(row):
+                    if rowspan > 1:
+                        occupied[100 + column] = index + rowspan - 1
+        described = [row for body in bodies for row in table_rows(body)[1:]]
+        for row_number in range(BIG_TABLE_ROWS):
+            self.assertTrue(
+                any((f"R{row_number}C1", 1, 1) in row for row in described), f"第 {row_number} 列沒有出現在任何一張小表"
+            )
+        # 跨列的那一格：文字出現在每一張涵蓋它的小表，沒有被丟掉
+        for body in bodies:
+            if f">R{BIG_TABLE_SPAN_START + 1}C1<" in body:
+                self.assertIn(f">R{BIG_TABLE_SPAN_START}C0<", body)
+
+    def test_default_span_attributes_are_dropped_but_real_spans_stay(self):
+        self.assertEqual(self.ingest(self.big).returncode, 0)
+        joined = "\n".join(table_bodies(self.server.requests))
+        self.assertNotIn("rowspan=1", joined)
+        self.assertNotIn("colspan=1", joined)
+        self.assertIn("rowspan=2", joined)
+
+    def test_rows_joined_by_a_rowspan_stay_in_the_same_small_table(self):
+        self.assertEqual(self.ingest(self.big).returncode, 0)
+        for body in table_bodies(self.server.requests):
+            for first in range(0, BIG_TABLE_ROWS, 10):
+                # 第 first 列的第一格 rowspan=2，跨到第 first+1 列
+                self.assertEqual(f">R{first}C0<" in body, f">R{first + 1}C1<" in body, f"跨列的兩列被拆開：{first}")
+
+    def test_a_small_table_is_described_with_its_body_unchanged(self):
+        # 不大的表格連預設的 rowspan=1 colspan=1 都不動：已匯入文件重新處理時送去描述的內容和以前一樣
+        small = self.tmp / "spans.pdf"
+        small.write_bytes(b"%PDF-1.4 small table")
+        self.assertEqual(self.ingest(small).returncode, 0)
+        self.assertEqual(
+            table_bodies(self.server.requests),
+            [
+                "<table><tr><td rowspan=1 colspan=1>a</td><td rowspan=1 colspan=1>b</td></tr>"
+                "<tr><td rowspan=1 colspan=1>1</td><td rowspan=1 colspan=1>2</td></tr></table>"
+            ],
+        )
+
+    def test_document_id_and_parse_cache_come_from_the_original_table(self):
+        self.assertEqual(self.ingest(self.big).returncode, 0)
+        content_list_path = next(self.output_dir.rglob("bigtable_content_list.json"))
+        original = json.loads(content_list_path.read_text(encoding="utf-8"))
+        # RAG-Anything 的文件 ID 規則：各區塊的識別文字用換行串起來取 md5，前綴 doc-（不從 rag_lab 取值）
+        parts = []
+        for block in original:
+            if block["type"] == "text":
+                parts.append(block["text"].strip())
+            elif block["type"] == "image":
+                # RAG-Anything 讀進來時把圖片的相對路徑換成絕對路徑
+                parts.append(f"image:{(content_list_path.parent / block['img_path']).resolve()}")
+            elif block["type"] == "table":
+                parts.append(f"table:{block['table_body']}")
+            else:
+                parts.append(f"equation:{block['text']}")
+        expected_id = "doc-" + hashlib.md5("\n".join(parts).encode()).hexdigest()
+        statuses = json.loads((self.working_dir / "kv_store_doc_status.json").read_text(encoding="utf-8"))
+        self.assertEqual(list(statuses), [expected_id])
+        cache = json.loads((self.working_dir / "kv_store_parse_cache.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(cache), 1)
+        (entry,) = cache.values()
+        self.assertEqual(entry["doc_id"], expected_id)
+        cached_tables = [block for block in entry["content_list"] if block["type"] == "table"]
+        self.assertEqual([block["table_body"] for block in cached_tables], [original[3]["table_body"]])
+
+    def test_reingesting_a_document_with_a_big_table_skips_it_and_calls_no_model(self):
+        self.assertEqual(self.ingest(self.big).returncode, 0)
+        requests_after_first = len(self.server.requests)
+        second = self.ingest(self.big)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertIn("略過", second.stdout)
+        self.assertEqual(len(self.server.requests), requests_after_first)
+
+
+class DescriptionFailureTest(PipelineCase):
+    """圖／表／公式描述失敗、多模態內容寫入索引失敗：文件記成失敗，重新執行會重試。"""
+
+    def doc_statuses(self) -> dict[str, dict]:
+        return json.loads((self.working_dir / "kv_store_doc_status.json").read_text(encoding="utf-8"))
+
+    def assert_failed_then_retried(self, failed):
+        """failed 是失敗的那次 ingest；確認它被記成失敗，修好 server 後重新執行會重試並完成。"""
+        self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+        self.assertIn("匯入失敗：paper.pdf", failed.stderr)
+        self.assertIn("重新執行", failed.stderr)
+        self.assertIn("不需要刪除", failed.stderr, "文件已記成失敗，重新執行就會重試；要告訴使用者不必刪資料重來")
+        self.assertNotIn("請修好端點後刪除", failed.stderr)
+        self.assertEqual([record["status"] for record in self.doc_statuses().values()], ["failed"])
+
+        self.server.fail_chat_containing = None
+        self.server.fail_embed_containing = None
+        requests_before = len(self.server.requests)
+        retried = self.ingest()
+        self.assertEqual(retried.returncode, 0, retried.stdout + retried.stderr)
+        self.assertNotIn("略過", retried.stdout, "失敗的文件不能被當成已完成而略過")
+        self.assertGreater(len(self.server.requests), requests_before)
+        self.assertEqual([record["status"] for record in self.doc_statuses().values()], ["processed"])
+        again = self.ingest()
+        self.assertIn("略過", again.stdout)
+
+    def test_a_failed_table_description_marks_the_document_failed_and_a_rerun_retries_it(self):
+        self.server.fail_chat_containing = "Body: <table>"
+        failed = self.ingest()
+        self.assertIn("injected chat failure", failed.stderr)
+        self.assert_failed_then_retried(failed)
+
+    def test_a_failed_equation_description_marks_the_document_failed_and_a_rerun_retries_it(self):
+        self.server.fail_chat_containing = "mc^2"
+        self.assert_failed_then_retried(self.ingest())
+
+    def test_a_failed_write_of_the_described_content_marks_the_document_failed_and_a_rerun_retries_it(self):
+        # 描述成功，但表格 chunk 寫入向量索引時 embedding 失敗；RAG-Anything 吞掉這個錯誤
+        self.server.fail_embed_containing = "Table Analysis:"
+        failed = self.ingest()
+        self.assertIn("寫入", failed.stderr)
+        self.assertIn("injected embedding failure", failed.stderr)
+        self.assert_failed_then_retried(failed)
+
+    def test_other_documents_in_the_same_batch_are_still_ingested(self):
+        folder = self.tmp / "papers"
+        folder.mkdir()
+        (folder / "bigtable.pdf").write_bytes(b"%PDF-1.4 big")
+        (folder / "other.pdf").write_bytes(b"%PDF-1.4 other")
+        self.server.fail_chat_containing = "R59C1"
+        result = self.ingest(folder)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertRegex(result.stderr, r"匯入失敗：bigtable\.pdf")
+        self.assertNotRegex(result.stderr, r"匯入失敗：other\.pdf")
+        statuses = self.doc_statuses()
+        self.assertEqual(sorted(record["status"] for record in statuses.values()), ["failed", "processed"], statuses)
 
 
 # ==============================
@@ -647,6 +968,80 @@ class IngestOfficeTest(PipelineCase):
         self.assertNotIn("/3]", second.stdout, "再次匯入資料夾時，轉出的 PDF 不該被當成新文件")
         self.assertEqual(second.stdout.count("已完整處理過，略過"), 2)
 
+    def test_two_documents_with_the_same_stem_in_one_folder_are_both_ingested_with_their_own_pdf_and_parse_output(self):
+        folder = self.tmp / "same_stem"
+        folder.mkdir()
+        write_office(folder / "a.docx")
+        write_office(folder / "a.pptx")
+        result = self.ingest(folder)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("processed=2", result.stdout)
+        self.assertIn("failed=0", result.stdout)
+        self.assertEqual(len(list(self.output_dir.rglob("a.pdf"))), 2, "兩份文件各有自己轉出的 PDF，不共用同一個路徑")
+        self.assertEqual(
+            parsed_office_sources(self.output_dir),
+            ["fake office document: a.docx", "fake office document: a.pptx"],
+            "兩份文件各有自己的解析輸出，內容沒有被另一份覆蓋",
+        )
+
+        before = len(self.server.requests)
+        answer = self.query("What is Fake Entity Alpha?", "--mode", "naive")
+        self.assertEqual(answer.returncode, 0, answer.stdout + answer.stderr)
+        prompt = "".join(str(r["payload"]["messages"]) for r in self.server.requests[before:] if r["path"] == "/v1/chat/completions")
+        for source in ("fake office document: a.docx", "fake office document: a.pptx"):
+            self.assertIn(source, prompt, f"{source} 的內容查得到")
+
+        second = self.ingest(folder)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(second.stdout.count("已完整處理過，略過"), 2)
+
+    def test_two_documents_with_the_same_name_in_different_folders_are_both_ingested_with_their_own_pdf_and_parse_output(self):
+        for folder, text in (("x", "from folder x"), ("y", "from folder y")):
+            (self.tmp / folder).mkdir()
+            (self.tmp / folder / "a.docx").write_text(text + "\n", encoding="utf-8")
+        first = self.ingest(self.tmp / "x" / "a.docx")
+        second = self.ingest(self.tmp / "y" / "a.docx")
+        for result in (first, second):
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("failed=0", result.stdout)
+        self.assertNotIn("已完整處理過，略過", second.stdout, "y/a.docx 是另一份文件，不是 x/a.docx 的重複")
+        self.assertEqual(len(list(self.output_dir.rglob("a.pdf"))), 2)
+        self.assertEqual(parsed_office_sources(self.output_dir), ["from folder x", "from folder y"])
+        statuses = json.loads((self.working_dir / "kv_store_doc_status.json").read_text())
+        self.assertEqual(sorted(v["status"] for v in statuses.values()), ["processed", "processed"])
+
+    def test_a_pdf_and_an_image_keep_their_parser_output_path(self):
+        # 主知識庫已用這個路徑匯入 PDF 與圖片：路徑是 <主檔名>_<原檔絕對路徑 md5 的前 8 碼>，不能因為修 Office 撞名而改變
+        pdf = self.document
+        image = write_image(self.tmp / "figure.png")
+        self.assertEqual(self.ingest(pdf).returncode, 0)
+        self.assertEqual(self.ingest(image).returncode, 0)
+        for document in (pdf, image):
+            digest = hashlib.md5(str(document.resolve()).encode()).hexdigest()[:8]
+            expected = self.output_dir / f"{document.stem}_{digest}" / document.stem
+            found = [d for d in ("auto", "ocr") if (expected / d / f"{document.stem}_content_list.json").is_file()]
+            self.assertEqual(len(found), 1, f"{document.name} 的解析輸出應該在 {expected}")
+        self.assertEqual(
+            sorted(path.name for path in self.output_dir.iterdir()),
+            sorted(f"{d.stem}_{hashlib.md5(str(d.resolve()).encode()).hexdigest()[:8]}" for d in (pdf, image)),
+            "輸出資料夾底下只有這兩份文件的解析資料夾，沒有多出別的路徑",
+        )
+
+    def test_an_office_document_ingested_before_is_skipped_without_parsing_again(self):
+        # 已匯入的 Office 文件，其解析輸出在舊路徑或新路徑都一樣：略過的判斷只靠索引裡的解析快取，與輸出資料夾無關。
+        # 把整個解析輸出資料夾刪掉再匯入一次，若重新解析，輸出資料夾會再出現、也會呼叫模型。
+        deck = write_office(self.tmp / "deck.pptx")
+        first = self.ingest(deck)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        shutil.rmtree(self.output_dir)
+        requests_after_first = len(self.server.requests)
+
+        second = self.ingest(deck)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertIn("已完整處理過，略過", second.stdout)
+        self.assertEqual(len(self.server.requests), requests_after_first)
+        self.assertFalse(self.output_dir.exists(), "略過的文件不該重新轉檔或解析")
+
 
 # ==============================
 # query
@@ -740,6 +1135,25 @@ class QueryTest(PipelineCase):
         self.assertTrue(query_inputs)
         self.assertTrue(all(t.startswith(prefix) for t in query_inputs), query_inputs)
 
+    def test_mix_query_sends_the_candidate_chunks_to_the_rerank_endpoint_with_the_configured_model_and_key(self):
+        question = "What is Fake Entity Alpha?"
+        result = self.query(question)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = rerank_requests(self.query_requests())
+        self.assertTrue(calls, "mix 查詢沒有呼叫 rerank endpoint")
+        for call in calls:
+            self.assertEqual(call["payload"]["model"], "fake-rerank")
+            self.assertEqual(call["payload"]["query"], question)
+            self.assertEqual(call["authorization"], f"Bearer {SECRET}")
+        documents = [d for call in calls for d in call["payload"]["documents"]]
+        self.assertTrue([d for d in documents if "Fake Entity Alpha works together with Fake Entity Beta." in d])
+
+    def test_ingest_never_calls_the_rerank_endpoint(self):
+        self.assertEqual(rerank_requests(self.server.requests[: self.requests_before_query]), [])
+        result = self.query()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(rerank_requests(self.query_requests()), "同一份索引的查詢要用 rerank，否則上面的斷言沒有意義")
+
     def test_failed_llm_call_exits_nonzero_with_the_original_error_and_no_answer(self):
         self.server.fail_chat = True
         result = self.query()
@@ -780,7 +1194,15 @@ class QueryBudgetTest(PipelineCase):
             答案請求所有訊息的字元數總和。
         """
         before = len(self.server.requests)
-        result = self.query(question, "--mode", "naive", QUERY_MAX_TOTAL_TOKENS=budget)
+        # naive 模式沒有圖譜 context；entity／relation 上限只是要小於最小的總上限（設定檢查要求相加小於總上限）
+        result = self.query(
+            question,
+            "--mode",
+            "naive",
+            QUERY_MAX_TOTAL_TOKENS=budget,
+            QUERY_MAX_ENTITY_TOKENS="500",
+            QUERY_MAX_RELATION_TOKENS="500",
+        )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         answers = [
             r
@@ -796,6 +1218,286 @@ class QueryBudgetTest(PipelineCase):
         # 英文約 4 字元一個 token；4000 token 的上限換算不會超過 4 * 4000 字元
         self.assertLess(small, 4 * 4000)
         self.assertGreater(large, 2 * small)
+
+
+class QueryKnowledgeGraphBudgetTest(PipelineCase):
+    """QUERY_MAX_ENTITY_TOKENS／QUERY_MAX_RELATION_TOKENS 決定圖譜 context 放多少 entity 與 relation 描述。"""
+
+    def setUp(self):
+        super().setUp()
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+        self.asked = 0
+
+    def answer_prompt(self, mode: str, *extra: str, **limits: str) -> str:
+        """以指定的 entity／relation 上限查詢一次，回傳答案請求的 prompt 文字。
+
+        Args:
+            mode: 檢索模式。
+            *extra: 額外的命令列引數。
+            **limits: 覆蓋的環境變數（QUERY_MAX_ENTITY_TOKENS、QUERY_MAX_RELATION_TOKENS）。
+
+        Returns:
+            答案請求的 prompt 文字。每次的題目不同，LightRAG 的 LLM 快取 key 不含 token 上限。
+        """
+        self.asked += 1
+        before = len(self.server.requests)
+        result = self.query(f"What is Fake Entity Alpha? ({self.asked})", "--mode", mode, *extra, **limits)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        prompts = query_prompts(self.server.requests[before:])
+        self.assertEqual(len(prompts), 1)
+        return prompts[0]
+
+    def test_graph_context_has_entities_and_relations_when_both_limits_are_large(self):
+        for mode in ("local", "mix"):
+            with self.subTest(mode=mode):
+                prompt = self.answer_prompt(mode, QUERY_MAX_ENTITY_TOKENS="2000", QUERY_MAX_RELATION_TOKENS="2000")
+                for text in (ALPHA_DESCRIPTION, BETA_DESCRIPTION, LINK_DESCRIPTION):
+                    self.assertIn(text, prompt)
+
+    def test_zero_entity_limit_leaves_out_entity_descriptions_only(self):
+        for mode in ("local", "mix"):
+            with self.subTest(mode=mode):
+                prompt = self.answer_prompt(mode, QUERY_MAX_ENTITY_TOKENS="0", QUERY_MAX_RELATION_TOKENS="2000")
+                self.assertNotIn(ALPHA_DESCRIPTION, prompt)
+                self.assertNotIn(BETA_DESCRIPTION, prompt)
+                self.assertIn(LINK_DESCRIPTION, prompt)
+
+    def test_zero_relation_limit_leaves_out_relation_descriptions_only(self):
+        for mode in ("local", "mix"):
+            with self.subTest(mode=mode):
+                prompt = self.answer_prompt(mode, QUERY_MAX_ENTITY_TOKENS="2000", QUERY_MAX_RELATION_TOKENS="0")
+                self.assertIn(ALPHA_DESCRIPTION, prompt)
+                self.assertNotIn(LINK_DESCRIPTION, prompt)
+
+    def test_vlm_enhanced_query_uses_the_same_limits(self):
+        large = self.answer_prompt("mix", "--vlm-enhanced", QUERY_MAX_ENTITY_TOKENS="2000", QUERY_MAX_RELATION_TOKENS="2000")
+        for text in (ALPHA_DESCRIPTION, BETA_DESCRIPTION, LINK_DESCRIPTION):
+            self.assertIn(text, large)
+        no_entities = self.answer_prompt("mix", "--vlm-enhanced", QUERY_MAX_ENTITY_TOKENS="0", QUERY_MAX_RELATION_TOKENS="2000")
+        self.assertNotIn(ALPHA_DESCRIPTION, no_entities)
+        self.assertIn(LINK_DESCRIPTION, no_entities)
+        no_relations = self.answer_prompt("mix", "--vlm-enhanced", QUERY_MAX_ENTITY_TOKENS="2000", QUERY_MAX_RELATION_TOKENS="0")
+        self.assertIn(ALPHA_DESCRIPTION, no_relations)
+        self.assertNotIn(LINK_DESCRIPTION, no_relations)
+
+
+class QueryRerankOrderTest(PipelineCase):
+    """rerank 回傳的順序決定哪些 chunk 在截斷後進得了 prompt。"""
+
+    def setUp(self):
+        super().setUp()
+        self.document = self.tmp / "multichunk.pdf"
+        self.document.write_bytes(b"%PDF-1.4 fake")
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+
+    def answer_prompt(self, question: str, *extra: str) -> str:
+        """以只放得下一個 chunk 的 token 上限查詢一次，回傳答案請求的 prompt 文字。
+
+        Args:
+            question: 題目文字；每次要不同，LightRAG 的 LLM 快取 key 不含 rerank 的順序。
+            *extra: 額外的命令列引數。
+
+        Returns:
+            答案請求的 prompt 文字。
+        """
+        before = len(self.server.requests)
+        result = self.query(question, *extra, **RERANK_BUDGET_ENV)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        prompts = query_prompts(self.server.requests[before:])
+        self.assertEqual(len(prompts), 1)
+        return prompts[0]
+
+    def assert_rerank_order_decides_the_prompt(self, *extra: str) -> None:
+        """依序驗證：保持順序時 marker 不在 prompt、排最前面時在、排最後面時不在。"""
+        self.assertNotIn(RERANK_MARKER, self.answer_prompt("What relates to Fake Entity 3-17? (kept)", *extra))
+        self.server.rerank_promote = RERANK_MARKER
+        self.assertIn(RERANK_MARKER, self.answer_prompt("What relates to Fake Entity 3-17? (promoted)", *extra))
+        self.server.rerank_promote = None
+        self.server.rerank_demote = RERANK_MARKER
+        self.assertNotIn(RERANK_MARKER, self.answer_prompt("What relates to Fake Entity 3-17? (demoted)", *extra))
+
+    def test_mix_query_prompt_follows_the_rerank_order(self):
+        self.assert_rerank_order_decides_the_prompt()
+
+    def test_vlm_enhanced_query_prompt_follows_the_rerank_order(self):
+        self.assert_rerank_order_decides_the_prompt("--vlm-enhanced")
+
+
+class QueryRerankFailureTest(PipelineCase):
+    """rerank 沒有正常完成時，查詢以失敗結束並說明原因，不會拿到沒經過 rerank 的答案。"""
+
+    def setUp(self):
+        super().setUp()
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+
+    def assert_failed_because_of_rerank(self, result, *expected: str) -> None:
+        """驗證查詢失敗：結束碼 1、沒有答案、錯誤訊息指出是 rerank、不含 API key。
+
+        Args:
+            result: 查詢的 CompletedProcess。
+            *expected: 錯誤訊息還要包含的文字。
+        """
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
+        self.assertIn("rerank", result.stderr.lower())
+        for text in expected:
+            self.assertIn(text, result.stderr)
+        self.assertNotIn(SECRET, result.stdout + result.stderr)
+
+    def test_http_error_fails_the_query_with_the_error_the_endpoint_reported(self):
+        self.server.rerank_fault = "http500"
+        self.assert_failed_because_of_rerank(self.query(), "injected rerank failure")
+
+    def test_unreachable_endpoint_fails_the_query(self):
+        dead = closed_port_url()
+        self.assert_failed_because_of_rerank(self.query(RERANK_BASE_URL=dead), dead)
+
+    def test_unreachable_endpoint_is_found_before_any_request_is_sent(self):
+        dead = closed_port_url()
+        for extra in (("--mode", "naive"), ("--mode", "mix"), ("--mode", "mix", "--vlm-enhanced")):
+            with self.subTest(extra=extra):
+                before = len(self.server.requests)
+                result = self.query("What is Fake Entity Alpha?", *extra, RERANK_BASE_URL=dead)
+                self.assert_failed_because_of_rerank(result, "Rerank", dead)
+                self.assertEqual(self.server.requests[before:], [], "查詢前的連線檢查就該擋下，不該已經送出關鍵字抽取或 embedding 請求")
+
+    def test_empty_results_fail_the_query_in_every_mode(self):
+        self.server.rerank_fault = "empty"
+        for mode in ("naive", "local", "global", "hybrid", "mix"):
+            with self.subTest(mode=mode):
+                self.assert_failed_because_of_rerank(self.query("What is Fake Entity Alpha?", "--mode", mode))
+
+    def test_an_index_out_of_range_fails_the_query_even_when_the_other_results_are_valid(self):
+        self.server.rerank_fault = "out_of_range"
+        self.assert_failed_because_of_rerank(self.query())
+
+    def test_vlm_enhanced_query_fails_too(self):
+        self.server.rerank_fault = "empty"
+        self.assert_failed_because_of_rerank(self.query("What is Fake Entity Alpha?", "--vlm-enhanced"))
+
+    def test_a_malformed_rerank_response_fails_the_query(self):
+        # 每個案例是 count（候選數量）→ results 欄位的原始內容；每個案例都從一份合法的回應改壞一個地方
+        def valid(count: int) -> list[dict]:
+            return [{"index": i, "relevance_score": 1.0 - i / 100} for i in range(count)]
+
+        def with_item(count: int, position: int, item: dict) -> list[dict]:
+            results = valid(count)
+            results[position] = item
+            return results
+
+        cases = {
+            "results is not a list": lambda count: "oops",
+            "results is an object": lambda count: {"0": 0.5},
+            "item without index": lambda count: with_item(count, 0, {"relevance_score": 0.5}),
+            "item without relevance_score": lambda count: with_item(count, 0, {"index": 0}),
+            "index is a string": lambda count: with_item(count, 0, {"index": "0", "relevance_score": 0.5}),
+            "index is a float": lambda count: with_item(count, 0, {"index": 0.0, "relevance_score": 0.5}),
+            "index is a bool": lambda count: with_item(count, 0, {"index": False, "relevance_score": 0.5}),
+            "index is negative": lambda count: with_item(count, 0, {"index": -1, "relevance_score": 0.5}),
+            "duplicate index": lambda count: with_item(count, 1, {"index": 0, "relevance_score": 0.5}),
+            "fewer results than candidates": lambda count: valid(count)[:-1],
+            "score is a string": lambda count: with_item(count, 0, {"index": 0, "relevance_score": "0.5"}),
+            "score is null": lambda count: with_item(count, 0, {"index": 0, "relevance_score": None}),
+            "score is a bool": lambda count: with_item(count, 0, {"index": 0, "relevance_score": True}),
+            "score is NaN": lambda count: with_item(count, 0, {"index": 0, "relevance_score": float("nan")}),
+            "score is infinite": lambda count: with_item(count, 0, {"index": 0, "relevance_score": float("inf")}),
+        }
+        for name, results in cases.items():
+            with self.subTest(name):
+                self.server.rerank_results = results
+                self.assert_failed_because_of_rerank(self.query("What is Fake Entity Alpha?", "--mode", "naive"))
+
+    def test_a_well_formed_rerank_response_with_integer_scores_is_accepted(self):
+        # 對照組：上面的失敗案例只差在欄位不合法；整數分數、分數相同、順序不照分數排都是合法的回應
+        self.server.rerank_results = lambda count: [{"index": i, "relevance_score": 1} for i in reversed(range(count))]
+        result = self.query("What is Fake Entity Alpha?", "--mode", "naive")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), CHAT_REPLY)
+
+    def test_no_answer_generation_request_is_sent_when_rerank_fails(self):
+        # 關鍵字抽取在 rerank 之前就會送出（帶 response_format，不算答案請求）；答案生成與 VLM 請求不該送出
+        self.server.rerank_fault = "empty"
+        for extra in (("--mode", "naive"), ("--mode", "mix"), ("--mode", "mix", "--vlm-enhanced")):
+            with self.subTest(extra=extra):
+                before = len(self.server.requests)
+                self.assert_failed_because_of_rerank(self.query("What is Fake Entity Alpha?", *extra))
+                self.assertEqual(query_prompts(self.server.requests[before:]), [])
+
+
+class QueryRerankEnvironmentTest(PipelineCase):
+    """行程環境的 CHUNK_TOP_K、MIN_RERANK_SCORE（LightRAG 會讀）不會改變 rerank 的行為：rag_lab 明確指定 20 與 0.0。"""
+
+    # LightRAG 的預設值；刻意不從 rag_lab 取值，測試的期望要有獨立的來源（spec 的 rerank 規則）
+    CHUNK_TOP_K = 20
+    HOSTILE_ENV = {"MIN_RERANK_SCORE": "0.9", "CHUNK_TOP_K": "1"}
+
+    def setUp(self):
+        super().setUp()
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+        # 每個候選都給 0.5 分、筆數是 min(20, 候選數)：分數低於環境的 0.9 但高於預設的 0.0，只有環境變數生效時才會被濾掉
+        self.server.rerank_results = lambda count: [
+            {"index": i, "relevance_score": 0.5} for i in range(min(count, self.CHUNK_TOP_K))
+        ]
+
+    def test_rerank_asks_for_twenty_results_whatever_chunk_top_k_the_environment_says(self):
+        for mode in ("naive", "mix"):
+            with self.subTest(mode=mode):
+                before = len(self.server.requests)
+                result = self.query("What is Fake Entity Alpha?", "--mode", mode, **self.HOSTILE_ENV)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                calls = rerank_requests(self.server.requests[before:])
+                self.assertTrue(calls)
+                self.assertEqual([call["payload"].get("top_n") for call in calls], [self.CHUNK_TOP_K] * len(calls))
+
+    def test_chunks_scored_below_the_environments_min_rerank_score_still_reach_the_prompt(self):
+        for mode in ("naive", "mix"):
+            with self.subTest(mode=mode):
+                before = len(self.server.requests)
+                result = self.query(f"Which entity works together with Fake Entity Beta? ({mode})", "--mode", mode, **self.HOSTILE_ENV)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                (prompt,) = query_prompts(self.server.requests[before:])
+                self.assertIn("Fake Entity Alpha works together with Fake Entity Beta.", prompt)
+
+
+class QueryRerankFailureCacheTest(PipelineCase):
+    """rerank 失敗不能在 LLM 快取留下沒經過 rerank 的答案：同一題之後 rerank 成功時要用 rerank 後的順序重新生成。"""
+
+    def setUp(self):
+        super().setUp()
+        self.document = self.tmp / "multichunk.pdf"
+        self.document.write_bytes(b"%PDF-1.4 fake")
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+
+    def assert_success_prompt_follows_rerank_after_a_failure(self, *extra: str) -> None:
+        """同一題先 rerank 失敗、再 rerank 成功（marker 排最前面）：第二次要重新生成答案，prompt 含 marker。
+
+        Args:
+            *extra: 額外的命令列引數。
+        """
+        question = "What relates to Fake Entity 3-17? (failure then success)"
+        self.server.rerank_fault = "empty"
+        failed = self.query(question, *extra, **RERANK_BUDGET_ENV)
+        self.assertEqual(failed.returncode, 1, failed.stdout + failed.stderr)
+
+        self.server.rerank_fault = None
+        self.server.rerank_promote = RERANK_MARKER
+        before = len(self.server.requests)
+        succeeded = self.query(question, *extra, **RERANK_BUDGET_ENV)
+        self.assertEqual(succeeded.returncode, 0, succeeded.stdout + succeeded.stderr)
+        prompts = query_prompts(self.server.requests[before:])
+        self.assertEqual(len(prompts), 1, "rerank 成功的那次查詢要重新生成答案，不能命中前一次失敗留下的快取")
+        self.assertIn(RERANK_MARKER, prompts[0])
+
+    def test_mix_query_regenerates_the_answer_after_a_rerank_failure(self):
+        self.assert_success_prompt_follows_rerank_after_a_failure()
+
+    def test_naive_query_regenerates_the_answer_after_a_rerank_failure(self):
+        self.assert_success_prompt_follows_rerank_after_a_failure("--mode", "naive")
 
 
 # ==============================

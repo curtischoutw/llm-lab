@@ -1,7 +1,7 @@
 """假的 OpenAI 相容 server：測試夾具，讓快速測試不必啟動真實 MLX 模型。
 
 為什麼存在：spec 規定日常測試對一個回傳固定回應的假 server 執行，後續所有
-ticket 的 CLI 測試都共用它。涵蓋 chat、vision、embeddings 三種能力，對應兩個路徑：
+ticket 的 CLI 測試都共用它。涵蓋 chat、vision、embeddings、rerank 四種能力，對應三個路徑：
 - POST /v1/chat/completions：純文字（chat）回固定字串；訊息含圖片時（vision）
   回另一個固定字串。為了讓 RAG-Anything／LightRAG 的完整流程能對它跑通，三種
   請求會改回合法的結構化內容：實體抽取（system prompt 含 Knowledge Graph
@@ -9,6 +9,8 @@ ticket 的 CLI 測試都共用它。涵蓋 chat、vision、embeddings 三種能�
   response_format）回關鍵字 JSON；圖／表／公式描述（prompt 含 detailed_description）
   回描述 JSON。
 - POST /v1/embeddings：每個輸入回一個維度可設定的決定性向量。
+- POST /v1/rerank（Jina／Cohere 格式，與 mlx-vlm 的 rerank endpoint 相同）：預設依輸入順序給遞減的分數（等於不改變順序）；
+  rerank_promote／rerank_demote 讓內容含指定字串的 document 排到最前面／最後面，測試據此從 prompt 觀察 rerank 的順序有沒有生效。
 
 關鍵設計決策：
 - vision 只接受 base64 data URI（與 mlx-vlm 實測行為一致）；格式或 base64
@@ -24,6 +26,14 @@ ticket 的 CLI 測試都共用它。涵蓋 chat、vision、embeddings 三種能�
 - fail_chat_containing 只讓訊息文字含指定字串的 chat 請求失敗（模擬單一題目失敗）；
   fail_keywords 只讓關鍵字抽取請求（帶 response_format）失敗，naive 模式不做關鍵字抽取，
   所以只有其餘四種檢索模式的查詢會失敗（模擬單一模式失敗）。
+- fail_embed_containing 讓輸入文字含指定字串的 embeddings 請求回 500（模擬某個 chunk 寫入索引時 embedding 失敗，
+  其餘文字的 embedding 正常）。
+- rerank_fault 讓 rerank 請求出錯："http500" 回 500、"empty" 回 200 與空的 results、"out_of_range" 回 200，
+  results 在正常項目之外多一項 index 超出候選範圍（LightRAG 會靜默略過這一項）。rerank_fault_query 設為字串時，
+  只有 query 含該字串的請求出錯，讓測試在同一個 server 上讓某一題失敗、其餘題目正常。
+  每筆記錄的請求另帶 authorization 標頭，讓測試確認送出的 API key。
+- rerank_results 是一個函式：收到候選數量，回傳 200 回應裡 results 欄位的原始內容（可以是任何 JSON 值），讓測試造出格式不合法
+  的回應（results 不是 list、缺欄位、index 型別不對或重複、筆數不對、分數不是有限數字）；設定時優先於 rerank_fault 之後的正常計分流程。
 - die_after_chat 模擬 mlx_lm.server 生成執行緒死掉（GPU 記憶體不足時實測）：正在生成的那個
   請求永遠不回應，之後的請求回 404 generation thread died。不回應的請求在 stop() 時才放開。
 
@@ -40,7 +50,7 @@ import re
 import struct
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -155,7 +165,7 @@ def _is_valid_image_data_uri(url: str) -> bool:
 
 
 class _Handler(BaseHTTPRequestHandler):
-    """處理 /v1/chat/completions 與 /v1/embeddings。"""
+    """處理 /v1/chat/completions、/v1/embeddings 與 /v1/rerank。"""
 
     server: "_Server"
 
@@ -184,13 +194,15 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_error(400, "request body must be a JSON object")
             return
 
-        self.server.record(self.path, payload)
+        self.server.record(self.path, payload, self.headers.get("Authorization"))
         if self.path == "/v1/chat/completions":
             with self.server.in_flight("chat"):
                 self._chat(payload)
         elif self.path == "/v1/embeddings":
             with self.server.in_flight("embed"):
                 self._embeddings(payload)
+        elif self.path == "/v1/rerank":
+            self._rerank(payload)
         else:
             self._send_error(404, f"unknown endpoint {self.path}")
 
@@ -263,6 +275,9 @@ class _Handler(BaseHTTPRequestHandler):
         if not isinstance(texts, list) or not texts or not all(isinstance(t, str) for t in texts):
             self._send_error(400, "input must be a string or a non-empty list of strings")
             return
+        if self.server.fail_embed_containing and any(self.server.fail_embed_containing in text for text in texts):
+            self._send_error(500, "injected embedding failure")
+            return
         if self.server.embed_delay:
             time.sleep(self.server.embed_delay)
         use_base64 = payload.get("encoding_format") == "base64"
@@ -283,6 +298,53 @@ class _Handler(BaseHTTPRequestHandler):
             },
         )
 
+    def _rerank(self, payload: dict[str, Any]) -> None:
+        query, documents = payload.get("query"), payload.get("documents")
+        if not isinstance(query, str) or not isinstance(documents, list) or not documents:
+            self._send_error(400, "query must be a string and documents a non-empty list")
+            return
+        if not all(isinstance(d, str) and d.strip() for d in documents):
+            self._send_error(400, "documents must be non-empty strings")
+            return
+        fault = self.server.rerank_fault
+        if self.server.rerank_fault_query is not None and self.server.rerank_fault_query not in query:
+            fault = None
+        if fault == "http500":
+            self._send_error(500, "injected rerank failure")
+            return
+        if fault == "empty":
+            self._send_json(200, {"model": payload.get("model", "fake"), "results": []})
+            return
+        count = len(documents)
+        if self.server.rerank_results is not None:
+            self._send_json(
+                200, {"model": payload.get("model", "fake"), "results": self.server.rerank_results(count)}
+            )
+            return
+        scores = []
+        for position, document in enumerate(documents):
+            if self.server.rerank_promote and self.server.rerank_promote in document:
+                scores.append(2.0)
+            elif self.server.rerank_demote and self.server.rerank_demote in document:
+                scores.append(-1.0)
+            else:
+                scores.append(1.0 - position / count)
+        order = sorted(range(count), key=lambda i: (-scores[i], i))
+        top_n = payload.get("top_n")
+        if isinstance(top_n, int) and top_n > 0:
+            order = order[:top_n]
+        results = [{"index": i, "relevance_score": scores[i]} for i in order]
+        if fault == "out_of_range":
+            results.append({"index": count, "relevance_score": 0.0})
+        self._send_json(
+            200,
+            {
+                "model": payload.get("model", "fake"),
+                "results": results,
+                "usage": {"prompt_tokens": count, "total_tokens": count},
+            },
+        )
+
 
 class _Server(ThreadingHTTPServer):
     """帶有 embed_dim 的 HTTP server。"""
@@ -296,6 +358,12 @@ class _Server(ThreadingHTTPServer):
         self.fail_vision = False
         self.fail_chat_containing: str | None = None
         self.fail_keywords = False
+        self.fail_embed_containing: str | None = None
+        self.rerank_fault: str | None = None
+        self.rerank_fault_query: str | None = None
+        self.rerank_results: Callable[[int], Any] | None = None
+        self.rerank_promote: str | None = None
+        self.rerank_demote: str | None = None
         self.chat_delay = 0.0
         self.embed_delay = 0.0
         self.die_after_chat: int | None = None
@@ -306,10 +374,10 @@ class _Server(ThreadingHTTPServer):
         self._inflight = {"chat": 0, "embed": 0}
         self._chat_count = 0
 
-    def record(self, path: str, payload: dict[str, Any]) -> None:
-        """記錄一筆請求（路徑與 JSON 內容）。"""
+    def record(self, path: str, payload: dict[str, Any], authorization: str | None) -> None:
+        """記錄一筆請求（路徑、JSON 內容與 Authorization 標頭）。"""
         with self._lock:
-            self.requests.append({"path": path, "payload": payload})
+            self.requests.append({"path": path, "payload": payload, "authorization": authorization})
 
     def next_chat_number(self) -> int:
         """取得這個 chat 請求的序號（從 1 開始），供 die_after_chat 判斷。"""
@@ -356,7 +424,7 @@ class FakeOpenAIServer:
 
     @property
     def requests(self) -> list[dict[str, Any]]:
-        """目前收到的所有請求（每筆含 path 與 payload）。"""
+        """目前收到的所有請求（每筆含 path、payload 與 authorization 標頭）。"""
         with self._server._lock:
             return list(self._server.requests)
 
@@ -405,6 +473,60 @@ class FakeOpenAIServer:
     @fail_keywords.setter
     def fail_keywords(self, value: bool) -> None:
         self._server.fail_keywords = value
+
+    @property
+    def fail_embed_containing(self) -> str | None:
+        """設為字串時，輸入文字含該字串的 embeddings 請求回 500，其他請求正常。"""
+        return self._server.fail_embed_containing
+
+    @fail_embed_containing.setter
+    def fail_embed_containing(self, value: str | None) -> None:
+        self._server.fail_embed_containing = value
+
+    @property
+    def rerank_fault(self) -> str | None:
+        """設為 "http500"、"empty" 或 "out_of_range" 時，rerank 請求依此出錯（見檔頭說明）；None 為正常。"""
+        return self._server.rerank_fault
+
+    @rerank_fault.setter
+    def rerank_fault(self, value: str | None) -> None:
+        self._server.rerank_fault = value
+
+    @property
+    def rerank_fault_query(self) -> str | None:
+        """設為字串時，只有 query 含該字串的 rerank 請求依 rerank_fault 出錯；None 表示所有請求。"""
+        return self._server.rerank_fault_query
+
+    @rerank_fault_query.setter
+    def rerank_fault_query(self, value: str | None) -> None:
+        self._server.rerank_fault_query = value
+
+    @property
+    def rerank_results(self) -> Callable[[int], Any] | None:
+        """設為函式時，rerank 回應的 results 欄位原樣取自 rerank_results(候選數量)；None 為正常計分。"""
+        return self._server.rerank_results
+
+    @rerank_results.setter
+    def rerank_results(self, value: Callable[[int], Any] | None) -> None:
+        self._server.rerank_results = value
+
+    @property
+    def rerank_promote(self) -> str | None:
+        """設為字串時，內容含該字串的 document 在 rerank 結果排最前面。"""
+        return self._server.rerank_promote
+
+    @rerank_promote.setter
+    def rerank_promote(self, value: str | None) -> None:
+        self._server.rerank_promote = value
+
+    @property
+    def rerank_demote(self) -> str | None:
+        """設為字串時，內容含該字串的 document 在 rerank 結果排最後面（優先序低於 rerank_promote）。"""
+        return self._server.rerank_demote
+
+    @rerank_demote.setter
+    def rerank_demote(self, value: str | None) -> None:
+        self._server.rerank_demote = value
 
     @property
     def chat_delay(self) -> float:

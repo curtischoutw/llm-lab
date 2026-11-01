@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: resolved（tickets 01–07 全部完成）
 
 # Spec：RAG-Anything 本地實驗專案
 

@@ -160,7 +160,7 @@ def _run_ingest(raw_path: str) -> int:
         raw_path: 命令列的文件或資料夾路徑。
 
     Returns:
-        結束碼：0 成功；EXIT_USAGE 輸入路徑不合法；EXIT_FAILURE 有任何一篇匯入失敗或有描述失敗。
+        結束碼：0 成功；EXIT_USAGE 輸入路徑不合法；EXIT_FAILURE 有任何一篇匯入失敗，或有圖／表／公式描述、多模態寫入失敗。
     """
     try:
         documents, unsupported = _collect_documents(raw_path)
@@ -185,8 +185,6 @@ def _run_ingest(raw_path: str) -> int:
         print(f"  {parse_label}：{report.parse_seconds:.1f} s（MinerU backend={pipeline.MINERU_BACKEND}）")
         print(f"  建圖（文字切塊、實體抽取、向量）：{report.graph_seconds:.1f} s")
         print(f"  多模態（圖／表／公式描述）：{report.multimodal_seconds:.1f} s，{report.multimodal_items} 項")
-        if report.description_failed:
-            print(f"  其中 {report.description_failed} 項描述失敗（詳見 stderr）")
     failures = [report for report in summary.reports if report.error]
     print(f"VLM 呼叫：成功 {summary.vlm_ok}，失敗 {summary.vlm_failed}")
     if summary.vlm_sample:
@@ -282,13 +280,19 @@ def _run_eval(questions_path: str, output_dir: str) -> int:
         # 沒跑完就不留下預先建立的空結果檔（例外照常往外拋）
         result_path.unlink(missing_ok=True)
         raise
+    # 固定查詢設定直接取自實際送進 LightRAG 的參數（pipeline.query_kwargs），表頭才不會和實際行為不一致；
+    # 三個 token 上限在下面各佔一行，這裡不重複列
+    fixed = {"vlm_enhanced": False} | {k: v for k, v in pipeline.query_kwargs(settings).items() if not k.startswith("max_")}
     meta = [
         ("題目檔", str(path.resolve())),
         ("題數", str(len(questions))),
-        ("固定查詢設定", "vlm_enhanced=False、enable_rerank=False（檢索模式是唯一變因）"),
+        ("固定查詢設定", "、".join(f"{key}={value}" for key, value in fixed.items()) + "（檢索模式是唯一變因）"),
         ("QUERY_MAX_TOTAL_TOKENS", str(settings.query_max_total_tokens)),
+        ("QUERY_MAX_ENTITY_TOKENS", str(settings.query_max_entity_tokens)),
+        ("QUERY_MAX_RELATION_TOKENS", str(settings.query_max_relation_tokens)),
         ("LLM_MODEL", settings.llm_model),
         ("EMBED_MODEL", settings.embed_model),
+        ("RERANK_MODEL", settings.rerank_model),
     ]
     result_path.write_text(render_report(questions, cells, meta, generated_at), encoding="utf-8")
     print(f"對照表：{result_path.resolve()}")

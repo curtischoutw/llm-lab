@@ -24,7 +24,16 @@ from pathlib import Path
 
 from tests.fake_openai_server import CHAT_REPLY
 from tests.test_cli import REPO_ROOT, SECRET, run_cli
-from tests.test_pipeline import INGEST_TIMEOUT, PipelineCase, closed_port_url
+from tests.test_pipeline import (
+    ALPHA_DESCRIPTION,
+    INGEST_TIMEOUT,
+    LINK_DESCRIPTION,
+    RERANK_BUDGET_ENV,
+    RERANK_MARKER,
+    PipelineCase,
+    closed_port_url,
+    query_prompts,
+)
 
 EXAMPLE_FILE = REPO_ROOT / "eval" / "questions.example.jsonl"
 MODES = ("naive", "local", "global", "hybrid", "mix")
@@ -303,8 +312,10 @@ class EvalRunTest(IngestedEvalCase):
         markdown = self.result_files()[0].read_text(encoding="utf-8")
         preamble = markdown.split("| id |")[0]
         self.assertIn("vlm_enhanced=False", preamble)
-        self.assertIn("enable_rerank=False", preamble)
+        self.assertIn("enable_rerank=True", preamble)
+        self.assertIn("chunk_top_k=20", preamble)
         self.assertIn("fake-llm", preamble)
+        self.assertIn("- RERANK_MODEL：fake-rerank", preamble)
 
     def test_pipes_and_newlines_in_fields_cannot_break_the_row(self):
         path = self.write_questions(
@@ -343,6 +354,118 @@ class EvalRunTest(IngestedEvalCase):
 # ==============================
 # 結果檔
 # ==============================
+
+
+class EvalQueryBudgetTest(IngestedEvalCase):
+    def prompts_for(self, question: str, **limits: str) -> list[str]:
+        """以指定的 entity／relation 上限跑一題 eval，回傳這次送出的答案 prompt。
+
+        Args:
+            question: 題目文字；每次要不同，LightRAG 的 LLM 快取 key 不含 token 上限。
+            **limits: 覆蓋的環境變數。
+
+        Returns:
+            五種模式各一個答案 prompt。
+        """
+        before = len(self.server.requests)
+        result = self.run_eval(self.write_questions(question_line(question=question)), **limits)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        prompts = query_prompts(self.server.requests[before:])
+        self.assertEqual(len(prompts), 5)
+        return prompts
+
+    def test_every_mode_uses_the_entity_and_relation_limits(self):
+        # 兩個上限同時為 0 時，local／global／hybrid 沒有任何 context，LightRAG 回報查詢失敗；所以一次只關一個
+        large = self.prompts_for(
+            "What is Fake Entity Alpha? (large)", QUERY_MAX_ENTITY_TOKENS="2000", QUERY_MAX_RELATION_TOKENS="2000"
+        )
+        self.assertTrue([p for p in large if ALPHA_DESCRIPTION in p and LINK_DESCRIPTION in p])
+        no_entities = self.prompts_for(
+            "What is Fake Entity Alpha? (no entities)", QUERY_MAX_ENTITY_TOKENS="0", QUERY_MAX_RELATION_TOKENS="2000"
+        )
+        self.assertTrue([p for p in no_entities if LINK_DESCRIPTION in p])
+        for prompt in no_entities:
+            self.assertNotIn(ALPHA_DESCRIPTION, prompt)
+        no_relations = self.prompts_for(
+            "What is Fake Entity Alpha? (no relations)", QUERY_MAX_ENTITY_TOKENS="2000", QUERY_MAX_RELATION_TOKENS="0"
+        )
+        self.assertTrue([p for p in no_relations if ALPHA_DESCRIPTION in p])
+        for prompt in no_relations:
+            self.assertNotIn(LINK_DESCRIPTION, prompt)
+
+    def test_result_file_header_lists_the_three_query_token_limits(self):
+        result = self.run_eval(
+            self.write_questions(question_line()),
+            QUERY_MAX_TOTAL_TOKENS="12000",
+            QUERY_MAX_ENTITY_TOKENS="500",
+            QUERY_MAX_RELATION_TOKENS="400",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        header = self.result_files()[0].read_text(encoding="utf-8")
+        self.assertIn("- QUERY_MAX_TOTAL_TOKENS：12000", header)
+        self.assertIn("- QUERY_MAX_ENTITY_TOKENS：500", header)
+        self.assertIn("- QUERY_MAX_RELATION_TOKENS：400", header)
+
+
+class EvalRerankTest(EvalCase):
+    """eval 的每一格查詢也經過 rerank：rerank 的順序決定哪些 chunk 在截斷後進得了 prompt。"""
+
+    def setUp(self):
+        super().setUp()
+        self.document = self.tmp / "multichunk.pdf"
+        self.document.write_bytes(b"%PDF-1.4 fake")
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+        self.asked = 0
+
+    def eval_prompts(self) -> list[str]:
+        """以只放得下一個 chunk 的 token 上限跑一題 eval，回傳這次送出的答案 prompt。
+
+        Returns:
+            五種模式各一個答案 prompt。每次的題目不同，LightRAG 的 LLM 快取 key 不含 rerank 的順序。
+        """
+        self.asked += 1
+        before = len(self.server.requests)
+        question = f"What relates to Fake Entity 3-17? ({self.asked})"
+        result = self.run_eval(self.write_questions(question_line(question=question)), **RERANK_BUDGET_ENV)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        prompts = query_prompts(self.server.requests[before:])
+        self.assertEqual(len(prompts), 5)
+        return prompts
+
+    def test_prompts_follow_the_rerank_order(self):
+        self.assertFalse([p for p in self.eval_prompts() if RERANK_MARKER in p])
+        self.server.rerank_promote = RERANK_MARKER
+        self.assertTrue([p for p in self.eval_prompts() if RERANK_MARKER in p])
+        self.server.rerank_promote = None
+        self.server.rerank_demote = RERANK_MARKER
+        self.assertFalse([p for p in self.eval_prompts() if RERANK_MARKER in p])
+
+
+class EvalRerankFailureTest(IngestedEvalCase):
+    def test_a_rerank_failure_marks_only_the_cells_it_happened_in(self):
+        # 只有 query 含 "Poisoned" 的 rerank 請求回空結果：那一題的五格失敗，之前與之後的題目照常成功
+        self.server.rerank_fault = "empty"
+        self.server.rerank_fault_query = "Poisoned"
+        path = self.write_questions(
+            question_line(id="ok-1", question="What is Fake Entity Alpha?"),
+            question_line(id="bad", question="Poisoned: what is Fake Entity Beta?"),
+            question_line(id="ok-2", question="Which entity works together with Fake Entity Beta?"),
+        )
+        result = self.run_eval(path)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+
+        report = self.result_files()[0].read_text(encoding="utf-8")
+        rows = {row[0]: row for row in table_rows(report)}
+        self.assertEqual(list(rows), ["ok-1", "bad", "ok-2"])
+        for question_id in ("ok-1", "ok-2"):
+            self.assertEqual(rows[question_id][-5:], [CHAT_REPLY] * 5)
+        for cell in rows["bad"][-5:]:
+            self.assertIn("失敗", cell)
+            self.assertIn("rerank", cell)
+        self.assertRegex(result.stderr, r"失敗：bad / naive：.*rerank")
+        self.assertIn("完成：15 格，失敗 5 格", result.stdout)
+        self.assertNotIn(SECRET, result.stdout + result.stderr + report)
 
 
 class EvalResultFileTest(IngestedEvalCase):
@@ -431,6 +554,15 @@ class EvalFailureTest(IngestedEvalCase):
         self.assertIn("LLM", result.stderr)
         self.assertIn(dead, result.stderr)
         self.assertEqual(self.result_files(), [])
+
+    def test_an_unreachable_rerank_endpoint_is_named_and_nothing_is_queried(self):
+        dead = closed_port_url()
+        result = self.run_eval(self.write_questions(question_line()), RERANK_BASE_URL=dead)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Rerank", result.stderr)
+        self.assertIn(dead, result.stderr)
+        self.assertEqual(self.result_files(), [])
+        self.assertEqual(self.eval_requests(), [], "查詢前的連線檢查就該擋下，不該已經送出任何請求")
 
     def test_api_keys_never_appear_in_the_output_or_the_table(self):
         self.server.fail_chat = True

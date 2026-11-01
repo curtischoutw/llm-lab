@@ -22,14 +22,28 @@ import sys
 import unittest
 
 from tests.fake_openai_server import CHAT_REPLY
-from tests.test_cli import OPTIONAL_FIELDS, REPO_ROOT, REQUIRED_FIELDS
-from tests.test_pipeline import INGEST_TIMEOUT, PipelineCase, write_image, write_office
+from tests.test_cli import OPTIONAL_FIELDS, REPO_ROOT, REQUIRED_FIELDS, SECRET
+from tests.test_pipeline import (
+    ALPHA_DESCRIPTION,
+    INGEST_TIMEOUT,
+    LINK_DESCRIPTION,
+    RERANK_BUDGET_ENV,
+    RERANK_MARKER,
+    PipelineCase,
+    closed_port_url,
+    query_prompts,
+    parsed_office_sources,
+    table_bodies,
+    write_image,
+    write_office,
+)
 
 # 依 argv 的步驟依序呼叫公開函式；每一步印一行結果。
 # argv[1] 是文件路徑，argv[2] 是題目檔，argv[3] 是 functions（模組函式）或 session（同一個 Session），其餘是步驟。
 # 步驟 stats:<檔名> 匯入文件旁邊的另一個檔案，印出這一次的 VLM 與描述統計；
 # 步驟 doc:<檔名> 匯入文件旁邊的另一個檔案，每份報告印出 report.document 的檔名、略過與錯誤；
 # 步驟 reject:<檔名>,<檔名>… 一次匯入這些文件，印出拋出的例外類別與訊息（預期不支援的格式整批被拒絕）；
+# 步驟 query_poisoned 問一個題目文字含 Poisoned 的問題，印出拋出的例外類別與訊息（測試讓 rerank 只對這種題目出錯）；
 # 步驟 instances 印出存活的 RAGAnything 實例數，並在最後（Session 已關閉）再印一次；
 # 步驟 second／closed／thread／loop／bad_mode 各做一種誤用並印出例外類別；orphan 讓建立 session 的執行緒
 # 沒關閉就結束，再由主執行緒關閉；init_fail 讓開 session 失敗一次；
@@ -111,6 +125,9 @@ with pipeline.Session() if use_session else contextlib.nullcontext(pipeline) as 
             print(f"reject {name} {message}")
         elif step == "query":
             print(f"query {api.query('What is Fake Entity Alpha?', mode='mix')}")
+        elif step == "query_poisoned":
+            name, message = error_name(lambda: api.query("Poisoned: what is Fake Entity Beta?", mode="mix"))
+            print(f"query_poisoned {name} {' '.join(message.split())}")
         elif step == "evaluate":
             cells = api.evaluate(load_questions(questions))
             for row in cells:
@@ -173,29 +190,40 @@ class PythonApiCase(PipelineCase):
             return 0
         return len(self.version_log.read_text(encoding="utf-8").splitlines())
 
-    def run_api(self, *steps: str, mode: str = "functions") -> subprocess.CompletedProcess:
+    def run_api(
+        self,
+        *steps: str,
+        mode: str = "functions",
+        question_texts: tuple[str, ...] = ("What is Fake Entity Alpha?",),
+        **overrides: str,
+    ) -> subprocess.CompletedProcess:
         """以子行程在同一個 process 內依序執行步驟。
 
         Args:
-            *steps: ingest、stats:<檔名>、doc:<檔名>、reject:<檔名>,…、query、evaluate、instances、second、closed、thread、loop、
-                bad_mode、orphan、init_fail、forget 的任意序列。
+            *steps: ingest、stats:<檔名>、doc:<檔名>、reject:<檔名>,…、query、query_poisoned、evaluate、instances、second、
+                closed、thread、loop、bad_mode、orphan、init_fail、forget 的任意序列。
             mode: functions 呼叫模組函式；session 在同一個 Session 裡呼叫。
+            question_texts: evaluate 步驟用的題目文字，依序是題目檔的每一題。
+            **overrides: 覆蓋的環境變數。
 
         Returns:
             CompletedProcess（text 模式，已擷取 stdout／stderr）。
         """
         # 假索引只有 Fake Entity 的內容；題目要問得到它，naive 模式才檢索得到 chunk
         questions = self.tmp / "questions.jsonl"
-        record = {
-            "id": "q1",
-            "question": "What is Fake Entity Alpha?",
-            "reference": "A made-up concept.",
-            "type": "text",
-            "source": "paper.pdf",
-        }
-        questions.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        records = [
+            {
+                "id": f"q{number}",
+                "question": text,
+                "reference": "A made-up concept.",
+                "type": "text",
+                "source": "paper.pdf",
+            }
+            for number, text in enumerate(question_texts, start=1)
+        ]
+        questions.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
         env = {k: v for k, v in os.environ.items() if k not in REQUIRED_FIELDS + OPTIONAL_FIELDS}
-        env.update(self.env(FAKE_MINERU_VERSION_LOG=str(self.version_log)))
+        env.update(self.env(FAKE_MINERU_VERSION_LOG=str(self.version_log), **overrides))
         return subprocess.run(
             [sys.executable, "-c", DRIVER, str(self.document), str(questions), mode, *steps],
             cwd=REPO_ROOT,
@@ -223,6 +251,161 @@ class ExistingIndexTest(PythonApiCase):
         # 題目檔 1 題，五種模式各一格
         every_mode = " ".join([CHAT_REPLY] * 5)
         self.assertEqual(result.stdout.splitlines(), [f"evaluate {every_mode}", f"query {CHAT_REPLY}"])
+
+
+class QueryBudgetTest(PythonApiCase):
+    """模組函式與 Session 的 query、evaluate 都用 QUERY_MAX_ENTITY_TOKENS／QUERY_MAX_RELATION_TOKENS。"""
+
+    def setUp(self):
+        super().setUp()
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+        self.copies = 0
+
+    def prompts(self, step: str, mode: str, **limits: str) -> list[str]:
+        """在索引的一份副本上跑一個步驟，回傳這次送出的答案 prompt。
+
+        Args:
+            step: query 或 evaluate。
+            mode: functions 或 session。
+            **limits: 覆蓋的環境變數。
+
+        Returns:
+            答案請求的 prompt 文字；query 是 1 個，evaluate 是五種模式各 1 個。
+        """
+        # LightRAG 的 LLM 快取 key 不含 token 上限，同一題在同一份索引上第二次會命中快取而不送答案請求，所以每次用新副本
+        self.copies += 1
+        copy = self.tmp / f"rag_storage_copy_{self.copies}"
+        shutil.copytree(self.working_dir, copy)
+        before = len(self.server.requests)
+        result = self.run_api(step, mode=mode, WORKING_DIR=str(copy), **limits)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return query_prompts(self.server.requests[before:])
+
+    def test_query_and_evaluate_follow_the_entity_and_relation_limits(self):
+        # 兩個上限同時為 0 時，local／global／hybrid 沒有任何 context，LightRAG 回報查詢失敗；所以一次只關一個
+        for mode in ("functions", "session"):
+            for step in ("query", "evaluate"):
+                with self.subTest(mode=mode, step=step):
+                    large = self.prompts(step, mode, QUERY_MAX_ENTITY_TOKENS="2000", QUERY_MAX_RELATION_TOKENS="2000")
+                    self.assertTrue([p for p in large if ALPHA_DESCRIPTION in p and LINK_DESCRIPTION in p])
+                    no_entities = self.prompts(step, mode, QUERY_MAX_ENTITY_TOKENS="0", QUERY_MAX_RELATION_TOKENS="2000")
+                    self.assertEqual(len(no_entities), len(large))
+                    self.assertTrue([p for p in no_entities if LINK_DESCRIPTION in p])
+                    for prompt in no_entities:
+                        self.assertNotIn(ALPHA_DESCRIPTION, prompt)
+                    no_relations = self.prompts(step, mode, QUERY_MAX_ENTITY_TOKENS="2000", QUERY_MAX_RELATION_TOKENS="0")
+                    self.assertTrue([p for p in no_relations if ALPHA_DESCRIPTION in p])
+                    for prompt in no_relations:
+                        self.assertNotIn(LINK_DESCRIPTION, prompt)
+
+
+class QueryRerankTest(PythonApiCase):
+    """模組函式與 Session 的 query、evaluate 都經過 rerank：rerank 的順序決定哪些 chunk 在截斷後進得了 prompt。"""
+
+    def setUp(self):
+        super().setUp()
+        self.document = self.tmp / "multichunk.pdf"
+        self.document.write_bytes(b"%PDF-1.4 fake")
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+        self.copies = 0
+
+    def prompts(self, step: str, mode: str) -> list[str]:
+        """在索引的一份副本上跑一個步驟（只放得下一個 chunk 的 token 上限），回傳這次送出的答案 prompt。
+
+        Args:
+            step: query 或 evaluate。
+            mode: functions 或 session。
+
+        Returns:
+            答案請求的 prompt 文字；query 是 1 個，evaluate 是五種模式各 1 個。
+        """
+        # LightRAG 的 LLM 快取 key 不含 rerank 的順序，同一題在同一份索引上第二次會命中快取，所以每次用新副本
+        self.copies += 1
+        copy = self.tmp / f"rag_storage_copy_{self.copies}"
+        shutil.copytree(self.working_dir, copy)
+        before = len(self.server.requests)
+        result = self.run_api(step, mode=mode, WORKING_DIR=str(copy), **RERANK_BUDGET_ENV)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return query_prompts(self.server.requests[before:])
+
+    def test_query_and_evaluate_prompts_follow_the_rerank_order(self):
+        for mode in ("functions", "session"):
+            for step in ("query", "evaluate"):
+                with self.subTest(mode=mode, step=step):
+                    self.server.rerank_promote = self.server.rerank_demote = None
+                    self.assertFalse([p for p in self.prompts(step, mode) if RERANK_MARKER in p])
+                    self.server.rerank_promote = RERANK_MARKER
+                    self.assertTrue([p for p in self.prompts(step, mode) if RERANK_MARKER in p])
+                    self.server.rerank_promote = None
+                    self.server.rerank_demote = RERANK_MARKER
+                    self.assertFalse([p for p in self.prompts(step, mode) if RERANK_MARKER in p])
+
+
+class QueryRerankFailureTest(PythonApiCase):
+    """rerank 失敗讓該次 query 拋出查詢失敗的例外、讓該格 evaluate 記成失敗，下一次呼叫不受影響。"""
+
+    def setUp(self):
+        super().setUp()
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+
+    def test_query_raises_the_query_failure_with_the_endpoint_error_and_the_next_query_succeeds(self):
+        self.server.rerank_fault = "http500"
+        self.server.rerank_fault_query = "Poisoned"
+        for mode in ("functions", "session"):
+            with self.subTest(mode=mode):
+                result = self.run_api("query_poisoned", "query", mode=mode)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                failed, answered = result.stdout.splitlines()
+                self.assertRegex(failed, r"^query_poisoned PipelineError .*rerank.*injected rerank failure")
+                self.assertEqual(answered, f"query {CHAT_REPLY}")
+                self.assertNotIn(SECRET, result.stdout + result.stderr)
+
+    def test_evaluate_marks_only_the_cells_where_rerank_failed(self):
+        self.server.rerank_fault = "empty"
+        self.server.rerank_fault_query = "Poisoned"
+        questions = (
+            "What is Fake Entity Alpha?",
+            "Poisoned: what is Fake Entity Beta?",
+            "Which entity works together with Fake Entity Beta?",
+        )
+        for mode in ("functions", "session"):
+            with self.subTest(mode=mode):
+                result = self.run_api("evaluate", "query", mode=mode, question_texts=questions)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                good = " ".join([CHAT_REPLY] * 5)
+                self.assertEqual(
+                    result.stdout.splitlines(),
+                    [f"evaluate {good}", "evaluate " + " ".join(["ERROR"] * 5), f"evaluate {good}", f"query {CHAT_REPLY}"],
+                )
+
+
+class RerankUnreachableTest(PythonApiCase):
+    """rerank 端點連不上時，query 與 evaluate 在連線檢查階段就拋出 EndpointError（訊息含位址），不送任何請求；匯入不檢查。"""
+
+    def setUp(self):
+        super().setUp()
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+        self.requests_before = len(self.server.requests)
+
+    def test_query_and_evaluate_fail_naming_the_rerank_endpoint_before_sending_any_request(self):
+        dead = closed_port_url()
+        for mode in ("functions", "session"):
+            for step in ("query", "evaluate"):
+                with self.subTest(mode=mode, step=step):
+                    result = self.run_api(step, mode=mode, RERANK_BASE_URL=dead)
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn("EndpointError", result.stderr)
+                    self.assertIn("Rerank", result.stderr)
+                    self.assertIn(dead, result.stderr)
+                    self.assertEqual(self.server.requests[self.requests_before :], [])
+
+    def test_ingest_does_not_check_the_rerank_endpoint(self):
+        result = self.run_api("ingest", RERANK_BASE_URL=closed_port_url())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class EmptyIndexTest(PythonApiCase):
@@ -381,6 +564,23 @@ class IngestOfficeTest(PythonApiCase):
         self.assertRegex(lines[1], r"^doc broken\.xlsx skipped=False error=RuntimeError: LibreOffice conversion failed")
         self.assertEqual(lines[2:], ["doc deck.pptx skipped=True error=None", "doc legacy.doc skipped=False error=None"])
 
+    def test_session_ingests_two_office_documents_with_the_same_stem_each_with_its_own_pdf_and_parse_output(self):
+        write_office(self.tmp / "a.docx")
+        write_office(self.tmp / "a.pptx")
+        result = self.run_api("doc:a.docx", "doc:a.pptx", "doc:a.docx", "doc:a.pptx", mode="session")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "doc a.docx skipped=False error=None",
+                "doc a.pptx skipped=False error=None",
+                "doc a.docx skipped=True error=None",
+                "doc a.pptx skipped=True error=None",
+            ],
+        )
+        self.assertEqual(len(list(self.output_dir.rglob("a.pdf"))), 2)
+        self.assertEqual(parsed_office_sources(self.output_dir), ["fake office document: a.docx", "fake office document: a.pptx"])
+
 
 class IngestUnsupportedFormatTest(PythonApiCase):
     """Python API 和 CLI 一樣只接受支援的格式：有不支援的文件就整批拒絕，不呼叫模型、不解析。"""
@@ -445,6 +645,56 @@ class IngestStatsTest(PythonApiCase):
                 "stats b.pdf vlm_ok=0 vlm_failed=1 description_failed=1 description_error=True",
             ],
         )
+
+
+class OversizedTableTest(PythonApiCase):
+    """太大的表格拆成小表、描述失敗時文件記成失敗：Python API 與 CLI 行為相同。"""
+
+    def setUp(self):
+        super().setUp()
+        (self.tmp / "bigtable.pdf").write_bytes(b"%PDF-1.4 big table")
+        (self.tmp / "other.pdf").write_bytes(b"%PDF-1.4 other")
+
+    def test_session_describes_a_big_table_as_several_small_tables_and_skips_it_the_second_time(self):
+        result = self.run_api("doc:bigtable.pdf", "doc:bigtable.pdf", mode="session")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["doc bigtable.pdf skipped=False error=None", "doc bigtable.pdf skipped=True error=None"],
+        )
+        bodies = table_bodies(self.server.requests)
+        self.assertGreater(len(bodies), 1)
+        self.assertTrue(all("rowspan=1" not in body for body in bodies))
+
+    def test_a_failed_description_is_a_failed_report_that_a_later_call_retries_while_other_documents_are_kept(self):
+        self.server.fail_chat_containing = "R59C1"
+        failed = self.run_api("doc:bigtable.pdf", "doc:other.pdf", mode="session")
+        self.assertEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+        first, second = [line for line in failed.stdout.splitlines() if line.startswith("doc ")]
+        self.assertRegex(first, r"^doc bigtable\.pdf skipped=False error=圖／表／公式描述呼叫失敗 \d+ 次.*injected chat failure")
+        self.assertEqual(second, "doc other.pdf skipped=False error=None")
+
+        self.server.fail_chat_containing = None
+        retried = self.run_api("doc:bigtable.pdf", "doc:other.pdf", "doc:bigtable.pdf", mode="session")
+        self.assertEqual(retried.returncode, 0, retried.stdout + retried.stderr)
+        self.assertEqual(
+            retried.stdout.splitlines(),
+            [
+                "doc bigtable.pdf skipped=False error=None",
+                "doc other.pdf skipped=True error=None",
+                "doc bigtable.pdf skipped=True error=None",
+            ],
+        )
+
+    def test_a_failed_write_to_the_index_is_a_failed_report_in_the_module_function_too(self):
+        self.server.fail_embed_containing = "Table Analysis:"
+        failed = self.run_api("doc:bigtable.pdf")
+        self.assertEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+        self.assertRegex(failed.stdout, r"error=多模態內容寫入索引失敗 \d+ 次.*injected embedding failure")
+
+        self.server.fail_embed_containing = None
+        retried = self.run_api("doc:bigtable.pdf")
+        self.assertEqual(retried.stdout.splitlines(), ["doc bigtable.pdf skipped=False error=None"])
 
 
 if __name__ == "__main__":
