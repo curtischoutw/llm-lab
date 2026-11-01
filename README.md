@@ -69,8 +69,8 @@ cp .env.example .env
 | 卡片 | 信用卡總覽頁列出的卡片頁 | `cards/` | PDF（Chrome 列印） | 16 |
 | 權益 | 信用卡權益頁列出的權益說明子頁 | `rights/` | `.docx`（LibreOffice 轉檔） | 43（另 3 個失敗，見下方） |
 | 下載 | 信用卡文件下載區的所有 PDF | `downloads/` | PDF（原樣） | 19 |
-| 權益附件 | 權益子頁連到的 PDF（聯名卡、雙幣卡、企業卡的約定條款等）；只收官網網域，和下載區相同的網址略過 | `rights_attachments/` | PDF（原樣） | 尚未實際下載；掃描存下的權益子頁 HTML 有 18 份 |
-| 活動 | 刷卡優惠列表分類 A–I 的活動詳情頁 | `offers/` | PDF（Chrome 列印） | 200（另 1 個過期略過） |
+| 權益附件 | 權益子頁連到的 PDF（聯名卡、雙幣卡、企業卡的約定條款等）；只收官網網域，和下載區相同的網址略過 | `rights_attachments/` | PDF（原樣） | 17（2026-10-31：權益子頁連到 20 份 PDF，`_202003.pdf` 官網回 404，1 份已在下載區、1 份在外部網域 icash.com.tw 而略過） |
+| 活動 | 刷卡優惠列表分類 A–I 的活動詳情頁 | `offers/` | PDF（Chrome 列印） | 200（另 1 個過期略過）；2026-10-31 重跑時列表有 209 個，新增 8 份，共 208 |
 | 活動圖片 | 前 8 個有主視覺的活動頁的主視覺 | `offer_images/` | JPG、PNG | 8 |
 
 - 卡片頁、權益子頁與活動頁：先從原始 HTML 取出主內容區，拿掉官網的 CSS 與 script，再轉檔。直接列印原網址時，官網 CSS 會把預設收合的區塊與彈窗藏起來。2026-10-30 實測 Richart 卡片頁直接列印只有 1,074 字，取主內容區後有 34,576 字。代價是 PDF 的版面是純 HTML 的排版，不像官網。
@@ -181,7 +181,7 @@ VLM、embedding 與 reranker（同一個 server，port 8081）：
 - 圖片的已知限制：沒有文字的圖片，MinerU 能抽出的內容很少，內容主要來自 VLM 的描述。實測 2 張圖片時（第 5 節），流程圖的 VLM 描述寫出了各節點的名稱，截圖的文字也被 OCR 出來，但兩張圖片各自的題目在 mix 模式都沒有答對，因為這些切塊沒有被選進查詢的 context。
 - 重複匯入同一張圖片會略過，不呼叫模型；匯入中斷後重新執行會重試，不會留下重複的紀錄。行為和 PDF 相同。
 - 太大的表格：RAG-Anything 把整張表放進同一個描述 prompt 與同一個 chunk。道路救援 PDF（`attachment_SPECIAL_2026.pdf`）的一張 80 列 × 21 欄表格，描述 prompt 達 20,731 token，`mlx_lm.server` 因此記憶體不足而停止產生。從 ticket 12 開始，`table_body` 超過 800 token（用 LightRAG 的 tokenizer 計算）的表格，匯入前先拿掉值為 1 的 `rowspan`／`colspan`（儲存格文字與合併儲存格不變）；縮短後仍超過就依列切成小表，每張小表重複表頭列（假設第一列是表頭）、各自描述、各自成為一個 chunk，原表每一列都在某一張小表裡。上限值的算法在 `rag_lab/tables.py` 的 docstring。那張道路救援的表縮短後 13,061 token，切成 25 張小表，最大的一張 780 token。800 token 以內的表格不改，送去描述的內容和以前相同；文件 ID、解析快取、已完整匯入的文件重新匯入時略過的行為都不變。已知限制：只處理 HTML 的 `table_body`（MinerU 的格式）；切開 `rowspan` 跨過的列時，跨列的儲存格會在下一張小表的第一列補一份，文字因此出現兩次。
-- 圖、表、公式的描述失敗，或描述後的內容寫入索引失敗（例如 embedding 端點回 500）：RAG-Anything 會吞掉這些錯誤，仍把文件標成已完成。`ingest` 改為把那份文件記成失敗（文件狀態 `failed`），報告的 `匯入失敗` 一行寫出原因與端點，結束碼 1，同一批的其他文件照常匯入。修好端點後重新執行同一個 `ingest` 就會重試那份文件，先清掉舊紀錄再重匯，上次已成功的 LLM 呼叫命中快取；不需要刪除 `WORKING_DIR` 或 `PARSER_OUTPUT_DIR`。（ticket 12 之前的版本會把這種文件標成已完成，重新執行時略過；那時匯入的文件如果描述失敗過，現在仍是已完成，要重匯得先刪除索引。）
+- 圖、表、公式的描述失敗，或描述後的內容寫入知識庫失敗（例如 embedding 端點回 500）：RAG-Anything 會吞掉這些錯誤，仍把文件標成已完成。`ingest` 改為把那份文件記成失敗（文件狀態 `failed`），報告的 `匯入失敗` 一行寫出原因與端點，結束碼 1，同一批的其他文件照常匯入。修好端點後重新執行同一個 `ingest` 就會重試那份文件，先清掉舊紀錄再重匯，上次已成功的 LLM 呼叫命中快取；不需要刪除 `WORKING_DIR` 或 `PARSER_OUTPUT_DIR`。（ticket 12 之前的版本會把這種文件標成已完成，重新執行時略過；那時匯入的文件如果描述失敗過，現在仍是已完成，要重匯得先從知識庫刪掉那份文件的紀錄。）
 - Office 文件（PPT、Word、Excel，含舊格式 .ppt .doc .xls）：RAG-Anything 呼叫 LibreOffice 轉成 PDF，再交給 MinerU。轉出的 PDF 寫在 `PARSER_OUTPUT_DIR/office/` 底下，不會留在來源資料夾，所以下次匯入同一個資料夾時不會被當成新文件。需要先安裝 LibreOffice（第 1 節）。Office 文件的匯入報告，解析階段標籤是「解析（含 Office 轉 PDF）」，轉檔時間包含在裡面，沒有另外計時；PDF 和圖片的標籤是「解析」。
 - 沒有安裝 LibreOffice 時，那份文件匯入失敗，`stderr` 的訊息是 RAG-Anything 的原始錯誤，包含「LibreOffice」與各平台的安裝方式（macOS：`brew install --cask libreoffice`）；結束碼 1。資料夾裡其他文件照常匯入。Office 文件轉檔失敗（LibreOffice 以非零碼結束）時，訊息相同，因為 RAG-Anything 無法區分兩者；逾時時訊息改為指出 `LIBREOFFICE_CONVERT_TIMEOUT`。
 - Office 文件的已知限制（Excel 與舊格式的實測見第 5 節）：
@@ -195,7 +195,19 @@ VLM、embedding 與 reranker（同一個 server，port 8081）：
 .venv/bin/python -m rag_lab ingest data/papers/2410.05779.pdf
 ```
 
-匯入整個資料夾（逐份處理；已完整匯入的文件會略過）。目前的知識庫是台新銀行信用卡，內容在建立中。下面是重建前一版知識庫（3 篇論文加 `data/documents/` 的 6 份文件）的指令。論文資料夾裡放的是指向 `data/papers/` 的 symlink：RAG-Anything 的文件 ID 是解析內容（文字、表格、公式與圖片路徑）的雜湊，而圖片所在的解析輸出資料夾名稱取自 symlink 解析後的原檔路徑，所以同一篇論文不會因為放在不同資料夾而被當成新文件。
+匯入整個資料夾（逐份處理；已完整匯入的文件會略過）。目前的知識庫是台新銀行信用卡，共 311 份文件。從頭重建的指令順序如下，和 2026-10-30～31 實際執行的順序相同；時間約 30 小時：全量匯入 5 個類別合計 28:47（含約 2.5 小時的睡眠），追加匯入的權益附件 48:59、新活動約 22 分鐘，數據見第 5 節。執行前先照第 3 節啟動兩個 server，並接上電源（Mac 合上蓋子會睡眠，`caffeinate -i` 擋不住）：
+
+```sh
+.venv/bin/python scripts/fetch_taishin.py
+for d in cards rights downloads offers offer_images rights_attachments; do
+  caffeinate -i .venv/bin/python -m rag_lab ingest data/taishin_credit_card/$d
+done
+caffeinate -i .venv/bin/python -m rag_lab eval eval/questions.taishin.jsonl
+```
+
+當時另外開了記憶體監控腳本 `output/crash_repro/tools/watchdog.sh`（wired 記憶體超過 22 GB 就關掉兩個 server）。它放在 `output/`，不在版本控管裡，只有這台機器有。
+
+下面是重建前一版知識庫（3 篇論文加 `data/documents/` 的 6 份文件）的指令。論文資料夾裡放的是指向 `data/papers/` 的 symlink：RAG-Anything 的文件 ID 是解析內容（文字、表格、公式與圖片路徑）的雜湊，而圖片所在的解析輸出資料夾名稱取自 symlink 解析後的原檔路徑，所以同一篇論文不會因為放在不同資料夾而被當成新文件。
 
 ```sh
 mkdir -p data/corpus
@@ -204,7 +216,7 @@ ln -sf ../papers/2410.05779.pdf ../papers/2404.16130.pdf ../papers/2510.12323.pd
 .venv/bin/python -m rag_lab ingest data/documents
 ```
 
-前一版知識庫沒有匯入另外 2 篇論文（2005.11401 RAG、2310.11511 Self-RAG），每篇匯入耗時可參考第 5 節。`data/format_check/` 的 5 份文件只在暫時的知識庫驗證過，沒有匯入主知識庫。
+前一版知識庫沒有匯入另外 2 篇論文（2005.11401 RAG、2310.11511 Self-RAG），每篇匯入耗時可參考第 5 節。`data/format_check/` 的 5 份文件只在格式驗證知識庫驗證過，沒有匯入主知識庫。
 
 提問，預設 mix 模式；`--mode` 可選 naive、local、global、hybrid、mix；`--vlm-enhanced` 讓 VLM 看檢索到的圖片後產生答案（預設關閉）：
 
@@ -286,6 +298,15 @@ with Session() as session:
 - 活動類的總時間包含約 2.5 小時的睡眠：Mac 用電池時合上蓋子會進入睡眠，`caffeinate -i` 擋不住。長時間匯入時要接電源，或不要合上蓋子。
 - 匯入後的圖譜：實體 14,184，關係 28,301（其中 belongs_to 邊 10,319）。
 
+### 台新信用卡知識庫：追加匯入到 311 份（2026-10-31）
+
+全量匯入結束後重跑下載，多了權益附件 17 份與新活動 8 份。log 在 `output/taishin_full/`。
+
+- 第一次匯入權益附件時，`attachment_SPECIAL_2026.pdf` 的一張 80 列 × 21 欄表格產生 20,731 token 的描述 prompt，LLM server 記憶體不足而停止。改成把大表格切成小表（第 4 節）後重匯，25 張小表的描述全部成功。
+- 權益附件第二次匯入花了 48:59；新活動 8 份每份 108–324 秒。全部成功，VLM 呼叫 12 次全部成功。
+- 匯入後：文件 311 份全部 processed；實體 15,747，關係 31,239（其中 belongs_to 邊 11,352）。
+- 這段期間 LLM server 收到的最大 prompt 是 4,293 token，wired 記憶體最高 16 GB。
+
 ### 台新信用卡知識庫：eval 與 reranker（2026-10-31～11-01）
 
 題目檔 `eval/questions.taishin.jsonl`，20 題 × 5 種模式。每次都由兩個沒參與撰寫的 agent 各自判讀（✓ 答對、△ 部分對、✗ 答錯），分歧由主對話裁決。判讀紀錄只放本機：`output/taishin_eval/`、`output/taishin_eval2/`、`output/reranker_verify/`。
@@ -306,7 +327,8 @@ with Session() as session:
 - 第三次的 GPU 峰值是重啟 8081 之後量的；開工前的 rerank 實驗（同一個模型，server 已連續執行數小時）量到 21 GB。
 - 約定條款（terms-01、terms-02）與跨卡比較（cross-01、cross-02）在 3 次 eval 都沒有任何一題 ✓。
   - terms-02 需要的 chunk 一直沒進 context。
-  - 跨卡題拆成每張卡各查一次時，檢索覆蓋會增加（cross-01 2/3 → 3/3、cross-02 0/3 → 2/3），這部分還沒實作，見 `.scratch/taishin-credit-card-kb/proposal-answer-quality.md` 的方案 C。
+  - 跨卡題拆成每張卡各查一次（方案 C）的實驗：加 rerank 後，子問題的 context 合起來 cross-01、cross-02 都有 3/3 個關鍵字句，但答案仍沒有 ✓（cross-01 △、cross-02 最好 △）。錯在各卡的答案：別張卡的條款混進來，或看錯不回饋清單的例外。所以沒有實作，見 `.scratch/taishin-credit-card-kb/proposal-cross-card-subquestions.md`。
+- 驗收：mix 7 類中 5 類通過，沒有達到每類至少 1 題 ✓ 的標準。使用者在 2026-11-01 決定接受這個結果並結案（ticket 09）；標準與題目都沒有改。
 
 ### 前一版知識庫
 
@@ -374,9 +396,9 @@ PPT、Word、圖片（主知識庫，在 3 篇論文之後匯入 `data/documents
 | `LLM_MAX_ASYNC`、`EMBED_MAX_ASYNC` | 記憶體較大的機器或雲端 API 可以調高 |
 | `LLM_MAX_TOKENS`、`VLM_MAX_TOKENS` | 依新模型的輸出上限調整 |
 | `QUERY_MAX_TOTAL_TOKENS`、`QUERY_MAX_ENTITY_TOKENS`、`QUERY_MAX_RELATION_TOKENS` | 總上限依新 LLM 的 context 長度與記憶體調整；entity／relation 上限相加要小於總上限，其餘留給文字 chunk |
-| `EMBED_MODEL`、`EMBED_DIM` | **不能改**，除非重建索引 |
+| `EMBED_MODEL`、`EMBED_DIM` | **不能改**，除非重建知識庫 |
 
-- **embedding 模型與維度在建索引後鎖定。** 要換的話，`WORKING_DIR` 也要改到新的資料夾再重新 ingest：LightRAG 預設的向量檔名不含模型名稱或維度，沿用舊資料夾會讓新舊向量混在同一個庫。
+- **embedding 模型與維度在建立知識庫後鎖定。** 要換的話，`WORKING_DIR` 也要改到新的資料夾再重新 ingest：LightRAG 預設的向量檔名不含模型名稱或維度，沿用舊資料夾會讓新舊向量混在同一個庫。
 - **換成更大的 LLM** 只改 `LLM_BASE_URL` 與 `LLM_MODEL`。已建好的圖譜是舊 LLM 抽取的；要讓圖譜改由新 LLM 抽取，需刪除 `WORKING_DIR` 後重新 ingest。LightRAG 1.4.16 的文件建議 LLM 至少 32B 參數、context length 至少 32KB（建議 64KB；文件原文的單位就是 KB），建圖階段不建議用推理模型；目前的 4B 模型與 `QUERY_MAX_TOTAL_TOKENS=12000` 都低於這個建議。
 - **文件 ID 含圖片的絕對路徑**：專案資料夾搬到別的路徑，或 `PARSER_OUTPUT_DIR` 改了，同一篇論文會被當成新文件。搬機器後從空的 `WORKING_DIR` 重新 ingest。
 
@@ -391,5 +413,5 @@ PPT、Word、圖片（主知識庫，在 3 篇論文之後匯入 `data/documents
 下載腳本的測試對本機假 HTTP server 執行，不連網路，不在上面的 `unittest` 範圍內，要另外執行：
 
 ```sh
-.venv/bin/python -m unittest scripts/test_fetch_papers.py scripts/test_fetch_documents.py
+.venv/bin/python -m unittest scripts/test_fetch_papers.py scripts/test_fetch_documents.py scripts/test_fetch_taishin.py
 ```

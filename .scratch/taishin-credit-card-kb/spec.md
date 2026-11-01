@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: resolved（tickets 01–13 全部結案（2026-11-01）；ticket 09 的驗收是 5/7 類，使用者接受）
 
 # Spec：知識庫改為台新銀行信用卡的權益與規則
 

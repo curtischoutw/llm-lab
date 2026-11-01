@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: resolved（tickets 01–03 全部完成（2026-11-01））
 
 # Spec：查詢時用本機 reranker 重新排序候選 chunk
 

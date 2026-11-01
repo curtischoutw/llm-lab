@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: resolved（tickets 01–05 全部完成）
 
 # Spec：專案架構文件與 Python 使用範例
 

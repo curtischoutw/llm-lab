@@ -1,6 +1,6 @@
 # 提案：改善 eval 沒通過的題目（討論用，2026-11-01）
 
-狀態：順序已決定，還沒有 ticket。
+狀態：結案（2026-11-01）。A 沒有效果；B 做成 `.scratch/local-reranker/`，mix ✓ 7→9；C 的實驗沒有讓跨卡題答對，不實作；D 沒有做；E 不做。使用者接受 ticket 09 的 5/7 類。
 
 使用者的決定（2026-11-01）：
 - 照第 5 節的順序做：第二次 eval → A 的實驗 → C 的 probe → B 的 spec → D 視情況。
@@ -95,6 +95,8 @@ mix 模式 7 類都至少有 1 題 ✓，而且第一次 eval 答對的題目沒
 - 實作上的限制：rerank 函式要在建立 LightRAG 時傳入（`operate.py` 第 4317 行讀的是初始化時的 `global_config`），初始化之後才設定不會生效。
 
 ### C. 跨卡問題拆成每張卡各查一次（處理 cross-01、cross-02）
+
+- 2026-11-01 展開成獨立提案：`.scratch/taishin-credit-card-kb/proposal-cross-card-subquestions.md`（含加 rerank 之後的 probe）。
 
 - 做法：
   1. 從題目裡比對出卡名（卡名清單取自 `data/taishin_credit_card/cards/` 的 16 張卡）；
