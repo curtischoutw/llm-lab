@@ -1342,7 +1342,7 @@ class QueryRerankFailureTest(PipelineCase):
         """
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), "")
-        self.assertIn("rerank", result.stderr)
+        self.assertIn("rerank", result.stderr.lower())
         for text in expected:
             self.assertIn(text, result.stderr)
         self.assertNotIn(SECRET, result.stdout + result.stderr)
@@ -1354,6 +1354,15 @@ class QueryRerankFailureTest(PipelineCase):
     def test_unreachable_endpoint_fails_the_query(self):
         dead = closed_port_url()
         self.assert_failed_because_of_rerank(self.query(RERANK_BASE_URL=dead), dead)
+
+    def test_unreachable_endpoint_is_found_before_any_request_is_sent(self):
+        dead = closed_port_url()
+        for extra in (("--mode", "naive"), ("--mode", "mix"), ("--mode", "mix", "--vlm-enhanced")):
+            with self.subTest(extra=extra):
+                before = len(self.server.requests)
+                result = self.query("What is Fake Entity Alpha?", *extra, RERANK_BASE_URL=dead)
+                self.assert_failed_because_of_rerank(result, "Rerank", dead)
+                self.assertEqual(self.server.requests[before:], [], "查詢前的連線檢查就該擋下，不該已經送出關鍵字抽取或 embedding 請求")
 
     def test_empty_results_fail_the_query_in_every_mode(self):
         self.server.rerank_fault = "empty"

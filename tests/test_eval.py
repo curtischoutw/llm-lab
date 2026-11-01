@@ -554,6 +554,15 @@ class EvalFailureTest(IngestedEvalCase):
         self.assertIn(dead, result.stderr)
         self.assertEqual(self.result_files(), [])
 
+    def test_an_unreachable_rerank_endpoint_is_named_and_nothing_is_queried(self):
+        dead = closed_port_url()
+        result = self.run_eval(self.write_questions(question_line()), RERANK_BASE_URL=dead)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Rerank", result.stderr)
+        self.assertIn(dead, result.stderr)
+        self.assertEqual(self.result_files(), [])
+        self.assertEqual(self.eval_requests(), [], "查詢前的連線檢查就該擋下，不該已經送出任何請求")
+
     def test_api_keys_never_appear_in_the_output_or_the_table(self):
         self.server.fail_chat = True
         result = self.run_eval(self.write_questions(question_line()))

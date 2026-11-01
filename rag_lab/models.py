@@ -86,13 +86,13 @@ def check_reachable(*labels: str) -> None:
     """確認指定端點的主機與埠連得上（TCP），在長時間處理之前快速失敗。
 
     Args:
-        *labels: "LLM"、"VLM"、"Embedding" 的任意組合。
+        *labels: "LLM"、"VLM"、"Embedding"、"Rerank" 的任意組合。
 
     Raises:
         EndpointError: 其中一個端點連不上；訊息指出名稱與位址。
     """
     s = get_settings()
-    urls = {"LLM": s.llm_base_url, "VLM": s.vlm_base_url, "Embedding": s.embed_base_url}
+    urls = {"LLM": s.llm_base_url, "VLM": s.vlm_base_url, "Embedding": s.embed_base_url, "Rerank": s.rerank_base_url}
     for label in labels:
         parsed = urlparse(urls[label])
         port = parsed.port or (443 if parsed.scheme == "https" else 80)

@@ -677,7 +677,7 @@ async def _query(rag: RAGAnything, question: str, mode: str, vlm_enhanced: bool,
         EndpointError: 開始前端點不可達，或 VLM 呼叫失敗。
         PipelineError: rerank 失敗，查詢失敗（含查詢途中 LLM 失敗），或沒有答案內容。
     """
-    models.check_reachable("LLM", "Embedding", *(["VLM"] if vlm_enhanced else []))
+    models.check_reachable("LLM", "Embedding", "Rerank", *(["VLM"] if vlm_enhanced else []))
     if not vlm_enhanced:
         return await _answer(rag, question, mode, settings)
     # RAG-Anything 的 VLM 增強路徑：先取回檢索 prompt、把圖片路徑換成 base64 圖片再交給 VLM。
@@ -709,9 +709,8 @@ def query(question: str, mode: str, vlm_enhanced: bool = False) -> str:
         EndpointError: 開始前端點不可達，或 VLM 呼叫失敗。
         SessionError: 已有開啟中的 Session，或在不允許的環境呼叫（見 Session）。
     """
-    if vlm_enhanced:
-        # Session 建構時只檢查 LLM 與 embedding；VLM 在開 Session 之前先檢查
-        models.check_reachable("VLM")
+    # Session 建構時只檢查 LLM 與 embedding；rerank（查詢一律用）與 VLM（vlm_enhanced 時）在開 Session 之前先檢查
+    models.check_reachable("Rerank", *(["VLM"] if vlm_enhanced else []))
     with Session() as session:
         return session.query(question, mode, vlm_enhanced)
 
@@ -735,7 +734,7 @@ async def _evaluate(rag: RAGAnything, questions: list[Question], settings: Setti
     Raises:
         EndpointError: LLM 或 embedding 端點在開始前就不可達。
     """
-    models.check_reachable("LLM", "Embedding")
+    models.check_reachable("LLM", "Embedding", "Rerank")
     cells: list[list[Cell]] = []
     for question in questions:
         row: list[Cell] = []
@@ -766,6 +765,8 @@ def evaluate(questions: list[Question]) -> list[list[Cell]]:
         PipelineError: 初始化失敗。
         SessionError: 已有開啟中的 Session，或在不允許的環境呼叫（見 Session）。
     """
+    # Session 建構時只檢查 LLM 與 embedding；rerank 在開 Session 之前先檢查
+    models.check_reachable("Rerank")
     with Session() as session:
         return session.evaluate(questions)
 
