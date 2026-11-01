@@ -22,7 +22,7 @@ import sys
 import unittest
 
 from tests.fake_openai_server import CHAT_REPLY
-from tests.test_cli import OPTIONAL_FIELDS, REPO_ROOT, REQUIRED_FIELDS
+from tests.test_cli import OPTIONAL_FIELDS, REPO_ROOT, REQUIRED_FIELDS, SECRET
 from tests.test_pipeline import (
     ALPHA_DESCRIPTION,
     INGEST_TIMEOUT,
@@ -42,6 +42,7 @@ from tests.test_pipeline import (
 # 步驟 stats:<檔名> 匯入文件旁邊的另一個檔案，印出這一次的 VLM 與描述統計；
 # 步驟 doc:<檔名> 匯入文件旁邊的另一個檔案，每份報告印出 report.document 的檔名、略過與錯誤；
 # 步驟 reject:<檔名>,<檔名>… 一次匯入這些文件，印出拋出的例外類別與訊息（預期不支援的格式整批被拒絕）；
+# 步驟 query_poisoned 問一個題目文字含 Poisoned 的問題，印出拋出的例外類別與訊息（測試讓 rerank 只對這種題目出錯）；
 # 步驟 instances 印出存活的 RAGAnything 實例數，並在最後（Session 已關閉）再印一次；
 # 步驟 second／closed／thread／loop／bad_mode 各做一種誤用並印出例外類別；orphan 讓建立 session 的執行緒
 # 沒關閉就結束，再由主執行緒關閉；init_fail 讓開 session 失敗一次；
@@ -123,6 +124,9 @@ with pipeline.Session() if use_session else contextlib.nullcontext(pipeline) as 
             print(f"reject {name} {message}")
         elif step == "query":
             print(f"query {api.query('What is Fake Entity Alpha?', mode='mix')}")
+        elif step == "query_poisoned":
+            name, message = error_name(lambda: api.query("Poisoned: what is Fake Entity Beta?", mode="mix"))
+            print(f"query_poisoned {name} {' '.join(message.split())}")
         elif step == "evaluate":
             cells = api.evaluate(load_questions(questions))
             for row in cells:
@@ -185,13 +189,20 @@ class PythonApiCase(PipelineCase):
             return 0
         return len(self.version_log.read_text(encoding="utf-8").splitlines())
 
-    def run_api(self, *steps: str, mode: str = "functions", **overrides: str) -> subprocess.CompletedProcess:
+    def run_api(
+        self,
+        *steps: str,
+        mode: str = "functions",
+        question_texts: tuple[str, ...] = ("What is Fake Entity Alpha?",),
+        **overrides: str,
+    ) -> subprocess.CompletedProcess:
         """以子行程在同一個 process 內依序執行步驟。
 
         Args:
-            *steps: ingest、stats:<檔名>、doc:<檔名>、reject:<檔名>,…、query、evaluate、instances、second、closed、thread、loop、
-                bad_mode、orphan、init_fail、forget 的任意序列。
+            *steps: ingest、stats:<檔名>、doc:<檔名>、reject:<檔名>,…、query、query_poisoned、evaluate、instances、second、
+                closed、thread、loop、bad_mode、orphan、init_fail、forget 的任意序列。
             mode: functions 呼叫模組函式；session 在同一個 Session 裡呼叫。
+            question_texts: evaluate 步驟用的題目文字，依序是題目檔的每一題。
             **overrides: 覆蓋的環境變數。
 
         Returns:
@@ -199,14 +210,17 @@ class PythonApiCase(PipelineCase):
         """
         # 假索引只有 Fake Entity 的內容；題目要問得到它，naive 模式才檢索得到 chunk
         questions = self.tmp / "questions.jsonl"
-        record = {
-            "id": "q1",
-            "question": "What is Fake Entity Alpha?",
-            "reference": "A made-up concept.",
-            "type": "text",
-            "source": "paper.pdf",
-        }
-        questions.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        records = [
+            {
+                "id": f"q{number}",
+                "question": text,
+                "reference": "A made-up concept.",
+                "type": "text",
+                "source": "paper.pdf",
+            }
+            for number, text in enumerate(question_texts, start=1)
+        ]
+        questions.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
         env = {k: v for k, v in os.environ.items() if k not in REQUIRED_FIELDS + OPTIONAL_FIELDS}
         env.update(self.env(FAKE_MINERU_VERSION_LOG=str(self.version_log), **overrides))
         return subprocess.run(
@@ -326,6 +340,45 @@ class QueryRerankTest(PythonApiCase):
                     self.server.rerank_promote = None
                     self.server.rerank_demote = RERANK_MARKER
                     self.assertFalse([p for p in self.prompts(step, mode) if RERANK_MARKER in p])
+
+
+class QueryRerankFailureTest(PythonApiCase):
+    """rerank 失敗讓該次 query 拋出查詢失敗的例外、讓該格 evaluate 記成失敗，下一次呼叫不受影響。"""
+
+    def setUp(self):
+        super().setUp()
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+
+    def test_query_raises_the_query_failure_with_the_endpoint_error_and_the_next_query_succeeds(self):
+        self.server.rerank_fault = "http500"
+        self.server.rerank_fault_query = "Poisoned"
+        for mode in ("functions", "session"):
+            with self.subTest(mode=mode):
+                result = self.run_api("query_poisoned", "query", mode=mode)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                failed, answered = result.stdout.splitlines()
+                self.assertRegex(failed, r"^query_poisoned PipelineError .*rerank.*injected rerank failure")
+                self.assertEqual(answered, f"query {CHAT_REPLY}")
+                self.assertNotIn(SECRET, result.stdout + result.stderr)
+
+    def test_evaluate_marks_only_the_cells_where_rerank_failed(self):
+        self.server.rerank_fault = "empty"
+        self.server.rerank_fault_query = "Poisoned"
+        questions = (
+            "What is Fake Entity Alpha?",
+            "Poisoned: what is Fake Entity Beta?",
+            "Which entity works together with Fake Entity Beta?",
+        )
+        for mode in ("functions", "session"):
+            with self.subTest(mode=mode):
+                result = self.run_api("evaluate", "query", mode=mode, question_texts=questions)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                good = " ".join([CHAT_REPLY] * 5)
+                self.assertEqual(
+                    result.stdout.splitlines(),
+                    [f"evaluate {good}", "evaluate " + " ".join(["ERROR"] * 5), f"evaluate {good}", f"query {CHAT_REPLY}"],
+                )
 
 
 class EmptyIndexTest(PythonApiCase):

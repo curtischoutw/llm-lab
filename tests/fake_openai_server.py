@@ -28,7 +28,10 @@ ticket 的 CLI 測試都共用它。涵蓋 chat、vision、embeddings、rerank �
   所以只有其餘四種檢索模式的查詢會失敗（模擬單一模式失敗）。
 - fail_embed_containing 讓輸入文字含指定字串的 embeddings 請求回 500（模擬某個 chunk 寫入索引時 embedding 失敗，
   其餘文字的 embedding 正常）。
-- fail_rerank 讓 rerank 請求回 500。每筆記錄的請求另帶 authorization 標頭，讓測試確認送出的 API key。
+- rerank_fault 讓 rerank 請求出錯："http500" 回 500、"empty" 回 200 與空的 results、"out_of_range" 回 200，
+  results 在正常項目之外多一項 index 超出候選範圍（LightRAG 會靜默略過這一項）。rerank_fault_query 設為字串時，
+  只有 query 含該字串的請求出錯，讓測試在同一個 server 上讓某一題失敗、其餘題目正常。
+  每筆記錄的請求另帶 authorization 標頭，讓測試確認送出的 API key。
 - die_after_chat 模擬 mlx_lm.server 生成執行緒死掉（GPU 記憶體不足時實測）：正在生成的那個
   請求永遠不回應，之後的請求回 404 generation thread died。不回應的請求在 stop() 時才放開。
 
@@ -301,8 +304,14 @@ class _Handler(BaseHTTPRequestHandler):
         if not all(isinstance(d, str) and d.strip() for d in documents):
             self._send_error(400, "documents must be non-empty strings")
             return
-        if self.server.fail_rerank:
+        fault = self.server.rerank_fault
+        if self.server.rerank_fault_query is not None and self.server.rerank_fault_query not in query:
+            fault = None
+        if fault == "http500":
             self._send_error(500, "injected rerank failure")
+            return
+        if fault == "empty":
+            self._send_json(200, {"model": payload.get("model", "fake"), "results": []})
             return
         count = len(documents)
         scores = []
@@ -317,11 +326,14 @@ class _Handler(BaseHTTPRequestHandler):
         top_n = payload.get("top_n")
         if isinstance(top_n, int) and top_n > 0:
             order = order[:top_n]
+        results = [{"index": i, "relevance_score": scores[i]} for i in order]
+        if fault == "out_of_range":
+            results.append({"index": count, "relevance_score": 0.0})
         self._send_json(
             200,
             {
                 "model": payload.get("model", "fake"),
-                "results": [{"index": i, "relevance_score": scores[i]} for i in order],
+                "results": results,
                 "usage": {"prompt_tokens": count, "total_tokens": count},
             },
         )
@@ -340,7 +352,8 @@ class _Server(ThreadingHTTPServer):
         self.fail_chat_containing: str | None = None
         self.fail_keywords = False
         self.fail_embed_containing: str | None = None
-        self.fail_rerank = False
+        self.rerank_fault: str | None = None
+        self.rerank_fault_query: str | None = None
         self.rerank_promote: str | None = None
         self.rerank_demote: str | None = None
         self.chat_delay = 0.0
@@ -463,13 +476,22 @@ class FakeOpenAIServer:
         self._server.fail_embed_containing = value
 
     @property
-    def fail_rerank(self) -> bool:
-        """為 True 時，所有 rerank 請求回 500。"""
-        return self._server.fail_rerank
+    def rerank_fault(self) -> str | None:
+        """設為 "http500"、"empty" 或 "out_of_range" 時，rerank 請求依此出錯（見檔頭說明）；None 為正常。"""
+        return self._server.rerank_fault
 
-    @fail_rerank.setter
-    def fail_rerank(self, value: bool) -> None:
-        self._server.fail_rerank = value
+    @rerank_fault.setter
+    def rerank_fault(self, value: str | None) -> None:
+        self._server.rerank_fault = value
+
+    @property
+    def rerank_fault_query(self) -> str | None:
+        """設為字串時，只有 query 含該字串的 rerank 請求依 rerank_fault 出錯；None 表示所有請求。"""
+        return self._server.rerank_fault_query
+
+    @rerank_fault_query.setter
+    def rerank_fault_query(self, value: str | None) -> None:
+        self._server.rerank_fault_query = value
 
     @property
     def rerank_promote(self) -> str | None:

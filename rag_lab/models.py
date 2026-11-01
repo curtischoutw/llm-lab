@@ -15,6 +15,12 @@ rerank_model_func。這裡用 lightrag 內建的 OpenAI 相容 helper 與通用 
 - rerank 函式沿用 lightrag.rerank.generic_rerank_api 送請求（Jina／Cohere 格式，回 index＋relevance_score），
   不自己實作 HTTP；RERANK_BASE_URL 和其他端點一樣含 /v1，請求送到 `{RERANK_BASE_URL}/rerank`。函式必須在建立
   LightRAG 時傳入（pipeline.build_rag），初始化之後才設不會對 mix 生效。
+- LightRAG 的 apply_rerank_if_enabled 把 rerank 函式的例外吞掉、改用原本的排序，回傳空結果與回傳的 index 超出範圍時
+  也不報錯（空結果沿用原排序、超出範圍的項目靜默略過）。所以 rerank 函式自己判定失敗（請求例外、HTTP 錯誤、空結果、
+  index 超出範圍任一），記進目前這次查詢的失敗清單（collect_rerank_failures）後以 EndpointError("Rerank") 拋出
+  （LightRAG 照舊吞掉它，查詢本身繼續）；pipeline 在查詢結束後檢查清單，有失敗就讓該次查詢失敗。
+  清單用 ContextVar 綁在「這一次查詢」：進入 collect_rerank_failures 時換上新的清單，離開時還原，所以失敗不會帶到
+  下一次查詢，兩次查詢重疊執行時也各算各的（LightRAG 在查詢途中建立的子 task 繼承 context，寫入的是同一份清單）。
 - RAG-Anything 會吞掉 VLM 的失敗（描述退成原始 dict、匯入仍成功），所以 vision 函式
   自己計數（vision_stats），讓呼叫端能事後判斷「圖片描述是否真的來自 VLM」。
 - 表格與公式描述走 llm_model_func，失敗同樣被吞掉。所以另外提供 count_description_failures，
@@ -34,6 +40,9 @@ Dependencies: lightrag-hku、raganything（由 raganything 帶入）；tenacity 
 
 import base64
 import socket
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -58,7 +67,7 @@ class EndpointError(RuntimeError):
     """某個模型端點失敗。訊息帶端點名稱與位址，原例外在 __cause__。
 
     Attributes:
-        label: 端點名稱（LLM、VLM、Embedding）。
+        label: 端點名稱（LLM、VLM、Embedding、Rerank）。
         url: 該端點的 base URL。
     """
 
@@ -387,9 +396,43 @@ def build_embedding_func() -> EmbeddingFunc:
 # Rerank
 # ==============================
 
+_rerank_failures: ContextVar[list[str] | None] = ContextVar("rerank_failures", default=None)
+
+
+@contextmanager
+def collect_rerank_failures() -> Iterator[list[str]]:
+    """收集區塊內（含區塊內建立的子 task）發生的 rerank 失敗，區塊結束時還原成原本的清單。
+
+    Yields:
+        失敗訊息的清單：rerank_model_func 每判定一次失敗就附加一則（含端點位址與原因）；區塊結束後仍可讀取。
+    """
+    failures: list[str] = []
+    token = _rerank_failures.set(failures)
+    try:
+        yield failures
+    finally:
+        _rerank_failures.reset(token)
+
+
+def _fail_rerank(url: str, detail: str) -> EndpointError:
+    """記一次 rerank 失敗到目前這次查詢的清單，並回傳要拋出的例外。
+
+    Args:
+        url: rerank 端點的完整位址。
+        detail: 失敗原因。
+
+    Returns:
+        EndpointError("Rerank", ...)。
+    """
+    error = EndpointError("Rerank", url, detail)
+    failures = _rerank_failures.get()
+    if failures is not None:
+        failures.append(str(error))
+    return error
+
 
 async def rerank_model_func(query: str, documents: list[str], top_n: int | None = None) -> list[dict[str, Any]]:
-    """呼叫 rerank 端點，替 LightRAG 重新排序候選 chunk。
+    """呼叫 rerank 端點，替 LightRAG 重新排序候選 chunk；沒有正常完成時記錄失敗並拋出。
 
     Args:
         query: 查詢文字。
@@ -398,13 +441,27 @@ async def rerank_model_func(query: str, documents: list[str], top_n: int | None 
 
     Returns:
         [{"index": 候選的位置, "relevance_score": 分數}, ...]，依分數由高到低；LightRAG 依此順序重排候選。
+
+    Raises:
+        EndpointError: 請求例外、HTTP 錯誤、回傳空結果，或有 index 超出候選範圍。失敗已記進目前這次查詢的清單
+            （collect_rerank_failures）；LightRAG 會吞掉這個例外，由 pipeline 在查詢結束後讓查詢失敗。
     """
     s = get_settings()
-    return await generic_rerank_api(
-        query=query,
-        documents=documents,
-        model=s.rerank_model,
-        base_url=f"{s.rerank_base_url}/rerank",
-        api_key=s.rerank_api_key,
-        top_n=top_n,
-    )
+    url = f"{s.rerank_base_url}/rerank"
+    try:
+        results = await generic_rerank_api(
+            query=query,
+            documents=documents,
+            model=s.rerank_model,
+            base_url=url,
+            api_key=s.rerank_api_key,
+            top_n=top_n,
+        )
+    except Exception as exc:
+        raise _fail_rerank(url, _describe(exc)) from exc
+    if not results:
+        raise _fail_rerank(url, f"回傳空結果（送出 {len(documents)} 個候選 chunk）")
+    out_of_range = [r["index"] for r in results if not isinstance(r["index"], int) or not 0 <= r["index"] < len(documents)]
+    if out_of_range:
+        raise _fail_rerank(url, f"回傳的 index {out_of_range} 超出候選範圍 0..{len(documents) - 1}")
+    return results

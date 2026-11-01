@@ -147,7 +147,7 @@ VLM、embedding 與 reranker（同一個 server，port 8081）：
   --reranker-model BAAI/bge-reranker-v2-m3
 ```
 
-`--reranker-model`：啟動時就載入 reranker（`BAAI/bge-reranker-v2-m3`，F32 權重檔約 2.1 GB），第一次查詢不會因為載入模型而變慢。`.env` 的 `RERANK_BASE_URL`、`RERANK_MODEL`、`RERANK_API_KEY` 三個欄位必填，`.env.example` 的預設值指向這個 server。查詢時 LightRAG 在依 token 上限截斷之前，先把候選 chunk 送到 `{RERANK_BASE_URL}/rerank` 重新排序；所有查詢入口（`query`、`query --vlm-enhanced`、`eval`、Python API）一律如此，沒有開關，匯入不使用。候選 chunk 數（`chunk_top_k`）與分數門檻維持 LightRAG 的預設值。reranker 在本機執行，知識庫的內容不會送出本機；`RERANK_BASE_URL` 若改指向外部服務，候選 chunk 的內容就會送到那裡。
+`--reranker-model`：啟動時就載入 reranker（`BAAI/bge-reranker-v2-m3`，F32 權重檔約 2.1 GB），第一次查詢不會因為載入模型而變慢。`.env` 的 `RERANK_BASE_URL`、`RERANK_MODEL`、`RERANK_API_KEY` 三個欄位必填，`.env.example` 的預設值指向這個 server。查詢時 LightRAG 在依 token 上限截斷之前，先把候選 chunk 送到 `{RERANK_BASE_URL}/rerank` 重新排序；所有查詢入口（`query`、`query --vlm-enhanced`、`eval`、Python API）一律如此，沒有開關，匯入不使用。候選 chunk 數（`chunk_top_k`）與分數門檻維持 LightRAG 的預設值。rerank 沒有正常完成（reranker 沒回應、回 HTTP 錯誤、回空結果、回的 index 超出候選範圍）時，該次查詢直接失敗：`query` 以結束碼 1 結束，Python API 拋 `PipelineError`，`eval` 把該格記成失敗；錯誤訊息以「rerank 失敗」開頭，附端點回報的錯誤，不會悄悄改用沒經過 rerank 的排序。reranker 在本機執行，知識庫的內容不會送出本機；`RERANK_BASE_URL` 若改指向外部服務，候選 chunk 的內容就會送到那裡。
 
 `scripts/vlm_server.py` 先把 MLX 保留的 GPU buffer cache 上限設為 1 GB，再啟動 `mlx_vlm.server`。mlx-vlm 0.7.10 的 embedding 路徑不會清 cache，ingest 期間 server 會從 5 GB 增加到 13 GB，與 LLM server 加起來超過 32 GB 機器的 GPU 記憶體。
 

@@ -441,6 +441,32 @@ class EvalRerankTest(EvalCase):
         self.assertFalse([p for p in self.eval_prompts() if RERANK_MARKER in p])
 
 
+class EvalRerankFailureTest(IngestedEvalCase):
+    def test_a_rerank_failure_marks_only_the_cells_it_happened_in(self):
+        # 只有 query 含 "Poisoned" 的 rerank 請求回空結果：那一題的五格失敗，之前與之後的題目照常成功
+        self.server.rerank_fault = "empty"
+        self.server.rerank_fault_query = "Poisoned"
+        path = self.write_questions(
+            question_line(id="ok-1", question="What is Fake Entity Alpha?"),
+            question_line(id="bad", question="Poisoned: what is Fake Entity Beta?"),
+            question_line(id="ok-2", question="Which entity works together with Fake Entity Beta?"),
+        )
+        result = self.run_eval(path)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+
+        report = self.result_files()[0].read_text(encoding="utf-8")
+        rows = {row[0]: row for row in table_rows(report)}
+        self.assertEqual(list(rows), ["ok-1", "bad", "ok-2"])
+        for question_id in ("ok-1", "ok-2"):
+            self.assertEqual(rows[question_id][-5:], [CHAT_REPLY] * 5)
+        for cell in rows["bad"][-5:]:
+            self.assertIn("失敗", cell)
+            self.assertIn("rerank", cell)
+        self.assertRegex(result.stderr, r"失敗：bad / naive：.*rerank")
+        self.assertIn("完成：15 格，失敗 5 格", result.stdout)
+        self.assertNotIn(SECRET, result.stdout + result.stderr + report)
+
+
 class EvalResultFileTest(IngestedEvalCase):
     def test_a_result_file_name_already_taken_never_costs_the_finished_run_or_overwrites_it(self):
         # 檔名只到秒：同一秒啟動的兩個 eval 會撞名。這裡把「現在起一段時間內」每一秒的檔名都先佔住，

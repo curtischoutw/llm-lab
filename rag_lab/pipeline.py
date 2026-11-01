@@ -36,6 +36,11 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   reranker 重新排序（models.rerank_model_func）。rerank 函式必須在 build_rag 建立 LightRAG 時傳入：mix 等圖譜模式
   處理 chunk 時讀的是儲存層初始化時拿到的設定副本，初始化之後才設不會生效（LightRAG 1.4.16）。匯入不用 rerank。
   chunk_top_k、min_rerank_score 維持 LightRAG 的預設值。
+- rerank 失敗讓該次查詢失敗：LightRAG 在 rerank 例外、空結果、index 超出範圍時都會改用原本的排序、查詢照常成功，
+  使用者會拿到沒經過 rerank 的答案卻不知道。做法比照寫入失敗：models.rerank_model_func 自己判定失敗並記進清單
+  （models.collect_rerank_failures），_answer 與 VLM 增強路徑在 LightRAG 查詢結束後檢查清單，有失敗就拋 PipelineError
+  （訊息含端點回報的錯誤，不含 API key）。清單只屬於那一次查詢（ContextVar，查詢結束即還原）：eval 的某一格失敗記在該格的
+  Cell.error，下一格重新開始；Session 的呼叫本來就一個接一個執行，清單綁 context 讓重疊的查詢也不會互相污染。
 - eval（evaluate）在同一個 Session（同一個 RAGAnything 實例）上，依題目順序、五種模式順序依序查詢，
   不是每格重新初始化。每格沿用 query 的 _answer（aquery_llm、三個查詢 token 上限、vlm_enhanced=False、
   enable_rerank=True）；單格失敗（含沒有答案內容）記在該格的 Cell.error，不中斷其餘格。
@@ -83,8 +88,8 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   `mineru --version` 檢查 parser，查詢不解析文件也一樣要通過。
 
 已知極限：
-- rerank 失敗（請求例外、HTTP 錯誤、回傳空結果）時，LightRAG 會記錄錯誤、改用原本的排序，查詢照常成功；
-  這一版沒有處理（讓 rerank 失敗變成查詢失敗是 .scratch/local-reranker 的 ticket 02）。
+- rerank 失敗的偵測在 models.rerank_model_func：只涵蓋它自己看得到的情況（請求例外、HTTP 錯誤、空結果、index 超出範圍）。
+  rerank 函式回傳的格式正確、index 也在範圍內，但排序品質差，這裡看不出來。
 - 使用 RAGAnything 的私有方法 _ensure_lightrag_initialized：官方沒有公開的等價 API，
   但不先初始化就查詢會直接拋 ValueError。
 - VLM 增強查詢（aquery_vlm_enhanced）沒有 aquery_llm 的 status／message：LLM 失敗時只回 None，
@@ -614,6 +619,20 @@ def query_param(mode: str, settings: Settings) -> QueryParam:
     return QueryParam(mode=mode, **query_kwargs(settings))
 
 
+def _raise_if_rerank_failed(rerank_failures: list[str], mode: str) -> None:
+    """這次查詢期間 rerank 有失敗就拋 PipelineError。
+
+    Args:
+        rerank_failures: models.collect_rerank_failures 收集到的失敗訊息（已含端點位址與原因，不含 API key）。
+        mode: 檢索模式（寫進錯誤訊息）。
+
+    Raises:
+        PipelineError: rerank_failures 不是空的；訊息列出不重複的失敗原因。
+    """
+    if rerank_failures:
+        raise PipelineError(f"查詢失敗（mode={mode}）：rerank 失敗：{'；'.join(dict.fromkeys(rerank_failures))}")
+
+
 async def _answer(rag: RAGAnything, question: str, mode: str, settings: Settings) -> str:
     """在已初始化的 RAGAnything 上以 aquery_llm 查詢（不啟用 VLM 增強）。
 
@@ -627,9 +646,12 @@ async def _answer(rag: RAGAnything, question: str, mode: str, settings: Settings
         答案文字（非空字串）。
 
     Raises:
-        PipelineError: LightRAG 回報查詢失敗（訊息含原例外文字），或成功但沒有答案內容。
+        PipelineError: rerank 失敗（LightRAG 已改用原本的排序，這裡不接受），LightRAG 回報查詢失敗
+            （訊息含原例外文字），或成功但沒有答案內容。
     """
-    result = await rag.lightrag.aquery_llm(question, query_param(mode, settings))
+    with models.collect_rerank_failures() as rerank_failures:
+        result = await rag.lightrag.aquery_llm(question, query_param(mode, settings))
+    _raise_if_rerank_failed(rerank_failures, mode)
     if result.get("status") != "success":
         raise PipelineError(f"查詢失敗（mode={mode}）：{result.get('message')}")
     answer = (result.get("llm_response") or {}).get("content")
@@ -653,7 +675,7 @@ async def _query(rag: RAGAnything, question: str, mode: str, vlm_enhanced: bool,
 
     Raises:
         EndpointError: 開始前端點不可達，或 VLM 呼叫失敗。
-        PipelineError: 查詢失敗（含查詢途中 LLM 失敗），或沒有答案內容。
+        PipelineError: rerank 失敗，查詢失敗（含查詢途中 LLM 失敗），或沒有答案內容。
     """
     models.check_reachable("LLM", "Embedding", *(["VLM"] if vlm_enhanced else []))
     if not vlm_enhanced:
@@ -661,7 +683,9 @@ async def _query(rag: RAGAnything, question: str, mode: str, vlm_enhanced: bool,
     # RAG-Anything 的 VLM 增強路徑：先取回檢索 prompt、把圖片路徑換成 base64 圖片再交給 VLM。
     # 它沒有 aquery_llm 的 status 欄位；失敗時回 None（LLM 失敗的訊息 LightRAG 已吞掉），
     # VLM 失敗則拋 EndpointError（含端點與位址）。
-    answer = await rag.aquery_vlm_enhanced(question, mode=mode, **query_kwargs(settings))
+    with models.collect_rerank_failures() as rerank_failures:
+        answer = await rag.aquery_vlm_enhanced(question, mode=mode, **query_kwargs(settings))
+    _raise_if_rerank_failed(rerank_failures, mode)
     if not answer or not isinstance(answer, str):
         raise PipelineError(f"查詢沒有回傳答案內容（mode={mode}，vlm_enhanced=True）")
     return answer
@@ -680,7 +704,7 @@ def query(question: str, mode: str, vlm_enhanced: bool = False) -> str:
 
     Raises:
         ValueError: mode 不是五種檢索模式之一。
-        PipelineError: 初始化失敗、查詢失敗，或沒有答案內容。
+        PipelineError: 初始化失敗、查詢失敗（含 rerank 失敗），或沒有答案內容。
         EndpointError: 開始前端點不可達，或 VLM 呼叫失敗。
         SessionError: 已有開啟中的 Session，或在不允許的環境呼叫（見 Session）。
     """
@@ -894,7 +918,7 @@ class Session:
             ValueError: mode 不是五種檢索模式之一。
             SessionError: Session 已關閉，或從不允許的執行緒／環境呼叫。
             EndpointError: 開始前端點不可達，或 VLM 呼叫失敗。
-            PipelineError: 查詢失敗，或沒有答案內容。
+            PipelineError: 查詢失敗（含 rerank 失敗），或沒有答案內容。
         """
         self._check_usable()
         # LightRAG 還接受 bypass（不檢索、直接問 LLM），回來的答案看起來像 RAG 的結果；只允許五種檢索模式
