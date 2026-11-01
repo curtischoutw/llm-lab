@@ -120,16 +120,20 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from lightrag import QueryParam
-from lightrag.base import DocStatus
-from lightrag.kg.shared_storage import finalize_share_data
-from raganything import RAGAnything, RAGAnythingConfig
-from raganything.callbacks import ProcessingCallback
-
-from rag_lab import models, tables
-from rag_lab.config import Settings, get_settings
+from rag_lab.config import Settings, get_settings, reject_unmanaged_library_env
 from rag_lab.evaluation import RETRIEVAL_MODES, Cell, Question
 from rag_lab.formats import describe_supported, is_office, is_supported
+
+# 必須在 import lightrag 與 raganything 之前：它們在 import 時就讀環境變數當預設值（見 rag_lab.config）
+reject_unmanaged_library_env()
+
+from lightrag import QueryParam  # noqa: E402
+from lightrag.base import DocStatus  # noqa: E402
+from lightrag.kg.shared_storage import finalize_share_data  # noqa: E402
+from raganything import RAGAnything, RAGAnythingConfig  # noqa: E402
+from raganything.callbacks import ProcessingCallback  # noqa: E402
+
+from rag_lab import models, tables  # noqa: E402
 
 # ==============================
 # 常數與例外
