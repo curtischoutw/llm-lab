@@ -14,6 +14,7 @@ Dependencies: 僅標準函式庫。
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -97,7 +98,7 @@ def valid_env(base_url: str = "http://127.0.0.1:9/v1") -> dict[str, str]:
 
 
 def run_cli(
-    args: list[str], overrides: dict[str, str] | None = None, timeout: float = 60
+    args: list[str], overrides: dict[str, str] | None = None, timeout: float = 60, cwd: Path = REPO_ROOT
 ) -> subprocess.CompletedProcess:
     """以子行程執行 `python -m rag_lab`。
 
@@ -105,6 +106,7 @@ def run_cli(
         args: 命令列引數。
         overrides: 覆蓋基準設定的環境變數。
         timeout: 子行程逾時秒數。
+        cwd: 子行程的工作目錄（預設 repo 根目錄）。
 
     Returns:
         CompletedProcess（text 模式，已擷取 stdout／stderr）。
@@ -114,7 +116,7 @@ def run_cli(
     env.update(overrides or {})
     return subprocess.run(
         [sys.executable, "-m", "rag_lab", *args],
-        cwd=REPO_ROOT,
+        cwd=cwd,
         env=env,
         capture_output=True,
         text=True,
@@ -229,6 +231,90 @@ class ConfigValidationTest(unittest.TestCase):
             with self.subTest(args=args):
                 result = run_cli(args, {"EMBED_DIM": ""})
                 self.assert_config_rejected(result, "EMBED_DIM")
+
+
+# ==============================
+# rag_lab 沒有管理的 LightRAG／RAG-Anything 環境變數
+# ==============================
+
+# 來自 ticket 的範例（獨立於 rag_lab.config 的名單）：查詢、匯入、儲存位置、RAG-Anything 各取幾個
+UNMANAGED_SAMPLE = ("TOP_K", "COSINE_THRESHOLD", "CHUNK_SIZE", "WORKSPACE", "ENABLE_TABLE_PROCESSING", "MINERU_PARSE_METHOD")
+# rag_lab 已經明確傳給 LightRAG／RAG-Anything 的參數所對應的變數：不在名單內
+MANAGED_ENV_NAMES = (
+    "MAX_TOTAL_TOKENS",
+    "MAX_ENTITY_TOKENS",
+    "MAX_RELATION_TOKENS",
+    "CHUNK_TOP_K",
+    "RERANK_BY_DEFAULT",
+    "MIN_RERANK_SCORE",
+    "MAX_ASYNC",
+    "MAX_PARALLEL_INSERT",
+    "EMBEDDING_FUNC_MAX_ASYNC",
+    "WORKING_DIR",
+    "OUTPUT_DIR",
+    "PARSER",
+    "PARSE_METHOD",
+)
+
+
+class UnmanagedLightragEnvTest(unittest.TestCase):
+    def assert_rejected_naming(self, result: subprocess.CompletedProcess, names: tuple[str, ...]) -> None:
+        """斷言以設定錯誤結束，訊息列出每個變數名稱，且沒有走到子命令本身的輸入檢查。"""
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertIn("設定錯誤", result.stderr)
+        for name in names:
+            self.assertIn(name, result.stderr)
+        self.assertNotIn("輸入錯誤", result.stderr)
+
+    def test_every_subcommand_rejects_a_listed_variable_naming_it_and_never_printing_its_value(self):
+        value = "sentinel-value-7731"
+        for args in (["ingest", "paper.pdf"], ["query", "q"], ["eval", "questions.jsonl"]):
+            for name in UNMANAGED_SAMPLE:
+                with self.subTest(args=args[0], name=name):
+                    result = run_cli(args, {name: value})
+                    self.assert_rejected_naming(result, (name,))
+                    self.assertNotIn(value, result.stdout + result.stderr)
+
+    def test_all_offending_variables_are_listed_in_one_message(self):
+        result = run_cli(["eval", "q.jsonl"], {name: "1" for name in UNMANAGED_SAMPLE})
+        self.assert_rejected_naming(result, UNMANAGED_SAMPLE)
+
+    def test_an_empty_value_is_still_rejected(self):
+        result = run_cli(["eval", "q.jsonl"], {"TOP_K": ""})
+        self.assert_rejected_naming(result, ("TOP_K",))
+
+    def test_the_error_is_raised_before_any_endpoint_is_contacted(self):
+        server = FakeOpenAIServer(embed_dim=1024)
+        server.start()
+        self.addCleanup(server.stop)
+        result = run_cli(["query", "q"], {**valid_env(server.base_url), "TOP_K": "5"})
+        self.assert_rejected_naming(result, ("TOP_K",))
+        self.assertEqual(server.requests, [])
+
+    def test_parameters_rag_lab_passes_explicitly_are_not_listed(self):
+        for name in MANAGED_ENV_NAMES:
+            with self.subTest(name=name):
+                result = run_cli(["eval", "q.jsonl"], {name: "1"})
+                self.assertIn("輸入錯誤", result.stderr)
+                self.assertNotIn("設定錯誤", result.stderr)
+
+    def test_the_list_was_generated_for_the_installed_library_versions(self):
+        # 升級 lightrag-hku 或 raganything 後這個測試會失敗：照 rag_lab/config.py 模組 docstring 重新產生名單，
+        # 更新 UNMANAGED_LIBRARY_ENV 與 UNMANAGED_LIBRARY_ENV_VERSIONS，並同步 README
+        from importlib.metadata import version
+
+        from rag_lab.config import UNMANAGED_LIBRARY_ENV_VERSIONS
+
+        installed = {name: version(name) for name in UNMANAGED_LIBRARY_ENV_VERSIONS}
+        self.assertEqual(installed, UNMANAGED_LIBRARY_ENV_VERSIONS)
+
+    def test_a_dotenv_file_in_the_working_directory_is_checked_too(self):
+        # LightRAG 在 import 時讀的是目前工作目錄的 .env，不是 repo 根目錄的
+        with tempfile.TemporaryDirectory() as cwd:
+            Path(cwd, ".env").write_text("CHUNK_SIZE=300\n", encoding="utf-8")
+            result = run_cli(["eval", "q.jsonl"], {"PYTHONPATH": str(REPO_ROOT)}, cwd=Path(cwd))
+        self.assert_rejected_naming(result, ("CHUNK_SIZE",))
+        self.assertNotIn("300", result.stderr)
 
 
 # ==============================

@@ -50,13 +50,17 @@ from typing import Any
 from urllib.parse import urlparse
 
 import numpy as np
-from lightrag.llm.openai import openai_complete_if_cache, openai_embed
-from lightrag.rerank import generic_rerank_api
-from lightrag.utils import EmbeddingFunc
-from raganything.image_signature import image_mime_type
 from tenacity import RetryError
 
-from rag_lab.config import get_settings
+from rag_lab.config import get_settings, reject_unmanaged_library_env
+
+# 必須在 import lightrag 與 raganything 之前：它們在 import 時就讀環境變數當預設值（見 rag_lab.config）
+reject_unmanaged_library_env()
+
+from lightrag.llm.openai import openai_complete_if_cache, openai_embed  # noqa: E402
+from lightrag.rerank import generic_rerank_api  # noqa: E402
+from lightrag.utils import EmbeddingFunc  # noqa: E402
+from raganything.image_signature import image_mime_type  # noqa: E402
 
 # ==============================
 # 端點錯誤與可達性

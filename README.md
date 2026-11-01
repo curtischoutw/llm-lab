@@ -54,6 +54,17 @@ cp .env.example .env
 
 `.env.example` 的預設值對應下一節的本機 server，每個欄位的用途寫在檔案註解裡。`.env` 不進版本控管。
 
+**不能設定的 LightRAG／RAG-Anything 環境變數**：LightRAG 與 RAG-Anything 在 import 時會從環境變數和目前工作目錄的 `.env` 讀很多設定當預設值（`TOP_K`、`CHUNK_SIZE`、`WORKSPACE` 等），設了就會改變匯入與查詢的結果，而且不會報錯，`eval` 的結果檔也看不出來。所以 `ingest`、`query`、`graph`、`eval` 與 Python API（`Session`、`ingest`、`query`、`evaluate`，包括 `import rag_lab.pipeline` 本身）發現下面這 31 個變數出現在環境變數或 `.env` 時，一律在連線檢查之前以設定錯誤中止（CLI 結束碼 3，Python 拋 `ConfigError`）。訊息只列出變數名稱，不印值；處理方式是從環境變數和 `.env` 刪掉它們，或改用 rag_lab 的設定欄位。變數只要存在就算，值是空字串也算。
+
+- LightRAG 查詢：`TOP_K`、`COSINE_THRESHOLD`、`RELATED_CHUNK_NUMBER`、`KG_CHUNK_PICK_METHOD`。
+- LightRAG 匯入：`CHUNK_SIZE`、`CHUNK_OVERLAP_SIZE`、`MAX_GLEANING`、`MAX_EXTRACT_INPUT_TOKENS`、`SUMMARY_LANGUAGE`、`ENTITY_TYPES`、`SUMMARY_MAX_TOKENS`、`SUMMARY_CONTEXT_SIZE`、`SUMMARY_LENGTH_RECOMMENDED`、`FORCE_LLM_SUMMARY_ON_MERGE`、`MAX_SOURCE_IDS_PER_ENTITY`、`MAX_SOURCE_IDS_PER_RELATION`、`SOURCE_IDS_LIMIT_METHOD`、`MAX_FILE_PATHS`。
+- LightRAG 儲存位置：`WORKSPACE`（設了之後 LightRAG 改用另一組儲存資料，查詢看不到原本的知識庫）。
+- RAG-Anything：`ENABLE_IMAGE_PROCESSING`、`ENABLE_TABLE_PROCESSING`、`ENABLE_EQUATION_PROCESSING`、`CONTEXT_WINDOW`、`CONTEXT_MODE`、`MAX_CONTEXT_TOKENS`、`INCLUDE_HEADERS`、`INCLUDE_CAPTIONS`、`CONTEXT_FILTER_CONTENT_TYPES`、`CONTENT_FORMAT`、`USE_FULL_PATH`、`MINERU_PARSE_METHOD`。
+
+rag_lab 已經明確傳給 LightRAG／RAG-Anything 的參數對應的變數不在名單內，設了也不生效：`MAX_TOTAL_TOKENS`、`MAX_ENTITY_TOKENS`、`MAX_RELATION_TOKENS`、`CHUNK_TOP_K`、`RERANK_BY_DEFAULT`、`MIN_RERANK_SCORE`、`MAX_ASYNC`、`MAX_PARALLEL_INSERT`、`EMBEDDING_FUNC_MAX_ASYNC`、`WORKING_DIR`、`OUTPUT_DIR`、`PARSER`、`PARSE_METHOD`。其中 `.env` 的 `WORKING_DIR` 照常使用。只影響速度、log 或 rag_lab 用不到的功能的變數也不在名單內，完整的收錄與排除標準寫在 `rag_lab/config.py` 的模組說明。
+
+這份名單是針對 lightrag-hku 1.4.16 與 raganything 1.4.3 的原始碼產生的。升級這兩個套件時要重新產生：照 `rag_lab/config.py` 模組說明的步驟重新掃描兩個套件的環境變數讀取，更新 `UNMANAGED_LIBRARY_ENV` 和 `UNMANAGED_LIBRARY_ENV_VERSIONS`，並改這一段。已安裝的版本和名單的版本不一致時，`tests/test_cli.py` 的版本測試會失敗。名單只涵蓋這兩個套件的 Python 原始碼；MinerU 子行程繼承行程環境，它自己讀的 `MINERU_*` 變數不在名單內。
+
 ## 2. 下載資料
 
 ### 下載台新信用卡內容（目前的知識庫）

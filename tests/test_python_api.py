@@ -408,6 +408,26 @@ class RerankUnreachableTest(PythonApiCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
+class UnmanagedLightragEnvTest(PythonApiCase):
+    """環境裡有 rag_lab 沒管理的 LightRAG／RAG-Anything 變數時，模組函式與 Session 都在連線檢查之前拋出 ConfigError。"""
+
+    def test_module_functions_and_session_raise_config_error_naming_the_variable_before_any_connection(self):
+        value = "sentinel-value-7731"
+        dead = closed_port_url()
+        endpoints = {"LLM_BASE_URL": dead, "VLM_BASE_URL": dead, "EMBED_BASE_URL": dead, "RERANK_BASE_URL": dead}
+        for mode, step in (("functions", "ingest"), ("functions", "query"), ("functions", "evaluate"), ("session", "query")):
+            for name in ("TOP_K", "WORKSPACE"):
+                with self.subTest(mode=mode, step=step, name=name):
+                    result = self.run_api(step, mode=mode, **{**endpoints, name: value})
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn("ConfigError", result.stderr)
+                    self.assertIn(name, result.stderr)
+                    self.assertNotIn("EndpointError", result.stderr)
+                    self.assertNotIn(value, result.stdout + result.stderr)
+        self.assertFalse(self.working_dir.exists())
+        self.assertEqual(self.server.requests, [])
+
+
 class EmptyIndexTest(PythonApiCase):
     def test_query_after_ingest_in_the_same_process(self):
         result = self.run_api("ingest", "query")
