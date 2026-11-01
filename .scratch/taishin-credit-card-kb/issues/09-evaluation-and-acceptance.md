@@ -36,3 +36,11 @@
 - **驗收仍未通過**：7 類中 5 類通過。回饋規則這次通過（rule-03）；約定條款（terms-01 △、terms-02 ✗）、跨卡比較（cross-01、cross-02 ✗）仍未通過。
 - 改善提案與實驗結果在 `.scratch/taishin-credit-card-kb/proposal-answer-quality.md`：回答規則（方案 A）沒有效果；拆成單卡子問題（方案 C）讓 cross-01、cross-02 的檢索覆蓋增加，還沒有實作。
 - 使用者決定下一步：另開 reranker 的 spec（方案 B）。這張 ticket 等 reranker 之後重新評估。
+
+## 第三次評估（2026-11-01，加上 reranker 之後）
+
+- reranker 的 spec 與 tickets 在 `.scratch/local-reranker/`（已實作並合併到 integration，b8e9e6e）。
+- `eval_results/eval_20261101-205632.md`：mix 的 ✓ 從 7 題增加到 9 題，判讀在 `output/reranker_verify/judgement.md`。
+- **驗收仍未通過**：7 類中 5 類通過；約定條款（terms-01 △、terms-02 ✗）、跨卡比較（cross-01 △、cross-02 ✗）在 3 次 eval 都沒有 ✓。
+- README 第 5 節「台新信用卡知識庫：eval 與 reranker」記錄 3 次的比較。
+- 等使用者決定：接受目前結果並結案，或繼續做方案 C（跨卡題拆成子問題）等改善。

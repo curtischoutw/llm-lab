@@ -286,6 +286,28 @@ with Session() as session:
 - 活動類的總時間包含約 2.5 小時的睡眠：Mac 用電池時合上蓋子會進入睡眠，`caffeinate -i` 擋不住。長時間匯入時要接電源，或不要合上蓋子。
 - 匯入後的圖譜：實體 14,184，關係 28,301（其中 belongs_to 邊 10,319）。
 
+### 台新信用卡知識庫：eval 與 reranker（2026-10-31～11-01）
+
+題目檔 `eval/questions.taishin.jsonl`，20 題 × 5 種模式。每次都由兩個沒參與撰寫的 agent 各自判讀（✓ 答對、△ 部分對、✗ 答錯），分歧由主對話裁決。判讀紀錄只放本機：`output/taishin_eval/`、`output/taishin_eval2/`、`output/reranker_verify/`。
+
+| | 第一次 | 第二次 | 第三次 |
+| --- | --- | --- | --- |
+| entity／relation 上限 | 2,400／3,200 | 500／500 | 500／500 |
+| rerank | 不開 | 不開 | bge-reranker-v2-m3 |
+| 結果檔 | `eval_20261031-225221.md` | `eval_20261101-095122.md` | `eval_20261101-205632.md` |
+| 耗時（100 格） | 1:41:12 | 1:34:31 | 1:44:20 |
+| GPU wired 峰值 | 21 GB | 19 GB | 16 GB |
+| ✓ 數：naive／local／global／hybrid／mix | 8／4／8／4／4 | 8／2／4／1／7 | 10／2／4／1／9 |
+| mix 7 類中至少 1 題 ✓ | 4 類 | 5 類 | 5 類 |
+
+- 總上限都是 12,000。第二次的變化見 ticket 13：local、global、hybrid 變差，因為它們的 context 主要是 relation 描述，而 relation 從每題約 40 個降到 5–11 個。這個專案只用 mix。
+- 第三次比第二次：mix 多了 benefit-01、fee-01、fee-02 三題 ✓，benefit-03 從 ✓ 變 △（答案把每次可用 2 次寫成全年上限 2 次）。rerank 後 context 裡的活動頁 chunk 變少：只跑檢索的 11 題中，從 42 個降到 15 個。
+- rerank 讓每格平均多約 6 秒（56.7 → 62.6 秒，用總時間除以 100 格估算）。
+- 第三次的 GPU 峰值是重啟 8081 之後量的；開工前的 rerank 實驗（同一個模型，server 已連續執行數小時）量到 21 GB。
+- 約定條款（terms-01、terms-02）與跨卡比較（cross-01、cross-02）在 3 次 eval 都沒有任何一題 ✓。
+  - terms-02 需要的 chunk 一直沒進 context。
+  - 跨卡題拆成每張卡各查一次時，檢索覆蓋會增加（cross-01 2/3 → 3/3、cross-02 0/3 → 2/3），這部分還沒實作，見 `.scratch/taishin-credit-card-kb/proposal-answer-quality.md` 的方案 C。
+
 ### 前一版知識庫
 
 以下是前一版知識庫的量測（RAG 論文與文件，2026-10-30 刪除），記憶體與耗時仍可作為參考。
