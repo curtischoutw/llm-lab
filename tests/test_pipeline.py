@@ -1342,7 +1342,7 @@ class QueryRerankFailureTest(PipelineCase):
         """
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), "")
-        self.assertIn("rerank", result.stderr)
+        self.assertIn("rerank", result.stderr.lower())
         for text in expected:
             self.assertIn(text, result.stderr)
         self.assertNotIn(SECRET, result.stdout + result.stderr)
@@ -1354,6 +1354,15 @@ class QueryRerankFailureTest(PipelineCase):
     def test_unreachable_endpoint_fails_the_query(self):
         dead = closed_port_url()
         self.assert_failed_because_of_rerank(self.query(RERANK_BASE_URL=dead), dead)
+
+    def test_unreachable_endpoint_is_found_before_any_request_is_sent(self):
+        dead = closed_port_url()
+        for extra in (("--mode", "naive"), ("--mode", "mix"), ("--mode", "mix", "--vlm-enhanced")):
+            with self.subTest(extra=extra):
+                before = len(self.server.requests)
+                result = self.query("What is Fake Entity Alpha?", *extra, RERANK_BASE_URL=dead)
+                self.assert_failed_because_of_rerank(result, "Rerank", dead)
+                self.assertEqual(self.server.requests[before:], [], "查詢前的連線檢查就該擋下，不該已經送出關鍵字抽取或 embedding 請求")
 
     def test_empty_results_fail_the_query_in_every_mode(self):
         self.server.rerank_fault = "empty"
@@ -1368,6 +1377,127 @@ class QueryRerankFailureTest(PipelineCase):
     def test_vlm_enhanced_query_fails_too(self):
         self.server.rerank_fault = "empty"
         self.assert_failed_because_of_rerank(self.query("What is Fake Entity Alpha?", "--vlm-enhanced"))
+
+    def test_a_malformed_rerank_response_fails_the_query(self):
+        # 每個案例是 count（候選數量）→ results 欄位的原始內容；每個案例都從一份合法的回應改壞一個地方
+        def valid(count: int) -> list[dict]:
+            return [{"index": i, "relevance_score": 1.0 - i / 100} for i in range(count)]
+
+        def with_item(count: int, position: int, item: dict) -> list[dict]:
+            results = valid(count)
+            results[position] = item
+            return results
+
+        cases = {
+            "results is not a list": lambda count: "oops",
+            "results is an object": lambda count: {"0": 0.5},
+            "item without index": lambda count: with_item(count, 0, {"relevance_score": 0.5}),
+            "item without relevance_score": lambda count: with_item(count, 0, {"index": 0}),
+            "index is a string": lambda count: with_item(count, 0, {"index": "0", "relevance_score": 0.5}),
+            "index is a float": lambda count: with_item(count, 0, {"index": 0.0, "relevance_score": 0.5}),
+            "index is a bool": lambda count: with_item(count, 0, {"index": False, "relevance_score": 0.5}),
+            "index is negative": lambda count: with_item(count, 0, {"index": -1, "relevance_score": 0.5}),
+            "duplicate index": lambda count: with_item(count, 1, {"index": 0, "relevance_score": 0.5}),
+            "fewer results than candidates": lambda count: valid(count)[:-1],
+            "score is a string": lambda count: with_item(count, 0, {"index": 0, "relevance_score": "0.5"}),
+            "score is null": lambda count: with_item(count, 0, {"index": 0, "relevance_score": None}),
+            "score is a bool": lambda count: with_item(count, 0, {"index": 0, "relevance_score": True}),
+            "score is NaN": lambda count: with_item(count, 0, {"index": 0, "relevance_score": float("nan")}),
+            "score is infinite": lambda count: with_item(count, 0, {"index": 0, "relevance_score": float("inf")}),
+        }
+        for name, results in cases.items():
+            with self.subTest(name):
+                self.server.rerank_results = results
+                self.assert_failed_because_of_rerank(self.query("What is Fake Entity Alpha?", "--mode", "naive"))
+
+    def test_a_well_formed_rerank_response_with_integer_scores_is_accepted(self):
+        # 對照組：上面的失敗案例只差在欄位不合法；整數分數、分數相同、順序不照分數排都是合法的回應
+        self.server.rerank_results = lambda count: [{"index": i, "relevance_score": 1} for i in reversed(range(count))]
+        result = self.query("What is Fake Entity Alpha?", "--mode", "naive")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), CHAT_REPLY)
+
+    def test_no_answer_generation_request_is_sent_when_rerank_fails(self):
+        # 關鍵字抽取在 rerank 之前就會送出（帶 response_format，不算答案請求）；答案生成與 VLM 請求不該送出
+        self.server.rerank_fault = "empty"
+        for extra in (("--mode", "naive"), ("--mode", "mix"), ("--mode", "mix", "--vlm-enhanced")):
+            with self.subTest(extra=extra):
+                before = len(self.server.requests)
+                self.assert_failed_because_of_rerank(self.query("What is Fake Entity Alpha?", *extra))
+                self.assertEqual(query_prompts(self.server.requests[before:]), [])
+
+
+class QueryRerankEnvironmentTest(PipelineCase):
+    """行程環境的 CHUNK_TOP_K、MIN_RERANK_SCORE（LightRAG 會讀）不會改變 rerank 的行為：rag_lab 明確指定 20 與 0.0。"""
+
+    # LightRAG 的預設值；刻意不從 rag_lab 取值，測試的期望要有獨立的來源（spec 的 rerank 規則）
+    CHUNK_TOP_K = 20
+    HOSTILE_ENV = {"MIN_RERANK_SCORE": "0.9", "CHUNK_TOP_K": "1"}
+
+    def setUp(self):
+        super().setUp()
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+        # 每個候選都給 0.5 分、筆數是 min(20, 候選數)：分數低於環境的 0.9 但高於預設的 0.0，只有環境變數生效時才會被濾掉
+        self.server.rerank_results = lambda count: [
+            {"index": i, "relevance_score": 0.5} for i in range(min(count, self.CHUNK_TOP_K))
+        ]
+
+    def test_rerank_asks_for_twenty_results_whatever_chunk_top_k_the_environment_says(self):
+        for mode in ("naive", "mix"):
+            with self.subTest(mode=mode):
+                before = len(self.server.requests)
+                result = self.query("What is Fake Entity Alpha?", "--mode", mode, **self.HOSTILE_ENV)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                calls = rerank_requests(self.server.requests[before:])
+                self.assertTrue(calls)
+                self.assertEqual([call["payload"].get("top_n") for call in calls], [self.CHUNK_TOP_K] * len(calls))
+
+    def test_chunks_scored_below_the_environments_min_rerank_score_still_reach_the_prompt(self):
+        for mode in ("naive", "mix"):
+            with self.subTest(mode=mode):
+                before = len(self.server.requests)
+                result = self.query(f"Which entity works together with Fake Entity Beta? ({mode})", "--mode", mode, **self.HOSTILE_ENV)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                (prompt,) = query_prompts(self.server.requests[before:])
+                self.assertIn("Fake Entity Alpha works together with Fake Entity Beta.", prompt)
+
+
+class QueryRerankFailureCacheTest(PipelineCase):
+    """rerank 失敗不能在 LLM 快取留下沒經過 rerank 的答案：同一題之後 rerank 成功時要用 rerank 後的順序重新生成。"""
+
+    def setUp(self):
+        super().setUp()
+        self.document = self.tmp / "multichunk.pdf"
+        self.document.write_bytes(b"%PDF-1.4 fake")
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+
+    def assert_success_prompt_follows_rerank_after_a_failure(self, *extra: str) -> None:
+        """同一題先 rerank 失敗、再 rerank 成功（marker 排最前面）：第二次要重新生成答案，prompt 含 marker。
+
+        Args:
+            *extra: 額外的命令列引數。
+        """
+        question = "What relates to Fake Entity 3-17? (failure then success)"
+        self.server.rerank_fault = "empty"
+        failed = self.query(question, *extra, **RERANK_BUDGET_ENV)
+        self.assertEqual(failed.returncode, 1, failed.stdout + failed.stderr)
+
+        self.server.rerank_fault = None
+        self.server.rerank_promote = RERANK_MARKER
+        before = len(self.server.requests)
+        succeeded = self.query(question, *extra, **RERANK_BUDGET_ENV)
+        self.assertEqual(succeeded.returncode, 0, succeeded.stdout + succeeded.stderr)
+        prompts = query_prompts(self.server.requests[before:])
+        self.assertEqual(len(prompts), 1, "rerank 成功的那次查詢要重新生成答案，不能命中前一次失敗留下的快取")
+        self.assertIn(RERANK_MARKER, prompts[0])
+
+    def test_mix_query_regenerates_the_answer_after_a_rerank_failure(self):
+        self.assert_success_prompt_follows_rerank_after_a_failure()
+
+    def test_naive_query_regenerates_the_answer_after_a_rerank_failure(self):
+        self.assert_success_prompt_follows_rerank_after_a_failure("--mode", "naive")
 
 
 # ==============================

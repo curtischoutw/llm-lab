@@ -32,6 +32,8 @@ ticket 的 CLI 測試都共用它。涵蓋 chat、vision、embeddings、rerank �
   results 在正常項目之外多一項 index 超出候選範圍（LightRAG 會靜默略過這一項）。rerank_fault_query 設為字串時，
   只有 query 含該字串的請求出錯，讓測試在同一個 server 上讓某一題失敗、其餘題目正常。
   每筆記錄的請求另帶 authorization 標頭，讓測試確認送出的 API key。
+- rerank_results 是一個函式：收到候選數量，回傳 200 回應裡 results 欄位的原始內容（可以是任何 JSON 值），讓測試造出格式不合法
+  的回應（results 不是 list、缺欄位、index 型別不對或重複、筆數不對、分數不是有限數字）；設定時優先於 rerank_fault 之後的正常計分流程。
 - die_after_chat 模擬 mlx_lm.server 生成執行緒死掉（GPU 記憶體不足時實測）：正在生成的那個
   請求永遠不回應，之後的請求回 404 generation thread died。不回應的請求在 stop() 時才放開。
 
@@ -48,7 +50,7 @@ import re
 import struct
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -314,6 +316,11 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"model": payload.get("model", "fake"), "results": []})
             return
         count = len(documents)
+        if self.server.rerank_results is not None:
+            self._send_json(
+                200, {"model": payload.get("model", "fake"), "results": self.server.rerank_results(count)}
+            )
+            return
         scores = []
         for position, document in enumerate(documents):
             if self.server.rerank_promote and self.server.rerank_promote in document:
@@ -354,6 +361,7 @@ class _Server(ThreadingHTTPServer):
         self.fail_embed_containing: str | None = None
         self.rerank_fault: str | None = None
         self.rerank_fault_query: str | None = None
+        self.rerank_results: Callable[[int], Any] | None = None
         self.rerank_promote: str | None = None
         self.rerank_demote: str | None = None
         self.chat_delay = 0.0
@@ -492,6 +500,15 @@ class FakeOpenAIServer:
     @rerank_fault_query.setter
     def rerank_fault_query(self, value: str | None) -> None:
         self._server.rerank_fault_query = value
+
+    @property
+    def rerank_results(self) -> Callable[[int], Any] | None:
+        """設為函式時，rerank 回應的 results 欄位原樣取自 rerank_results(候選數量)；None 為正常計分。"""
+        return self._server.rerank_results
+
+    @rerank_results.setter
+    def rerank_results(self, value: Callable[[int], Any] | None) -> None:
+        self._server.rerank_results = value
 
     @property
     def rerank_promote(self) -> str | None:

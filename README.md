@@ -147,7 +147,7 @@ VLM、embedding 與 reranker（同一個 server，port 8081）：
   --reranker-model BAAI/bge-reranker-v2-m3
 ```
 
-`--reranker-model`：啟動時就載入 reranker（`BAAI/bge-reranker-v2-m3`，F32 權重檔約 2.1 GB），第一次查詢不會因為載入模型而變慢。`.env` 的 `RERANK_BASE_URL`、`RERANK_MODEL`、`RERANK_API_KEY` 三個欄位必填，`.env.example` 的預設值指向這個 server。查詢時 LightRAG 在依 token 上限截斷之前，先把候選 chunk 送到 `{RERANK_BASE_URL}/rerank` 重新排序；所有查詢入口（`query`、`query --vlm-enhanced`、`eval`、Python API）一律如此，沒有開關，匯入不使用。候選 chunk 數（`chunk_top_k`）與分數門檻維持 LightRAG 的預設值。rerank 沒有正常完成（reranker 沒回應、回 HTTP 錯誤、回空結果、回的 index 超出候選範圍）時，該次查詢直接失敗：`query` 以結束碼 1 結束，Python API 拋 `PipelineError`，`eval` 把該格記成失敗；錯誤訊息以「rerank 失敗」開頭，附端點回報的錯誤，不會悄悄改用沒經過 rerank 的排序。reranker 在本機執行，知識庫的內容不會送出本機；`RERANK_BASE_URL` 若改指向外部服務，候選 chunk 的內容就會送到那裡。
+`--reranker-model`：啟動時就載入 reranker（`BAAI/bge-reranker-v2-m3`，F32 權重檔約 2.1 GB），第一次查詢不會因為載入模型而變慢。`.env` 的 `RERANK_BASE_URL`、`RERANK_MODEL`、`RERANK_API_KEY` 三個欄位必填，`.env.example` 的預設值指向這個 server。查詢時 LightRAG 在依 token 上限截斷之前，先把候選 chunk 送到 `{RERANK_BASE_URL}/rerank` 重新排序；所有查詢入口（`query`、`query --vlm-enhanced`、`eval`、Python API）一律如此，沒有開關，匯入不使用。候選 chunk 數（`chunk_top_k`）固定 20、分數門檻（`min_rerank_score`）固定 0.0（等於 LightRAG 的預設值，但程式明確指定，不受 shell 裡 `CHUNK_TOP_K`、`MIN_RERANK_SCORE` 環境變數影響）。查詢開始前會先確認 rerank 端點連得上（和 LLM、embedding 端點一樣；匯入不檢查），連不上就指出端點名稱與位址並立即失敗。rerank 沒有正常完成（reranker 沒回應、回 HTTP 錯誤，或回應內容不合法：空結果、`results` 不是 list、項目缺 `index` 或 `relevance_score`、`index` 不是範圍內的整數或重複、筆數不等於 `min(chunk_top_k, 候選數)`、分數不是有限的數字）時，該次查詢在產生答案之前就中止：不會呼叫 LLM 生成答案，也不會把沒經過 rerank 的答案寫進 LLM 快取，所以 reranker 恢復後同一題會重新用 rerank 後的順序回答。`query` 以結束碼 1 結束，Python API 拋 `PipelineError`，`eval` 把該格記成失敗；錯誤訊息以「rerank 失敗」開頭，附端點回報的錯誤，不會悄悄改用沒經過 rerank 的排序。reranker 在本機執行，知識庫的內容不會送出本機；`RERANK_BASE_URL` 若改指向外部服務，候選 chunk 的內容就會送到那裡。
 
 `scripts/vlm_server.py` 先把 MLX 保留的 GPU buffer cache 上限設為 1 GB，再啟動 `mlx_vlm.server`。mlx-vlm 0.7.10 的 embedding 路徑不會清 cache，ingest 期間 server 會從 5 GB 增加到 13 GB，與 LLM server 加起來超過 32 GB 機器的 GPU 記憶體。
 
@@ -225,6 +225,8 @@ ln -sf ../papers/2410.05779.pdf ../papers/2404.16130.pdf ../papers/2510.12323.pd
 .venv/bin/python -m rag_lab eval eval/questions.example.jsonl
 ```
 
+`eval` 結果只有在 LLM 快取沒有舊答案時才可比較：快取的 key 由模式、問題文字與查詢參數（含 `enable_rerank`）算出，不含 `RERANK_MODEL`、`LLM_MODEL`，也不含檢索到的內容。換了 `RERANK_MODEL` 或 `LLM_MODEL` 之後，同一份題目檔重跑會直接命中舊答案（跑得很快，但那是舊模型的答案）。換模型後要先從 `WORKING_DIR` 的 `kv_store_llm_response_cache.json` 刪掉 key 含 `:query:` 的項目，再跑 `eval`。
+
 在 Python 裡呼叫（設定一樣讀 `.env`）。在同一個 `Session` 裡問多題，知識庫只載入一次：
 
 ```python
@@ -298,7 +300,7 @@ with Session() as session:
 
 - 3 篇匯入後的圖譜：實體 1358，關係 1835（其中 735 條是 RAG-Anything 加的 belongs_to 邊）。ingest 期間 wired 記憶體最高 18 GB。
 - 查詢（3 篇的知識庫，五種模式各 1 題）每題 52–66 s；`eval` 2 題 × 5 種模式 522 s。同一個問題再問一次會命中 LightRAG 的 LLM 快取，查詢 4 s、同一份題目檔的 `eval` 3 s。
-- LLM 快取的 key 由模式與問題文字等查詢參數算出，不包含檢索到的內容。知識庫匯入新文件後，問以前問過的問題，拿到的仍是匯入前的答案（2026-10-29 擴充後重跑 `eval/questions.example.jsonl`，10 格都是快取命中）。要讓舊問題用新的知識庫回答，要先從 `WORKING_DIR` 的 `kv_store_llm_response_cache.json` 刪掉 key 含 `:query:` 的項目。
+- LLM 快取的 key 由模式與問題文字等查詢參數算出，不包含檢索到的內容，也不包含 `RERANK_MODEL`、`LLM_MODEL`（換這兩個之後同樣要先刪掉 `:query:` 項目，見第 4 節 `eval`）。知識庫匯入新文件後，問以前問過的問題，拿到的仍是匯入前的答案（2026-10-29 擴充後重跑 `eval/questions.example.jsonl`，10 格都是快取命中）。要讓舊問題用新的知識庫回答，要先從 `WORKING_DIR` 的 `kv_store_llm_response_cache.json` 刪掉 key 含 `:query:` 的項目。
 - MinerU 後端比較（LightRAG 論文、server 關閉時）：pipeline 51 s、hybrid-engine 140 s、vlm-engine 711 s（transformers 推論）。pipeline 與 hybrid-engine 抽出的圖、表、公式數量相同。
 
 Excel 與舊格式（格式驗證知識庫，2026-10-29 量測，LibreOffice 26.8.1.1；紀錄在 `output/formats_check_run/` 與 `.scratch/multi-format-documents/issues/05-*.md`）：

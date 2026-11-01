@@ -76,3 +76,61 @@ OK
 - 同一次查詢內 rerank 多次失敗時，訊息列出不重複的原因，不分次拋出。
 - 假 server 的故障規則（`rerank_fault`／`rerank_fault_query`）由我決定，取代 ticket 01 未被使用的 `fail_rerank`。
 - rerank 失敗優先於 LightRAG 自己的查詢失敗訊息：兩者同時發生時只報 rerank 失敗。
+
+
+## code-review 修正
+
+範圍 5fafdbf..c5db0b4 的 code-review 找到 8 項問題，全部成立，修在分支 `fix/r-code-review`。測試縫沿用 CLI 子行程與 Python API，沒有新增縫。
+
+### 8 項怎麼處理
+
+1. **rerank 失敗後的答案被寫進 LLM 快取**：和第 4 項一起修。rerank 失敗現在在 LLM 呼叫與快取寫入之前中止，快取裡沒有那筆答案。測試 `QueryRerankFailureCacheTest`（mix、naive）：同一題先 rerank 失敗、再 rerank 成功（marker 排最前面），第二次要重新送出答案請求且 prompt 含 marker。
+2. **快取 key 不含 `RERANK_MODEL`、`LLM_MODEL`**：不改 LightRAG 的快取。README 的 `eval` 段落與第 5 節的快取說明寫明：換 `RERANK_MODEL` 或 `LLM_MODEL` 後，要先刪掉 `kv_store_llm_response_cache.json` 裡 key 含 `:query:` 的項目，eval 結果才可比較。`docs/architecture.md` 同步。沒有測試（純文件）。
+3. **查詢前沒有檢查 Rerank 端點**：`models.check_reachable` 加 `"Rerank"`；`_query`、`_evaluate`、模組函式 `query`／`evaluate`（開 Session 之前）都檢查，匯入不檢查。測試：CLI `query`（naive、mix、`--vlm-enhanced`）、`eval`、Python API（模組函式與 Session × query／evaluate）在 rerank 端點連不上時失敗、訊息含 `Rerank` 與位址、假 server 沒收到任何請求；`ingest` 不受影響。
+4. **rerank 失敗後仍生成答案**：採用 BaseException 做法。`models.RerankFailure` 繼承 `BaseException`，`rerank_model_func` 判定失敗時拋出，穿過 LightRAG；`pipeline._answer` 與 VLM 增強路徑攔下，轉成 `PipelineError`。原本的 `ContextVar` 失敗清單（`collect_rerank_failures`、`_fail_rerank`、`_raise_if_rerank_failed`）整組移除。測試：rerank 失敗時假 server 沒有收到任何答案請求（naive、mix、`--vlm-enhanced`；關鍵字抽取請求在 rerank 之前，不算）。
+5. **rerank 回應驗證不足**：新增 `models._rerank_problem`，筆數不等於 `min(top_n, 候選數)`、index 不是範圍內的 int（bool 不算）、index 重複、relevance_score 不是有限的 int／float（bool、字串、null、NaN、inf 都不算）都算失敗。測試 `test_a_malformed_rerank_response_fails_the_query` 15 個子案例，加一個對照組（整數分數、分數相同、順序不照分數排的合法回應要成功）。假 server 新增 `rerank_results`（函式，回傳 results 欄位的原始內容）。
+6. **LightRAG 讀行程環境的 `MIN_RERANK_SCORE`、`CHUNK_TOP_K`**：建立 LightRAG 時明確傳 `min_rerank_score=0.0`，`query_kwargs` 明確傳 `chunk_top_k=20`（常數 `pipeline.CHUNK_TOP_K`、`MIN_RERANK_SCORE`）。測試 `QueryRerankEnvironmentTest`：環境有 `MIN_RERANK_SCORE=0.9`、`CHUNK_TOP_K=1` 時，rerank 請求的 `top_n` 仍是 20，分數 0.5 的 chunk 仍進得了 prompt（naive、mix）。
+7. **rerank 與 LightRAG 自己同時失敗只報 rerank**：第 4 項改成提前中止之後，兩者不可能同時發生：rerank 發生在答案階段之前，rerank 失敗就中止，後面的階段不會執行；反過來，rerank 之前的階段（關鍵字抽取、檢索）先失敗時 rerank 不會被呼叫。所以不需要合併兩種訊息，說明寫在 `pipeline.py` 檔頭與架構文件。
+8. **eval 表頭寫死 `enable_rerank=True`**：「固定查詢設定」由 `pipeline.query_kwargs(settings)` 產生（扣掉三個 token 上限，它們在表頭各佔一行），現在是 `vlm_enhanced=False、enable_rerank=True、chunk_top_k=20`。表頭測試加 `chunk_top_k=20` 的斷言（原有斷言都保留）。
+
+### 第 4 項：為什麼 BaseException 做法可行
+
+查 lightrag-hku 1.4.16 從 rerank 到 `aquery_llm` 的呼叫鏈：
+
+- `aquery_llm`（lightrag.py:2884）→ `kg_query`（operate.py:3164）／`naive_query`（operate.py:4953）→ `_build_query_context`（operate.py:4239）→ `_build_context_str`（operate.py:4056）→ `process_chunks_unified`（utils.py:2755）→ `apply_rerank_if_enabled`（utils.py:2671）。全程在同一個 task 裡直接 `await`，沒有 `asyncio.gather`、`create_task`、限流 worker 或 `finally` 包住 rerank 呼叫。
+- `aquery_llm` 的 `except` 是 `except Exception`（lightrag.py:3007），`apply_rerank_if_enabled` 也是（utils.py:2750），都不會攔到 BaseException。LightRAG 裡的 `except BaseException`（operate.py:2661、2780）在實體／關係合併（匯入）路徑，不在查詢路徑。
+- VLM 增強路徑：`RAGAnything.aquery_vlm_enhanced`（raganything/query.py:390）先用 `only_need_prompt=True` 呼叫 `lightrag.aquery`（沒有 LLM 呼叫、沒有快取），rerank 在那一步，中止時還沒到 VLM；路徑上沒有 `except`。
+- Python 3.12 的 `asyncio.Task.__step`（asyncio/tasks.py:324–332）只對 `CancelledError`、`KeyboardInterrupt`、`SystemExit` 特別處理，其他 `BaseException` 用 `set_exception` 存起來；而且這裡的 `RerankFailure` 在 `_answer`／VLM 路徑就被攔下，不會抵達 task 的邊界。
+- 不是 `CancelledError`，所以 LightRAG 限流 worker 對 `CancelledError` 的特殊處理不會碰到它；`generic_rerank_api` 自帶的 tenacity 重試只重試 `Exception`，`RerankFailure` 是在它外面拋的。
+
+實際驗證靠測試：CLI（naive、mix、`--vlm-enhanced`）、`eval`、Python API 的 rerank 失敗測試全部通過，且假 server 沒收到答案請求。
+
+### 紅燈紀錄
+
+每個新測試都先在改程式前跑過：
+
+- 第 1、4 項：`test_no_answer_generation_request_is_sent_when_rerank_fails` 3 個子案例失敗（答案請求照樣送出，VLM 路徑也是）、`QueryRerankFailureCacheTest` 2 個測試失敗（`0 != 1`：第二次命中前一次失敗留下的快取，沒有重新生成答案）。
+- 第 5 項：15 個子案例中 8 個失敗（index 是 bool、index 重複、筆數不足、分數是字串／null／bool／NaN／inf）；其餘 7 個（results 不是 list、物件、缺 index、缺 relevance_score、index 是字串／浮點數／負數）在舊程式碼就已經算失敗，因為 `generic_rerank_api` 內就以空結果或 `KeyError` 結束，或舊的 index 範圍檢查擋下；它們是回歸保護，沒有紅燈。
+- 第 3 項：CLI 3 個子案例、`eval` 1 個、Python API 4 個子案例失敗；`ingest` 不檢查 rerank 的測試本來就通過（對照組）。
+- 第 6 項：`QueryRerankEnvironmentTest` 的 4 個子案例失敗（naive 的 `top_n` 是 1 而不是 20、prompt 的 Document Chunks 是空的；mix 因 `top_n=1` 與回應筆數不合而被判定 rerank 失敗）。
+- 第 8 項：表頭測試因缺 `chunk_top_k=20` 失敗。
+- 沒有用「暫時改程式」的方式看紅燈：所有紅燈都是新測試對上未修改的程式碼。
+
+為了讓第 3 項的測試通過，`assert_failed_because_of_rerank` 的 `"rerank"` 斷言改成不分大小寫（連線檢查階段的訊息是 `EndpointError: Rerank 端點 ...`，不含小寫的 rerank）；其他斷言不變。
+
+### 最後一次主套件結果
+
+`/Users/curtis/GitHub/llm-lab/.venv/bin/python -m unittest`（worktree 根目錄，基於 integration 的 c5db0b4 加本次修正；integration tip 仍是 c5db0b4，merge 進來是 Already up to date，所以這個結果就是 merge 後的結果）：
+
+```
+Ran 171 tests in 745.608s
+OK
+```
+
+（160 個既有測試 + 11 個新測試。）
+
+### 疑慮
+
+- 第 5 項的筆數檢查假設 reranker 會遵守 `top_n`（回傳剛好 `min(top_n, 候選數)` 筆）。假 server 這樣做，mlx-vlm 0.7.10 是否如此沒有驗證（不能對 8081 發請求），ticket 03 的實機驗證要確認；如果它忽略 `top_n` 回全部候選，候選數超過 20 時每次查詢都會被判定 rerank 失敗。
+- `results` 不是 list 時，錯誤訊息是「回傳空結果」而不是「results 不是 list」：`generic_rerank_api` 把非 list 轉成空結果，要分辨得自己實作 HTTP，spec 規定不這樣做。
+- LightRAG 還會讀其他行程環境變數當查詢預設值（例如 `TOP_K`、`COSINE_THRESHOLD`、`RELATED_CHUNK_NUMBER`、`KG_CHUNK_PICK_METHOD`；`MAX_TOTAL_TOKENS` 等三個 token 上限已由 `.env` 明確指定），這次只處理 code-review 點名的兩個，其餘沒有動。

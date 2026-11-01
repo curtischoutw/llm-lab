@@ -30,6 +30,7 @@ from tests.test_pipeline import (
     RERANK_BUDGET_ENV,
     RERANK_MARKER,
     PipelineCase,
+    closed_port_url,
     query_prompts,
     parsed_office_sources,
     table_bodies,
@@ -379,6 +380,32 @@ class QueryRerankFailureTest(PythonApiCase):
                     result.stdout.splitlines(),
                     [f"evaluate {good}", "evaluate " + " ".join(["ERROR"] * 5), f"evaluate {good}", f"query {CHAT_REPLY}"],
                 )
+
+
+class RerankUnreachableTest(PythonApiCase):
+    """rerank 端點連不上時，query 與 evaluate 在連線檢查階段就拋出 EndpointError（訊息含位址），不送任何請求；匯入不檢查。"""
+
+    def setUp(self):
+        super().setUp()
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+        self.requests_before = len(self.server.requests)
+
+    def test_query_and_evaluate_fail_naming_the_rerank_endpoint_before_sending_any_request(self):
+        dead = closed_port_url()
+        for mode in ("functions", "session"):
+            for step in ("query", "evaluate"):
+                with self.subTest(mode=mode, step=step):
+                    result = self.run_api(step, mode=mode, RERANK_BASE_URL=dead)
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn("EndpointError", result.stderr)
+                    self.assertIn("Rerank", result.stderr)
+                    self.assertIn(dead, result.stderr)
+                    self.assertEqual(self.server.requests[self.requests_before :], [])
+
+    def test_ingest_does_not_check_the_rerank_endpoint(self):
+        result = self.run_api("ingest", RERANK_BASE_URL=closed_port_url())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class EmptyIndexTest(PythonApiCase):
