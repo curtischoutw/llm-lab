@@ -239,6 +239,31 @@ class ConfigValidationTest(unittest.TestCase):
 
 # 來自 ticket 的範例（獨立於 rag_lab.config 的名單）：查詢、匯入、儲存位置、RAG-Anything 各取幾個
 UNMANAGED_SAMPLE = ("TOP_K", "COSINE_THRESHOLD", "CHUNK_SIZE", "WORKSPACE", "ENABLE_TABLE_PROCESSING", "MINERU_PARSE_METHOD")
+# MinerU 3.4.5 讀的、會改變 `mineru -b pipeline -m auto` 解析結果的變數（來自 ticket env-02 的清單，獨立於 rag_lab.config 的名單）
+MINERU_RESULT_ENV = (
+    "MINERU_TOOLS_CONFIG_JSON",
+    "MINERU_DEVICE_MODE",
+    "MINERU_FORMULA_ENABLE",
+    "MINERU_TABLE_ENABLE",
+    "MINERU_OCR_DET_MASK_INLINE_FORMULA_ENABLE",
+    "MINERU_TABLE_MERGE_ENABLE",
+    "MINERU_FORMULA_CH_SUPPORT",
+    "MINERU_MODEL_SOURCE",
+)
+# MinerU 讀、但只影響速度、記憶體、log、服務維運，或 rag_lab 的 `-b pipeline` 走不到的變數：不在名單內
+MINERU_NON_RESULT_ENV = (
+    "MINERU_LOG_LEVEL",
+    "MINERU_PROCESSING_WINDOW_SIZE",
+    "MINERU_VIRTUAL_VRAM_SIZE",
+    "MINERU_PDF_RENDER_THREADS",
+    "MINERU_INTRA_OP_NUM_THREADS",
+    "MINERU_API_MAX_CONCURRENT_REQUESTS",
+    "MINERU_LOCAL_API_STARTUP_TIMEOUT_SECONDS",
+    "MINERU_GRADIO_DEFAULT_LOCALE",
+    "MINERU_VLM_TABLE_ENABLE",
+    "MINERU_VLM_FORMULA_ENABLE",
+    "MINERU_VL_SERVER",
+)
 # rag_lab 已經明確傳給 LightRAG／RAG-Anything 的參數所對應的變數：不在名單內
 MANAGED_ENV_NAMES = (
     "MAX_TOTAL_TOKENS",
@@ -298,8 +323,37 @@ class UnmanagedLightragEnvTest(unittest.TestCase):
                 self.assertIn("輸入錯誤", result.stderr)
                 self.assertNotIn("設定錯誤", result.stderr)
 
+    def test_every_subcommand_rejects_a_mineru_variable_that_changes_parsing_naming_it_and_never_printing_its_value(self):
+        value = "sentinel-value-7731"
+        for args in (["ingest", "paper.pdf"], ["query", "q"], ["eval", "questions.jsonl"]):
+            for name in MINERU_RESULT_ENV:
+                with self.subTest(args=args[0], name=name):
+                    result = run_cli(args, {name: value})
+                    self.assert_rejected_naming(result, (name,))
+                    self.assertNotIn(value, result.stdout + result.stderr)
+
+    def test_a_mineru_variable_in_the_working_directory_dotenv_is_checked_too(self):
+        # MinerU 子行程繼承 rag_lab 行程的環境，.env 的內容經 load_dotenv 進入行程環境
+        with tempfile.TemporaryDirectory() as cwd:
+            Path(cwd, ".env").write_text("MINERU_TABLE_ENABLE=false\n", encoding="utf-8")
+            result = run_cli(["eval", "q.jsonl"], {"PYTHONPATH": str(REPO_ROOT)}, cwd=Path(cwd))
+        self.assert_rejected_naming(result, ("MINERU_TABLE_ENABLE",))
+        self.assertNotIn("false", result.stderr)
+
+    def test_mineru_variables_that_only_affect_speed_logs_or_unreached_backends_are_not_listed(self):
+        for name in MINERU_NON_RESULT_ENV:
+            with self.subTest(name=name):
+                result = run_cli(["eval", "q.jsonl"], {name: "1"})
+                self.assertIn("輸入錯誤", result.stderr)
+                self.assertNotIn("設定錯誤", result.stderr)
+
+    def test_the_list_covers_the_three_libraries_whose_variables_it_was_generated_from(self):
+        from rag_lab.config import UNMANAGED_LIBRARY_ENV_VERSIONS
+
+        self.assertEqual(set(UNMANAGED_LIBRARY_ENV_VERSIONS), {"lightrag-hku", "raganything", "mineru"})
+
     def test_the_list_was_generated_for_the_installed_library_versions(self):
-        # 升級 lightrag-hku 或 raganything 後這個測試會失敗：照 rag_lab/config.py 模組 docstring 重新產生名單，
+        # 升級 lightrag-hku、raganything 或 mineru 後這個測試會失敗：照 rag_lab/config.py 模組 docstring 重新產生名單，
         # 更新 UNMANAGED_LIBRARY_ENV 與 UNMANAGED_LIBRARY_ENV_VERSIONS，並同步 README
         from importlib.metadata import version
 
