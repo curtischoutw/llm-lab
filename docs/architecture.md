@@ -45,7 +45,7 @@ rag_storage/   知識圖譜＋向量庫＋快取（＝知識庫本體）
 | `scripts/` | 維運工具：下載台新信用卡內容、論文與其他格式的文件，啟動 VLM server，檢查端點；另有 macOS 上 LibreOffice 用的 fontconfig 設定 | 是 | — | 不能 |
 | `tests/` | 自動測試與測試用的假 server、假 MinerU、假 LibreOffice | 是 | — | 不能 |
 | `eval/` | `eval` 指令的題目檔（JSONL）：範例 `questions.example.jsonl`（論文）、`questions.formats.jsonl`（`data/documents/` 的 6 份文件，其中 2 題跨格式題同時問到論文）、`questions.format_check.jsonl`（`data/format_check/`，只用在格式驗證知識庫）、`questions.taishin.jsonl`（台新信用卡知識庫的 20 題，7 個類別） | 是 | 手寫 | 範例檔被測試引用，不能刪；另外三份是 README 第 5 節實測數據的題目 |
-| `docs/` | 這份架構文件；`docs/agents/` 是給 Claude Code 技能讀的設定（issue tracker 位置、triage 標籤、domain 文件的讀法） | 是 | 手寫 | 不能 |
+| `docs/` | 這份架構文件；`taishin-eval-final.html` 是台新知識庫第三次 eval 的逐題對照（由 `output/reranker_verify/final_review.py` 產生後複製進來）；`docs/agents/` 是給 Claude Code 技能讀的設定（issue tracker 位置、triage 標籤、domain 文件的讀法） | 是 | 手寫 | 不能 |
 | `.scratch/rag-anything-lab/` | 主程式的規格 `spec.md` 與 7 張 ticket（`issues/`）。ticket 03–07 末尾有實測結果段落，README 的數據出自這裡 | 是 | 手寫 | 不建議：設計決策與實測結果記錄在這裡 |
 | `.scratch/architecture-and-python-api/` | 這份架構文件、Python 範例、`Session` API 的規格與 5 張 ticket（01–05） | 是 | 手寫 | 不建議，理由同上 |
 | `.scratch/taishin-credit-card-kb/` | 台新信用卡知識庫的規格、13 張 ticket（01–13）與兩份改善答案品質的提案（`proposal-answer-quality.md`、`proposal-cross-card-subquestions.md`，含實驗結果） | 是 | 手寫 | 不建議，理由同上 |

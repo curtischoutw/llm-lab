@@ -90,7 +90,12 @@ cp .env.example .env
 - 2026-10-30 有 3 筆失敗：權益頁的 Visa、Mastercard、JCB 三個子頁轉址到各國際組織的網站，不是台新的頁面。其中 2 頁找不到主內容區，Mastercard 回 403。
 - 需要 Google Chrome（預設路徑 `/Applications/Google Chrome.app`，可以用 `TAISHIN_CHROME` 指定）與 LibreOffice（PATH 上的 `libreoffice` 或 `soffice`）。
 - **更新權益內容**：已存在的檔案會略過，所以重新執行不會更新內容。要更新時，刪除 `data/taishin_credit_card/` 與 `rag_storage/`，重新下載，再重新匯入。
-- 台新官網的著作權聲明禁止未經授權的重製。這些資料只放在本機，不要推上 GitHub（`data/` 不進版本控管）。
+- 台新官網的著作權聲明禁止未經授權的重製。下載的原始文件（`data/taishin_credit_card/`）只放在本機，不要推上 GitHub（`data/` 不進版本控管）。
+- 這個 repo 是公開的，有三處引用了部分官網原文，由 repo 擁有者決定公開（2026-11-02）：
+  - 題目檔 `eval/questions.taishin.jsonl` 的參考答案；
+  - `.scratch/taishin-credit-card-kb/` 的規格、ticket 與提案；
+  - `docs/taishin-eval-final.html`：第三次 eval 的 mix 答案、參考答案與判讀理由（第 5 節）。
+- 其他匯入後的知識庫（`rag_storage/`）、解析結果、eval 結果與判讀紀錄（`output/`、`eval_results/`）都含有原文，不進版本控管。
 
 ### 下載論文（前一版知識庫）
 
@@ -309,7 +314,7 @@ with Session() as session:
 
 ### 台新信用卡知識庫：eval 與 reranker（2026-10-31～11-01）
 
-題目檔 `eval/questions.taishin.jsonl`，20 題 × 5 種模式。每次都由兩個沒參與撰寫的 agent 各自判讀（✓ 答對、△ 部分對、✗ 答錯），分歧由主對話裁決。判讀紀錄只放本機：`output/taishin_eval/`、`output/taishin_eval2/`、`output/reranker_verify/`。
+題目檔 `eval/questions.taishin.jsonl`，20 題 × 5 種模式。每次都由兩個沒參與撰寫的 agent 各自判讀（✓ 答對、△ 部分對、✗ 答錯），分歧由主對話裁決。判讀紀錄只放本機：`output/taishin_eval/`、`output/taishin_eval2/`、`output/reranker_verify/`。第三次 eval 的逐題 mix 答案、參考答案與判讀理由整理在 `docs/taishin-eval-final.html`，用瀏覽器開啟。
 
 | | 第一次 | 第二次 | 第三次 |
 | --- | --- | --- | --- |
