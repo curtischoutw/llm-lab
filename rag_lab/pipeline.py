@@ -619,18 +619,17 @@ def query_param(mode: str, settings: Settings) -> QueryParam:
     return QueryParam(mode=mode, **query_kwargs(settings))
 
 
-def _raise_if_rerank_failed(rerank_failures: list[str], mode: str) -> None:
-    """這次查詢期間 rerank 有失敗就拋 PipelineError。
+def _rerank_failed(failure: models.RerankFailure, mode: str) -> PipelineError:
+    """把穿過 LightRAG 的 RerankFailure 轉成查詢失敗的例外。
 
     Args:
-        rerank_failures: models.collect_rerank_failures 收集到的失敗訊息（已含端點位址與原因，不含 API key）。
+        failure: models.rerank_model_func 拋出的 RerankFailure（訊息已含端點位址與原因，不含 API key）。
         mode: 檢索模式（寫進錯誤訊息）。
 
-    Raises:
-        PipelineError: rerank_failures 不是空的；訊息列出不重複的失敗原因。
+    Returns:
+        PipelineError：查詢在產生答案之前就中止。
     """
-    if rerank_failures:
-        raise PipelineError(f"查詢失敗（mode={mode}）：rerank 失敗：{'；'.join(dict.fromkeys(rerank_failures))}")
+    return PipelineError(f"查詢失敗（mode={mode}）：rerank 失敗：{failure}")
 
 
 async def _answer(rag: RAGAnything, question: str, mode: str, settings: Settings) -> str:
@@ -649,9 +648,10 @@ async def _answer(rag: RAGAnything, question: str, mode: str, settings: Settings
         PipelineError: rerank 失敗（LightRAG 已改用原本的排序，這裡不接受），LightRAG 回報查詢失敗
             （訊息含原例外文字），或成功但沒有答案內容。
     """
-    with models.collect_rerank_failures() as rerank_failures:
+    try:
         result = await rag.lightrag.aquery_llm(question, query_param(mode, settings))
-    _raise_if_rerank_failed(rerank_failures, mode)
+    except models.RerankFailure as exc:
+        raise _rerank_failed(exc, mode) from exc
     if result.get("status") != "success":
         raise PipelineError(f"查詢失敗（mode={mode}）：{result.get('message')}")
     answer = (result.get("llm_response") or {}).get("content")
@@ -683,9 +683,10 @@ async def _query(rag: RAGAnything, question: str, mode: str, vlm_enhanced: bool,
     # RAG-Anything 的 VLM 增強路徑：先取回檢索 prompt、把圖片路徑換成 base64 圖片再交給 VLM。
     # 它沒有 aquery_llm 的 status 欄位；失敗時回 None（LLM 失敗的訊息 LightRAG 已吞掉），
     # VLM 失敗則拋 EndpointError（含端點與位址）。
-    with models.collect_rerank_failures() as rerank_failures:
+    try:
         answer = await rag.aquery_vlm_enhanced(question, mode=mode, **query_kwargs(settings))
-    _raise_if_rerank_failed(rerank_failures, mode)
+    except models.RerankFailure as exc:
+        raise _rerank_failed(exc, mode) from exc
     if not answer or not isinstance(answer, str):
         raise PipelineError(f"查詢沒有回傳答案內容（mode={mode}，vlm_enhanced=True）")
     return answer

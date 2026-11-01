@@ -39,10 +39,8 @@ Dependencies: lightrag-hku、raganything（由 raganything 帶入）；tenacity 
 """
 
 import base64
+import math
 import socket
-from collections.abc import Iterator
-from contextlib import contextmanager
-from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -396,43 +394,56 @@ def build_embedding_func() -> EmbeddingFunc:
 # Rerank
 # ==============================
 
-_rerank_failures: ContextVar[list[str] | None] = ContextVar("rerank_failures", default=None)
 
+class RerankFailure(BaseException):
+    """rerank 沒有正常完成。刻意繼承 BaseException（不是 Exception）：LightRAG 的 apply_rerank_if_enabled 只攔 Exception
+    並改用原本的排序，繼承 BaseException 才能穿過 LightRAG 的查詢流程，在它呼叫 LLM 產生答案、寫入 LLM 快取之前中止查詢。
+    只有 pipeline 的查詢入口（_answer、VLM 增強路徑）會攔它並轉成 PipelineError；其他地方不該攔。
 
-@contextmanager
-def collect_rerank_failures() -> Iterator[list[str]]:
-    """收集區塊內（含區塊內建立的子 task）發生的 rerank 失敗，區塊結束時還原成原本的清單。
-
-    Yields:
-        失敗訊息的清單：rerank_model_func 每判定一次失敗就附加一則（含端點位址與原因）；區塊結束後仍可讀取。
+    Attributes:
+        error: 失敗的細節（EndpointError，含端點位址與原因）。
     """
-    failures: list[str] = []
-    token = _rerank_failures.set(failures)
-    try:
-        yield failures
-    finally:
-        _rerank_failures.reset(token)
+
+    def __init__(self, error: EndpointError):
+        super().__init__(str(error))
+        self.error = error
 
 
-def _fail_rerank(url: str, detail: str) -> EndpointError:
-    """記一次 rerank 失敗到目前這次查詢的清單，並回傳要拋出的例外。
+def _rerank_problem(results: list[dict[str, Any]], candidates: int, top_n: int | None) -> str | None:
+    """檢查 rerank 回應的內容；LightRAG 對不合法的內容靜默略過或沿用原排序，所以這裡先擋下。
+
+    合法的回應：筆數剛好是 min(top_n, 候選數)（top_n 為 None 時是候選數）、每筆的 index 是範圍內的 int（bool 不算）
+    且不重複、relevance_score 是有限的數字（int 或 float，bool 不算）。results 不是 list、缺欄位的情況
+    在 generic_rerank_api 內就以空結果或例外結束，不會到這裡。
 
     Args:
-        url: rerank 端點的完整位址。
-        detail: 失敗原因。
+        results: generic_rerank_api 標準化後的結果。
+        candidates: 送出的候選 chunk 數。
+        top_n: 送出的 top_n；None 表示不限。
 
     Returns:
-        EndpointError("Rerank", ...)。
+        第一個發現的問題描述；回應合法時為 None。
     """
-    error = EndpointError("Rerank", url, detail)
-    failures = _rerank_failures.get()
-    if failures is not None:
-        failures.append(str(error))
-    return error
+    if not results:
+        return f"回傳空結果（送出 {candidates} 個候選 chunk）"
+    expected = candidates if top_n is None else min(top_n, candidates)
+    if len(results) != expected:
+        return f"回傳 {len(results)} 筆結果，應為 {expected} 筆（候選 {candidates} 個、top_n={top_n}）"
+    seen: set[int] = set()
+    for item in results:
+        index, score = item["index"], item["relevance_score"]
+        if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < candidates:
+            return f"回傳的 index {index!r} 不是候選範圍 0..{candidates - 1} 內的整數"
+        if index in seen:
+            return f"回傳的 index {index} 重複"
+        seen.add(index)
+        if isinstance(score, bool) or not isinstance(score, int | float) or not math.isfinite(score):
+            return f"index {index} 的 relevance_score {score!r} 不是有限的數字"
+    return None
 
 
 async def rerank_model_func(query: str, documents: list[str], top_n: int | None = None) -> list[dict[str, Any]]:
-    """呼叫 rerank 端點，替 LightRAG 重新排序候選 chunk；沒有正常完成時記錄失敗並拋出。
+    """呼叫 rerank 端點，替 LightRAG 重新排序候選 chunk；沒有正常完成時拋出 RerankFailure。
 
     Args:
         query: 查詢文字。
@@ -443,8 +454,8 @@ async def rerank_model_func(query: str, documents: list[str], top_n: int | None 
         [{"index": 候選的位置, "relevance_score": 分數}, ...]，依分數由高到低；LightRAG 依此順序重排候選。
 
     Raises:
-        EndpointError: 請求例外、HTTP 錯誤、回傳空結果，或有 index 超出候選範圍。失敗已記進目前這次查詢的清單
-            （collect_rerank_failures）；LightRAG 會吞掉這個例外，由 pipeline 在查詢結束後讓查詢失敗。
+        RerankFailure: 請求例外、HTTP 錯誤，或回應不合法（見 _rerank_problem）（包著 EndpointError）。它是
+            BaseException，會穿過 LightRAG，由 pipeline 的查詢入口轉成 PipelineError，查詢在產生答案之前就中止。
     """
     s = get_settings()
     url = f"{s.rerank_base_url}/rerank"
@@ -458,10 +469,8 @@ async def rerank_model_func(query: str, documents: list[str], top_n: int | None 
             top_n=top_n,
         )
     except Exception as exc:
-        raise _fail_rerank(url, _describe(exc)) from exc
-    if not results:
-        raise _fail_rerank(url, f"回傳空結果（送出 {len(documents)} 個候選 chunk）")
-    out_of_range = [r["index"] for r in results if not isinstance(r["index"], int) or not 0 <= r["index"] < len(documents)]
-    if out_of_range:
-        raise _fail_rerank(url, f"回傳的 index {out_of_range} 超出候選範圍 0..{len(documents) - 1}")
+        raise RerankFailure(EndpointError("Rerank", url, _describe(exc))) from exc
+    problem = _rerank_problem(results, len(documents), top_n)
+    if problem:
+        raise RerankFailure(EndpointError("Rerank", url, problem))
     return results

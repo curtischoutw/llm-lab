@@ -1369,6 +1369,91 @@ class QueryRerankFailureTest(PipelineCase):
         self.server.rerank_fault = "empty"
         self.assert_failed_because_of_rerank(self.query("What is Fake Entity Alpha?", "--vlm-enhanced"))
 
+    def test_a_malformed_rerank_response_fails_the_query(self):
+        # 每個案例是 count（候選數量）→ results 欄位的原始內容；每個案例都從一份合法的回應改壞一個地方
+        def valid(count: int) -> list[dict]:
+            return [{"index": i, "relevance_score": 1.0 - i / 100} for i in range(count)]
+
+        def with_item(count: int, position: int, item: dict) -> list[dict]:
+            results = valid(count)
+            results[position] = item
+            return results
+
+        cases = {
+            "results is not a list": lambda count: "oops",
+            "results is an object": lambda count: {"0": 0.5},
+            "item without index": lambda count: with_item(count, 0, {"relevance_score": 0.5}),
+            "item without relevance_score": lambda count: with_item(count, 0, {"index": 0}),
+            "index is a string": lambda count: with_item(count, 0, {"index": "0", "relevance_score": 0.5}),
+            "index is a float": lambda count: with_item(count, 0, {"index": 0.0, "relevance_score": 0.5}),
+            "index is a bool": lambda count: with_item(count, 0, {"index": False, "relevance_score": 0.5}),
+            "index is negative": lambda count: with_item(count, 0, {"index": -1, "relevance_score": 0.5}),
+            "duplicate index": lambda count: with_item(count, 1, {"index": 0, "relevance_score": 0.5}),
+            "fewer results than candidates": lambda count: valid(count)[:-1],
+            "score is a string": lambda count: with_item(count, 0, {"index": 0, "relevance_score": "0.5"}),
+            "score is null": lambda count: with_item(count, 0, {"index": 0, "relevance_score": None}),
+            "score is a bool": lambda count: with_item(count, 0, {"index": 0, "relevance_score": True}),
+            "score is NaN": lambda count: with_item(count, 0, {"index": 0, "relevance_score": float("nan")}),
+            "score is infinite": lambda count: with_item(count, 0, {"index": 0, "relevance_score": float("inf")}),
+        }
+        for name, results in cases.items():
+            with self.subTest(name):
+                self.server.rerank_results = results
+                self.assert_failed_because_of_rerank(self.query("What is Fake Entity Alpha?", "--mode", "naive"))
+
+    def test_a_well_formed_rerank_response_with_integer_scores_is_accepted(self):
+        # 對照組：上面的失敗案例只差在欄位不合法；整數分數、分數相同、順序不照分數排都是合法的回應
+        self.server.rerank_results = lambda count: [{"index": i, "relevance_score": 1} for i in reversed(range(count))]
+        result = self.query("What is Fake Entity Alpha?", "--mode", "naive")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), CHAT_REPLY)
+
+    def test_no_answer_generation_request_is_sent_when_rerank_fails(self):
+        # 關鍵字抽取在 rerank 之前就會送出（帶 response_format，不算答案請求）；答案生成與 VLM 請求不該送出
+        self.server.rerank_fault = "empty"
+        for extra in (("--mode", "naive"), ("--mode", "mix"), ("--mode", "mix", "--vlm-enhanced")):
+            with self.subTest(extra=extra):
+                before = len(self.server.requests)
+                self.assert_failed_because_of_rerank(self.query("What is Fake Entity Alpha?", *extra))
+                self.assertEqual(query_prompts(self.server.requests[before:]), [])
+
+
+class QueryRerankFailureCacheTest(PipelineCase):
+    """rerank 失敗不能在 LLM 快取留下沒經過 rerank 的答案：同一題之後 rerank 成功時要用 rerank 後的順序重新生成。"""
+
+    def setUp(self):
+        super().setUp()
+        self.document = self.tmp / "multichunk.pdf"
+        self.document.write_bytes(b"%PDF-1.4 fake")
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+
+    def assert_success_prompt_follows_rerank_after_a_failure(self, *extra: str) -> None:
+        """同一題先 rerank 失敗、再 rerank 成功（marker 排最前面）：第二次要重新生成答案，prompt 含 marker。
+
+        Args:
+            *extra: 額外的命令列引數。
+        """
+        question = "What relates to Fake Entity 3-17? (failure then success)"
+        self.server.rerank_fault = "empty"
+        failed = self.query(question, *extra, **RERANK_BUDGET_ENV)
+        self.assertEqual(failed.returncode, 1, failed.stdout + failed.stderr)
+
+        self.server.rerank_fault = None
+        self.server.rerank_promote = RERANK_MARKER
+        before = len(self.server.requests)
+        succeeded = self.query(question, *extra, **RERANK_BUDGET_ENV)
+        self.assertEqual(succeeded.returncode, 0, succeeded.stdout + succeeded.stderr)
+        prompts = query_prompts(self.server.requests[before:])
+        self.assertEqual(len(prompts), 1, "rerank 成功的那次查詢要重新生成答案，不能命中前一次失敗留下的快取")
+        self.assertIn(RERANK_MARKER, prompts[0])
+
+    def test_mix_query_regenerates_the_answer_after_a_rerank_failure(self):
+        self.assert_success_prompt_follows_rerank_after_a_failure()
+
+    def test_naive_query_regenerates_the_answer_after_a_rerank_failure(self):
+        self.assert_success_prompt_follows_rerank_after_a_failure("--mode", "naive")
+
 
 # ==============================
 # PATH 處理
