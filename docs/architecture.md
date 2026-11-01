@@ -21,7 +21,7 @@ rag_storage/   知識圖譜＋向量庫＋快取（＝知識庫本體）
 檢索（naive／local／global／hybrid／mix） → reranker 重新排序候選 chunk → 依 token 上限截斷成 context → LLM 依 context 產生答案
 ```
 
-查詢時，LightRAG 取得候選 chunk（向量相似度與圖譜關聯）之後、依 token 上限截斷之前，會先把候選 chunk 的內容連同問題送到 reranker 的 `POST {RERANK_BASE_URL}/rerank`，依回傳的分數由高到低重新排序，保留分數最高的 `chunk_top_k`（LightRAG 預設 20）個，再依 token 上限截斷；所以排在前面的是和問題最相關的 chunk，而不是向量相似度最高的。所有查詢入口一律如此（`query`、`query --vlm-enhanced`、`eval`、`Session.query`／`evaluate`、模組函式），沒有開關；匯入不使用。rerank 函式（`models.rerank_model_func`）必須在建立 LightRAG 實例時傳入（`pipeline.build_rag`），初始化之後才設不會對 mix 生效。目前 rerank 失敗（端點沒回應、回錯誤）時 LightRAG 會記錄錯誤並改用原本的排序，查詢照常成功；讓它變成查詢失敗是 `.scratch/local-reranker/` 的 ticket 02。
+查詢時，LightRAG 取得候選 chunk（向量相似度與圖譜關聯）之後、依 token 上限截斷之前，會先把候選 chunk 的內容連同問題送到 reranker 的 `POST {RERANK_BASE_URL}/rerank`，依回傳的分數由高到低重新排序，保留分數最高的 `chunk_top_k`（LightRAG 預設 20）個，再依 token 上限截斷；所以排在前面的是和問題最相關的 chunk，而不是向量相似度最高的。所有查詢入口一律如此（`query`、`query --vlm-enhanced`、`eval`、`Session.query`／`evaluate`、模組函式），沒有開關；匯入不使用。rerank 函式（`models.rerank_model_func`）必須在建立 LightRAG 實例時傳入（`pipeline.build_rag`），初始化之後才設不會對 mix 生效。rerank 沒有正常完成時，該次查詢以查詢失敗結束，不會拿到沒經過 rerank 的答案：LightRAG 在 rerank 函式拋例外時記錄錯誤並改用原本的排序，回傳空結果、回傳的 index 超出範圍時也不報錯（沿用原排序或靜默略過），所以判定放在 `models.rerank_model_func`：請求例外、HTTP 錯誤（含候選 chunk 有空白內容時 mlx-vlm 回的 400）、空結果、index 超出範圍任一種，都先記進「這一次查詢」的失敗清單（`models.collect_rerank_failures`，用 `ContextVar` 綁定，查詢結束即還原，所以不會帶到下一次查詢）再拋出；`pipeline` 在 LightRAG 查詢結束後檢查清單，有失敗就拋 `PipelineError`（`query` 結束碼 1、`eval` 記成該格的失敗、Python API 拋例外），訊息以「rerank 失敗」開頭，帶端點位址與端點回報的錯誤，不含 API key。做法與 ticket 12 處理 RAG-Anything 吞掉的寫入失敗相同：在 rag_lab 這一層記錄、在結果層判定。
 
 `ingest` 接受 PDF、PPT、Word、Excel 與 8 種圖片格式（副檔名清單在 `rag_lab/formats.py`）。解析由 RAG-Anything 的 `parse_document` 依副檔名分派：圖片直接交給 MinerU；`.png`、`.jpg`、`.jpeg` 以外的圖片先由 RAG-Anything 用 Pillow 轉成 png；Office 文件（.ppt .pptx .doc .docx .xls .xlsx）先由 RAG-Anything 呼叫 PATH 上的 LibreOffice（`libreoffice`，找不到再試 `soffice`）轉成 PDF，寫在 `PARSER_OUTPUT_DIR` 底下，再交給 MinerU。專案只決定放行哪些副檔名，不判斷怎麼解析。沒有安裝 LibreOffice 時，RAG-Anything 的原始錯誤（含安裝方式）成為那份文件的匯入失敗原因，專案沒有改寫它。
 
@@ -106,7 +106,7 @@ __main__ ──► config
 | `__main__.py` | CLI 入口：解析參數、驗證輸入、呼叫 `pipeline`／`graph_report`、格式化輸出、決定結束碼（0 成功、1 執行失敗、2 用法或輸入錯誤、3 設定錯誤） | `main(argv)`；子命令 `ingest`、`query`、`graph`、`eval` |
 | `formats.py` | 支援的格式清單（PDF、PPT、Word、Excel 與 8 種圖片副檔名），專案裡只定義這一次；CLI 的資料夾過濾與錯誤訊息都從這裡取值。只靠標準函式庫，所以輸入路徑驗證能在載入 LightRAG／torch 之前完成 | `FORMATS`、`SUPPORTED_EXTENSIONS`、`is_supported(path)`、`describe_supported()` |
 | `config.py` | 從 `.env` 與環境變數讀設定並驗證；必填欄位缺漏或格式錯就拋錯，不給預設值（只有 `EMBED_QUERY_PREFIX` 是選填，預設空字串） | `get_settings() -> Settings`、`ConfigError` |
-| `models.py` | 把三個 OpenAI 相容端點包成 RAG-Anything 需要的模型函式、把 rerank 端點包成 LightRAG 的 rerank 函式；失敗包成帶端點名稱與位址的錯誤；計數圖、表、公式描述的失敗與描述後的內容寫入索引的失敗（RAG-Anything 自己會吞掉） | `llm_model_func`、`vision_model_func`、`build_embedding_func()`、`rerank_model_func`、`check_reachable(...)`、`EndpointError` |
+| `models.py` | 把三個 OpenAI 相容端點包成 RAG-Anything 需要的模型函式、把 rerank 端點包成 LightRAG 的 rerank 函式；失敗包成帶端點名稱與位址的錯誤；計數圖、表、公式描述的失敗與描述後的內容寫入索引的失敗（RAG-Anything 自己會吞掉）；判定 rerank 失敗並記進該次查詢的失敗清單（LightRAG 自己會吞掉） | `llm_model_func`、`vision_model_func`、`build_embedding_func()`、`rerank_model_func`、`check_reachable(...)`、`EndpointError` |
 | `tables.py` | 把太大的表格縮短（拿掉值為 1 的 `rowspan`／`colspan`），仍超過 800 token 就依列切成小表，每張重複表頭列；只靠標準函式庫。`pipeline.LabRAGAnything.parse_document` 在 RAG-Anything 算好文件 ID、存好解析快取之後，才對回傳給呼叫端的 content list 套用它，所以文件 ID 與解析快取不變 | `limit_table_sizes(content_list, count_tokens)`、`TABLE_BODY_MAX_TOKENS` |
 | `pipeline.py` | 核心流程：建立 RAGAnything 實例（`LabRAGAnything`：切大表格、計數寫入失敗）、匯入（解析、建圖、多模態描述）、查詢、批次比較；把 LightRAG 會吞掉的錯誤轉成可偵測的失敗（圖表公式描述或多模態寫入失敗的文件，整批結束後改記成 `failed`）；`Session` 讓同一個 process 只初始化一次、依序呼叫 | `Session`（`ingest`、`query`、`evaluate`、`close`）、模組函式 `ingest(documents) -> IngestSummary`、`query(question, mode, vlm_enhanced=False) -> str`、`evaluate(questions) -> list[list[Cell]]`、`PipelineError`、`SessionError`、`SessionClosedError` |
 | `evaluation.py` | `eval` 的題目檔讀取驗證與 Markdown 對照表排版，不需要任何模型 | `load_questions(path)`、`render_report(...)`、`RETRIEVAL_MODES`、`QuestionFileError` |
@@ -132,15 +132,15 @@ __main__ ──► config
 | 檔案 | 內容 |
 |---|---|
 | `__init__.py` | 測試套件的說明：測試從子行程進入、模型用假 server |
-| `fake_openai_server.py` | 假的 OpenAI 相容 server：chat、vision、embedding、rerank 都回固定且合法的內容，並記錄收到的請求（含 `Authorization` 標頭）；可注入故障（`fail_chat`、`fail_vision`、`fail_chat_containing`、`fail_embed_containing`、`fail_rerank` 等），rerank 的順序可由 `rerank_promote`／`rerank_demote` 指定 |
+| `fake_openai_server.py` | 假的 OpenAI 相容 server：chat、vision、embedding、rerank 都回固定且合法的內容，並記錄收到的請求（含 `Authorization` 標頭）；可注入故障（`fail_chat`、`fail_vision`、`fail_chat_containing`、`fail_embed_containing`、`rerank_fault` 等），rerank 的順序可由 `rerank_promote`／`rerank_demote` 指定 |
 | `fake_mineru.py` | 假的 `mineru` 指令：依主檔名寫出固定的解析結果（PDF、圖片與假 LibreOffice 轉出的 PDF 相同）（文字、一張圖、一個表、一條公式）；主檔名以 `bigtable` 開頭時表格換成 60 列 × 6 欄的大表格（`bigspan` 開頭的版本有一格 rowspan 跨到表尾），以 `spans` 開頭時小表格的儲存格帶 `rowspan=1 colspan=1`；PDF 裡有假 LibreOffice 寫的來源標記行時，多輸出一段 `Converted from Office document: <來源第一行>`，讓主檔名相同的 Office 文件分辨得出來；設了 `FAKE_MINERU_VERSION_LOG` 時記錄每次 `--version`，用來計算初始化次數 |
 | `fake_libreoffice.py` | 假的 `libreoffice`／`soffice` 指令：收到 `--headless --convert-to pdf --outdir <dir> <檔案>` 時在 `<dir>` 寫出 `<主檔名>.pdf`，內容含輸入檔第一行的來源標記；引數形式不符時以非零碼結束；主檔名以 `broken` 開頭時以非零碼結束，模擬轉檔失敗。`test_pipeline.py` 的 `PipelineCase` 以兩個名稱放在 PATH 最前面；「沒有 LibreOffice」的測試把 PATH 改成只有假 mineru 的資料夾 |
 | `test_cli.py` | 設定驗證、子命令註冊、結束碼；提供其他測試共用的 `run_cli`、`valid_env` |
 | `test_fake_server.py` | 以 `scripts/smoke_test.py` 當客戶端對假 server 執行，確認假 server 符合同一份介面（smoke test 曾對真 server 通過，所以把它當作介面的定義）；不連真 server |
-| `test_pipeline.py` | `ingest`、`query` 的完整流程（含各種圖片與 Office 格式、資料夾挑選與略過、不支援格式的錯誤、沒有 LibreOffice 的錯誤、轉檔失敗、重複匯入、失敗重試、大表格切成小表、描述與寫入失敗、端點不可達、查詢總 token 上限與 entity／relation 上限、rerank 的請求與順序）；提供共用的 `PipelineCase`、產生各格式小圖的 `write_image`（用 Pillow）與寫出 Office 替身檔的 `write_office`（內容是一行文字，不是真的 Office 檔：假 LibreOffice 與假 mineru 都不讀內容） |
+| `test_pipeline.py` | `ingest`、`query` 的完整流程（含各種圖片與 Office 格式、資料夾挑選與略過、不支援格式的錯誤、沒有 LibreOffice 的錯誤、轉檔失敗、重複匯入、失敗重試、大表格切成小表、描述與寫入失敗、端點不可達、查詢總 token 上限與 entity／relation 上限、rerank 的請求與順序、rerank 失敗讓查詢失敗）；提供共用的 `PipelineCase`、產生各格式小圖的 `write_image`（用 Pillow）與寫出 Office 替身檔的 `write_office`（內容是一行文字，不是真的 Office 檔：假 LibreOffice 與假 mineru 都不讀內容） |
 | `test_graph.py` | `graph` 指令的抽樣與可重現性 |
-| `test_eval.py` | `eval` 指令的題目檔驗證與結果表 |
-| `test_python_api.py` | 在同一個 process 裡依序呼叫 `rag_lab.pipeline` 的模組函式與 `Session`：連續呼叫、每次 ingest 的統計獨立、同一個 `Session` 只初始化一次並在關閉後釋放實例、誤用時的 `SessionError`、開 `Session` 失敗後不留狀態、忘了 `close()` 時的收尾、匯入圖片與 Office 文件、不支援的格式整批被拒絕、大表格切成小表與描述失敗後的重試 |
+| `test_eval.py` | `eval` 指令的題目檔驗證與結果表、rerank 的順序與 rerank 失敗只記在發生的那幾格 |
+| `test_python_api.py` | 在同一個 process 裡依序呼叫 `rag_lab.pipeline` 的模組函式與 `Session`：連續呼叫、每次 ingest 的統計獨立、同一個 `Session` 只初始化一次並在關閉後釋放實例、誤用時的 `SessionError`、開 `Session` 失敗後不留狀態、忘了 `close()` 時的收尾、匯入圖片與 Office 文件、不支援的格式整批被拒絕、大表格切成小表與描述失敗後的重試、rerank 失敗讓 `query` 拋例外與 `evaluate` 記成失敗格、下一次呼叫不受影響 |
 | `test_examples.py` | 實際執行 `examples/` 的範例，確認在一個 `Session` 裡連續提問能跑完 |
 
 ### 3.4 `examples/`：範例

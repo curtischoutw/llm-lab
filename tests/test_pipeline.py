@@ -1325,6 +1325,51 @@ class QueryRerankOrderTest(PipelineCase):
         self.assert_rerank_order_decides_the_prompt("--vlm-enhanced")
 
 
+class QueryRerankFailureTest(PipelineCase):
+    """rerank 沒有正常完成時，查詢以失敗結束並說明原因，不會拿到沒經過 rerank 的答案。"""
+
+    def setUp(self):
+        super().setUp()
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+
+    def assert_failed_because_of_rerank(self, result, *expected: str) -> None:
+        """驗證查詢失敗：結束碼 1、沒有答案、錯誤訊息指出是 rerank、不含 API key。
+
+        Args:
+            result: 查詢的 CompletedProcess。
+            *expected: 錯誤訊息還要包含的文字。
+        """
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
+        self.assertIn("rerank", result.stderr)
+        for text in expected:
+            self.assertIn(text, result.stderr)
+        self.assertNotIn(SECRET, result.stdout + result.stderr)
+
+    def test_http_error_fails_the_query_with_the_error_the_endpoint_reported(self):
+        self.server.rerank_fault = "http500"
+        self.assert_failed_because_of_rerank(self.query(), "injected rerank failure")
+
+    def test_unreachable_endpoint_fails_the_query(self):
+        dead = closed_port_url()
+        self.assert_failed_because_of_rerank(self.query(RERANK_BASE_URL=dead), dead)
+
+    def test_empty_results_fail_the_query_in_every_mode(self):
+        self.server.rerank_fault = "empty"
+        for mode in ("naive", "local", "global", "hybrid", "mix"):
+            with self.subTest(mode=mode):
+                self.assert_failed_because_of_rerank(self.query("What is Fake Entity Alpha?", "--mode", mode))
+
+    def test_an_index_out_of_range_fails_the_query_even_when_the_other_results_are_valid(self):
+        self.server.rerank_fault = "out_of_range"
+        self.assert_failed_because_of_rerank(self.query())
+
+    def test_vlm_enhanced_query_fails_too(self):
+        self.server.rerank_fault = "empty"
+        self.assert_failed_because_of_rerank(self.query("What is Fake Entity Alpha?", "--vlm-enhanced"))
+
+
 # ==============================
 # PATH 處理
 # ==============================
