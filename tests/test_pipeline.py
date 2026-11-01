@@ -194,6 +194,17 @@ BETA_DESCRIPTION = "Fake Entity Beta is a made-up method."
 LINK_DESCRIPTION = "Alpha is related to Beta."
 
 
+# multichunk 文件會切出約 20 個文字 chunk，每個約 80 句。token 上限設成只放得下一個 chunk 時，哪個 chunk 進 prompt
+# 完全由 rerank 的順序決定：RERANK_MARKER 這一句落在其中一個 chunk 的中段（不在 chunk 之間的重疊範圍），
+# 沒有 rerank 規則時（預設保持候選順序）那個 chunk 排在後面、進不了 prompt。
+RERANK_MARKER = "Fake Entity 7-200 relates to Fake Entity 7-201."
+RERANK_BUDGET_ENV = {
+    "QUERY_MAX_TOTAL_TOKENS": "3000",
+    "QUERY_MAX_ENTITY_TOKENS": "100",
+    "QUERY_MAX_RELATION_TOKENS": "100",
+}
+
+
 def query_prompts(requests: list[dict]) -> list[str]:
     """取出查詢時送給模型產生答案的 prompt 文字（不含關鍵字抽取請求）。
 
@@ -217,6 +228,18 @@ def query_prompts(requests: list[dict]) -> list[str]:
                 texts.append(content)
         prompts.append("\n".join(texts))
     return prompts
+
+
+def rerank_requests(requests: list[dict]) -> list[dict]:
+    """取出送到 rerank endpoint 的請求。
+
+    Args:
+        requests: 假 server 記錄的請求。
+
+    Returns:
+        路徑為 /v1/rerank 的請求，依收到順序排列。
+    """
+    return [r for r in requests if r["path"] == "/v1/rerank"]
 
 
 class PipelineCase(unittest.TestCase):
@@ -1112,6 +1135,25 @@ class QueryTest(PipelineCase):
         self.assertTrue(query_inputs)
         self.assertTrue(all(t.startswith(prefix) for t in query_inputs), query_inputs)
 
+    def test_mix_query_sends_the_candidate_chunks_to_the_rerank_endpoint_with_the_configured_model_and_key(self):
+        question = "What is Fake Entity Alpha?"
+        result = self.query(question)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = rerank_requests(self.query_requests())
+        self.assertTrue(calls, "mix 查詢沒有呼叫 rerank endpoint")
+        for call in calls:
+            self.assertEqual(call["payload"]["model"], "fake-rerank")
+            self.assertEqual(call["payload"]["query"], question)
+            self.assertEqual(call["authorization"], f"Bearer {SECRET}")
+        documents = [d for call in calls for d in call["payload"]["documents"]]
+        self.assertTrue([d for d in documents if "Fake Entity Alpha works together with Fake Entity Beta." in d])
+
+    def test_ingest_never_calls_the_rerank_endpoint(self):
+        self.assertEqual(rerank_requests(self.server.requests[: self.requests_before_query]), [])
+        result = self.query()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(rerank_requests(self.query_requests()), "同一份索引的查詢要用 rerank，否則上面的斷言沒有意義")
+
     def test_failed_llm_call_exits_nonzero_with_the_original_error_and_no_answer(self):
         self.server.fail_chat = True
         result = self.query()
@@ -1238,6 +1280,49 @@ class QueryKnowledgeGraphBudgetTest(PipelineCase):
         no_relations = self.answer_prompt("mix", "--vlm-enhanced", QUERY_MAX_ENTITY_TOKENS="2000", QUERY_MAX_RELATION_TOKENS="0")
         self.assertIn(ALPHA_DESCRIPTION, no_relations)
         self.assertNotIn(LINK_DESCRIPTION, no_relations)
+
+
+class QueryRerankOrderTest(PipelineCase):
+    """rerank 回傳的順序決定哪些 chunk 在截斷後進得了 prompt。"""
+
+    def setUp(self):
+        super().setUp()
+        self.document = self.tmp / "multichunk.pdf"
+        self.document.write_bytes(b"%PDF-1.4 fake")
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+
+    def answer_prompt(self, question: str, *extra: str) -> str:
+        """以只放得下一個 chunk 的 token 上限查詢一次，回傳答案請求的 prompt 文字。
+
+        Args:
+            question: 題目文字；每次要不同，LightRAG 的 LLM 快取 key 不含 rerank 的順序。
+            *extra: 額外的命令列引數。
+
+        Returns:
+            答案請求的 prompt 文字。
+        """
+        before = len(self.server.requests)
+        result = self.query(question, *extra, **RERANK_BUDGET_ENV)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        prompts = query_prompts(self.server.requests[before:])
+        self.assertEqual(len(prompts), 1)
+        return prompts[0]
+
+    def assert_rerank_order_decides_the_prompt(self, *extra: str) -> None:
+        """依序驗證：保持順序時 marker 不在 prompt、排最前面時在、排最後面時不在。"""
+        self.assertNotIn(RERANK_MARKER, self.answer_prompt("What relates to Fake Entity 3-17? (kept)", *extra))
+        self.server.rerank_promote = RERANK_MARKER
+        self.assertIn(RERANK_MARKER, self.answer_prompt("What relates to Fake Entity 3-17? (promoted)", *extra))
+        self.server.rerank_promote = None
+        self.server.rerank_demote = RERANK_MARKER
+        self.assertNotIn(RERANK_MARKER, self.answer_prompt("What relates to Fake Entity 3-17? (demoted)", *extra))
+
+    def test_mix_query_prompt_follows_the_rerank_order(self):
+        self.assert_rerank_order_decides_the_prompt()
+
+    def test_vlm_enhanced_query_prompt_follows_the_rerank_order(self):
+        self.assert_rerank_order_decides_the_prompt("--vlm-enhanced")
 
 
 # ==============================

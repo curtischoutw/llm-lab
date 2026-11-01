@@ -27,6 +27,8 @@ from tests.test_pipeline import (
     ALPHA_DESCRIPTION,
     INGEST_TIMEOUT,
     LINK_DESCRIPTION,
+    RERANK_BUDGET_ENV,
+    RERANK_MARKER,
     PipelineCase,
     query_prompts,
     parsed_office_sources,
@@ -281,6 +283,49 @@ class QueryBudgetTest(PythonApiCase):
                     self.assertTrue([p for p in no_relations if ALPHA_DESCRIPTION in p])
                     for prompt in no_relations:
                         self.assertNotIn(LINK_DESCRIPTION, prompt)
+
+
+class QueryRerankTest(PythonApiCase):
+    """模組函式與 Session 的 query、evaluate 都經過 rerank：rerank 的順序決定哪些 chunk 在截斷後進得了 prompt。"""
+
+    def setUp(self):
+        super().setUp()
+        self.document = self.tmp / "multichunk.pdf"
+        self.document.write_bytes(b"%PDF-1.4 fake")
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+        self.copies = 0
+
+    def prompts(self, step: str, mode: str) -> list[str]:
+        """在索引的一份副本上跑一個步驟（只放得下一個 chunk 的 token 上限），回傳這次送出的答案 prompt。
+
+        Args:
+            step: query 或 evaluate。
+            mode: functions 或 session。
+
+        Returns:
+            答案請求的 prompt 文字；query 是 1 個，evaluate 是五種模式各 1 個。
+        """
+        # LightRAG 的 LLM 快取 key 不含 rerank 的順序，同一題在同一份索引上第二次會命中快取，所以每次用新副本
+        self.copies += 1
+        copy = self.tmp / f"rag_storage_copy_{self.copies}"
+        shutil.copytree(self.working_dir, copy)
+        before = len(self.server.requests)
+        result = self.run_api(step, mode=mode, WORKING_DIR=str(copy), **RERANK_BUDGET_ENV)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return query_prompts(self.server.requests[before:])
+
+    def test_query_and_evaluate_prompts_follow_the_rerank_order(self):
+        for mode in ("functions", "session"):
+            for step in ("query", "evaluate"):
+                with self.subTest(mode=mode, step=step):
+                    self.server.rerank_promote = self.server.rerank_demote = None
+                    self.assertFalse([p for p in self.prompts(step, mode) if RERANK_MARKER in p])
+                    self.server.rerank_promote = RERANK_MARKER
+                    self.assertTrue([p for p in self.prompts(step, mode) if RERANK_MARKER in p])
+                    self.server.rerank_promote = None
+                    self.server.rerank_demote = RERANK_MARKER
+                    self.assertFalse([p for p in self.prompts(step, mode) if RERANK_MARKER in p])
 
 
 class EmptyIndexTest(PythonApiCase):

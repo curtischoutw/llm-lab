@@ -25,7 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # 設定欄位（獨立於 rag_lab.config 的字面清單，來源為 spec／.env.example）
 # ==============================
 
-URL_FIELDS = ("LLM_BASE_URL", "VLM_BASE_URL", "EMBED_BASE_URL")
+URL_FIELDS = ("LLM_BASE_URL", "VLM_BASE_URL", "EMBED_BASE_URL", "RERANK_BASE_URL")
 INT_FIELDS = (
     "EMBED_DIM",
     "EMBED_MAX_TOKEN_SIZE",
@@ -44,6 +44,8 @@ TEXT_FIELDS = (
     "VLM_API_KEY",
     "EMBED_MODEL",
     "EMBED_API_KEY",
+    "RERANK_MODEL",
+    "RERANK_API_KEY",
     "WORKING_DIR",
     "PARSER_OUTPUT_DIR",
 )
@@ -62,7 +64,7 @@ def valid_env(base_url: str = "http://127.0.0.1:9/v1") -> dict[str, str]:
     """組出一份有效的基準設定。
 
     Args:
-        base_url: 三個端點共用的 base URL。
+        base_url: 四個端點（LLM、VLM、embedding、rerank）共用的 base URL。
 
     Returns:
         環境變數 dict，包含所有必填欄位。
@@ -85,6 +87,8 @@ def valid_env(base_url: str = "http://127.0.0.1:9/v1") -> dict[str, str]:
             "VLM_API_KEY": SECRET,
             "EMBED_MODEL": "fake-embed",
             "EMBED_API_KEY": SECRET,
+            "RERANK_MODEL": "fake-rerank",
+            "RERANK_API_KEY": SECRET,
             "WORKING_DIR": "./rag_storage",
             "PARSER_OUTPUT_DIR": "./output",
         }

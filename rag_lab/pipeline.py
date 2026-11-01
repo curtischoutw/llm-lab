@@ -31,11 +31,14 @@ CLI 只負責參數與輸出格式，這裡負責行為。
 - 查詢走 LightRAG 的 aquery_llm（回 status 與 message），不用 aquery：後者在 LLM 失敗
   時回 None、非法模式也回 None。status 不是 success 或沒有答案內容一律當失敗。
 - 查詢預設 vlm_enhanced=False（只走 LLM、不讓 VLM 改寫答案；與 spec 一致，五種模式的答案才由
-  同一個模型產生、可比較），並固定 enable_rerank=False（spec 不用 reranker，預設值會讓每次
-  查詢都警告）。vlm_enhanced=True 時改走 RAGAnything.aquery_vlm_enhanced，並多檢查 VLM 端點。
+  同一個模型產生、可比較）。vlm_enhanced=True 時改走 RAGAnything.aquery_vlm_enhanced，並多檢查 VLM 端點。
+- 所有查詢一律 enable_rerank=True（沒有開關）：LightRAG 在依 token 上限截斷之前，先把候選 chunk 送到本機
+  reranker 重新排序（models.rerank_model_func）。rerank 函式必須在 build_rag 建立 LightRAG 時傳入：mix 等圖譜模式
+  處理 chunk 時讀的是儲存層初始化時拿到的設定副本，初始化之後才設不會生效（LightRAG 1.4.16）。匯入不用 rerank。
+  chunk_top_k、min_rerank_score 維持 LightRAG 的預設值。
 - eval（evaluate）在同一個 Session（同一個 RAGAnything 實例）上，依題目順序、五種模式順序依序查詢，
   不是每格重新初始化。每格沿用 query 的 _answer（aquery_llm、三個查詢 token 上限、vlm_enhanced=False、
-  enable_rerank=False）；單格失敗（含沒有答案內容）記在該格的 Cell.error，不中斷其餘格。
+  enable_rerank=True）；單格失敗（含沒有答案內容）記在該格的 Cell.error，不中斷其餘格。
   開始前只檢查 LLM 與 Embedding 端點可達（eval 不走 VLM）。
 - 多篇匯入時單篇失敗不中斷整批：失敗記在該篇的 IngestReport.error，其餘照常處理並保留，
   由 CLI 印出是哪一篇並以非零碼結束。重新執行時已完整處理的篇略過、失敗的篇重試。
@@ -80,6 +83,8 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   `mineru --version` 檢查 parser，查詢不解析文件也一樣要通過。
 
 已知極限：
+- rerank 失敗（請求例外、HTTP 錯誤、回傳空結果）時，LightRAG 會記錄錯誤、改用原本的排序，查詢照常成功；
+  這一版沒有處理（讓 rerank 失敗變成查詢失敗是 .scratch/local-reranker 的 ticket 02）。
 - 使用 RAGAnything 的私有方法 _ensure_lightrag_initialized：官方沒有公開的等價 API，
   但不先初始化就查詢會直接拋 ValueError。
 - VLM 增強查詢（aquery_vlm_enhanced）沒有 aquery_llm 的 status／message：LLM 失敗時只回 None，
@@ -200,7 +205,7 @@ def build_rag(settings: Settings) -> RAGAnything:
         settings: 已驗證的設定。
 
     Returns:
-        接好 LLM、VLM、embedding 三個模型函式的 RAGAnything。
+        接好 LLM、VLM、embedding 三個模型函式與 rerank 函式的 RAGAnything。
     """
     config = RAGAnythingConfig(
         working_dir=settings.working_dir,
@@ -219,6 +224,9 @@ def build_rag(settings: Settings) -> RAGAnything:
             # 限制，沿用同一個設定值，避免本地 server 被打爆。
             "max_parallel_insert": settings.llm_max_async,
             "embedding_func_max_async": settings.embed_max_async,
+            # rerank 函式必須在建立 LightRAG 時傳入：mix 等圖譜模式處理 chunk 時讀的是儲存層初始化時拿到的
+            # 設定副本，初始化之後才設不會生效（LightRAG 1.4.16）。匯入不會用到它。
+            "rerank_model_func": models.rerank_model_func,
         },
     )
 
@@ -586,7 +594,7 @@ def query_kwargs(settings: Settings) -> dict[str, object]:
         可展開給 QueryParam（或 RAGAnything.aquery_vlm_enhanced）的參數 dict，不含 mode。
     """
     return {
-        "enable_rerank": False,
+        "enable_rerank": True,
         "max_total_tokens": settings.query_max_total_tokens,
         "max_entity_tokens": settings.query_max_entity_tokens,
         "max_relation_tokens": settings.query_max_relation_tokens,
@@ -720,7 +728,7 @@ def evaluate(questions: list[Question]) -> list[list[Cell]]:
     """對每一題以五種檢索模式各查詢一次：開一個 Session、跑完全部題目、關閉。
 
     五個模式與所有題目共用同一個 RAGAnything 實例，依題目順序、模式順序依序執行。
-    查詢固定 vlm_enhanced=False、enable_rerank=False，並沿用 query 的三個查詢 token 上限。
+    查詢固定 vlm_enhanced=False、enable_rerank=True，並沿用 query 的三個查詢 token 上限。
 
     Args:
         questions: 已驗證的題目。

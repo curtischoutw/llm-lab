@@ -1,7 +1,7 @@
-"""把 .env 裡的三個 OpenAI 相容端點包成 RAG-Anything 需要的模型函式。
+"""把 .env 裡的三個 OpenAI 相容端點與 rerank 端點包成 RAG-Anything／LightRAG 需要的模型函式。
 
-為什麼存在：RAG-Anything 需要 llm_model_func、vision_model_func、embedding_func。
-這裡用 lightrag 內建的 OpenAI 相容 helper 組出來，程式本身不 import mlx，
+為什麼存在：RAG-Anything 需要 llm_model_func、vision_model_func、embedding_func，LightRAG 查詢時還要
+rerank_model_func。這裡用 lightrag 內建的 OpenAI 相容 helper 與通用 rerank 函式組出來，程式本身不 import mlx，
 所以本地 MLX server 與大機器上的 vLLM／雲端 API 可以只靠 .env 互換。
 
 關鍵設計決策：
@@ -12,6 +12,9 @@
 - 三個函式的失敗都包成 EndpointError，訊息帶端點名稱（LLM／VLM／Embedding）與位址：
   LightRAG 匯入失敗的訊息只含原例外文字，不指出是哪個端點。原例外以 __cause__ 保留，
   訊息內含原例外文字；API 金鑰不會出現在例外文字中，也不會被寫進訊息。
+- rerank 函式沿用 lightrag.rerank.generic_rerank_api 送請求（Jina／Cohere 格式，回 index＋relevance_score），
+  不自己實作 HTTP；RERANK_BASE_URL 和其他端點一樣含 /v1，請求送到 `{RERANK_BASE_URL}/rerank`。函式必須在建立
+  LightRAG 時傳入（pipeline.build_rag），初始化之後才設不會對 mix 生效。
 - RAG-Anything 會吞掉 VLM 的失敗（描述退成原始 dict、匯入仍成功），所以 vision 函式
   自己計數（vision_stats），讓呼叫端能事後判斷「圖片描述是否真的來自 VLM」。
 - 表格與公式描述走 llm_model_func，失敗同樣被吞掉。所以另外提供 count_description_failures，
@@ -37,6 +40,7 @@ from urllib.parse import urlparse
 
 import numpy as np
 from lightrag.llm.openai import openai_complete_if_cache, openai_embed
+from lightrag.rerank import generic_rerank_api
 from lightrag.utils import EmbeddingFunc
 from raganything.image_signature import image_mime_type
 from tenacity import RetryError
@@ -376,4 +380,31 @@ def build_embedding_func() -> EmbeddingFunc:
         func=embed_texts,
         model_name=s.embed_model,
         supports_asymmetric=True,
+    )
+
+
+# ==============================
+# Rerank
+# ==============================
+
+
+async def rerank_model_func(query: str, documents: list[str], top_n: int | None = None) -> list[dict[str, Any]]:
+    """呼叫 rerank 端點，替 LightRAG 重新排序候選 chunk。
+
+    Args:
+        query: 查詢文字。
+        documents: 候選 chunk 的內容。
+        top_n: 只保留分數最高的幾個（LightRAG 傳入 chunk_top_k）。
+
+    Returns:
+        [{"index": 候選的位置, "relevance_score": 分數}, ...]，依分數由高到低；LightRAG 依此順序重排候選。
+    """
+    s = get_settings()
+    return await generic_rerank_api(
+        query=query,
+        documents=documents,
+        model=s.rerank_model,
+        base_url=f"{s.rerank_base_url}/rerank",
+        api_key=s.rerank_api_key,
+        top_n=top_n,
     )

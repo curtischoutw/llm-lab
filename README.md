@@ -2,7 +2,7 @@
 
 用 [RAG-Anything](https://github.com/HKUDS/RAG-Anything) 1.4.3（底層 LightRAG）做的本地 RAG 實驗環境。四個指令：`ingest` 匯入文件、`query` 提問、`eval` 用題目檔批次比較五種檢索模式、`graph` 抽樣檢視知識圖譜。
 
-三個模型（LLM、VLM、embedding）都經由 OpenAI 相容的 HTTP 端點呼叫，端點與模型名稱全部寫在 `.env`。本機用 MLX server 提供；換機器或換模型時只改 `.env`。
+三個模型（LLM、VLM、embedding）都經由 OpenAI 相容的 HTTP 端點呼叫，查詢時再用一個 reranker 重新排序候選 chunk，端點與模型名稱全部寫在 `.env`。本機用 MLX server 提供；換機器或換模型時只改 `.env`。
 
 目前的知識庫內容是台新銀行信用卡的權益與規則，正在建立中，規格與 ticket 在 `.scratch/taishin-credit-card-kb/`。前一版知識庫（RAG 論文與文件）的規格與實測紀錄在 `.scratch/rag-anything-lab/` 與 `.scratch/multi-format-documents/`。每個目錄與程式的用途見 [`docs/architecture.md`](docs/architecture.md)。
 
@@ -137,14 +137,17 @@ mlx_lm.server --host 127.0.0.1 --port 8080 \
 - `--max-tokens 4096`：`mlx_lm.server` 預設輸出上限 512 token，會截斷實體抽取的輸出。
 - `--prompt-cache-bytes 4GB`：限制 prompt cache 的大小，實測最高用到 3.7 GB。
 
-VLM 與 embedding（同一個 server，port 8081）：
+VLM、embedding 與 reranker（同一個 server，port 8081）：
 
 ```sh
 ~/.local/share/pipx/venvs/mlx-vlm/bin/python scripts/vlm_server.py --mlx-cache-limit-gb 1 \
   --host 127.0.0.1 --port 8081 \
   --model mlx-community/Qwen3-VL-4B-Instruct-4bit \
-  --embedding-model mlx-community/Qwen3-Embedding-0.6B-8bit
+  --embedding-model mlx-community/Qwen3-Embedding-0.6B-8bit \
+  --reranker-model BAAI/bge-reranker-v2-m3
 ```
+
+`--reranker-model`：啟動時就載入 reranker（`BAAI/bge-reranker-v2-m3`，F32 權重檔約 2.1 GB），第一次查詢不會因為載入模型而變慢。`.env` 的 `RERANK_BASE_URL`、`RERANK_MODEL`、`RERANK_API_KEY` 三個欄位必填，`.env.example` 的預設值指向這個 server。查詢時 LightRAG 在依 token 上限截斷之前，先把候選 chunk 送到 `{RERANK_BASE_URL}/rerank` 重新排序；所有查詢入口（`query`、`query --vlm-enhanced`、`eval`、Python API）一律如此，沒有開關，匯入不使用。候選 chunk 數（`chunk_top_k`）與分數門檻維持 LightRAG 的預設值。reranker 在本機執行，知識庫的內容不會送出本機；`RERANK_BASE_URL` 若改指向外部服務，候選 chunk 的內容就會送到那裡。
 
 `scripts/vlm_server.py` 先把 MLX 保留的 GPU buffer cache 上限設為 1 GB，再啟動 `mlx_vlm.server`。mlx-vlm 0.7.10 的 embedding 路徑不會清 cache，ingest 期間 server 會從 5 GB 增加到 13 GB，與 LLM server 加起來超過 32 GB 機器的 GPU 記憶體。
 
@@ -341,9 +344,9 @@ PPT、Word、圖片（主知識庫，在 3 篇論文之後匯入 `data/documents
 
 | 欄位 | 搬機器時 |
 |---|---|
-| `LLM_BASE_URL`、`VLM_BASE_URL`、`EMBED_BASE_URL` | 改成新機器上的端點（OpenAI 相容，結尾含 `/v1`） |
-| `LLM_MODEL`、`VLM_MODEL` | 改成新端點上的模型名稱 |
-| `LLM_API_KEY`、`VLM_API_KEY`、`EMBED_API_KEY` | 雲端 API 填真的金鑰；本機 MLX server 填任意非空字串 |
+| `LLM_BASE_URL`、`VLM_BASE_URL`、`EMBED_BASE_URL`、`RERANK_BASE_URL` | 改成新機器上的端點（OpenAI 相容，結尾含 `/v1`；rerank 端點需提供 `POST {RERANK_BASE_URL}/rerank`，Jina／Cohere 格式） |
+| `LLM_MODEL`、`VLM_MODEL`、`RERANK_MODEL` | 改成新端點上的模型名稱 |
+| `LLM_API_KEY`、`VLM_API_KEY`、`EMBED_API_KEY`、`RERANK_API_KEY` | 雲端 API 填真的金鑰；本機 MLX server 填任意非空字串 |
 | `LLM_MAX_ASYNC`、`EMBED_MAX_ASYNC` | 記憶體較大的機器或雲端 API 可以調高 |
 | `LLM_MAX_TOKENS`、`VLM_MAX_TOKENS` | 依新模型的輸出上限調整 |
 | `QUERY_MAX_TOTAL_TOKENS`、`QUERY_MAX_ENTITY_TOKENS`、`QUERY_MAX_RELATION_TOKENS` | 總上限依新 LLM 的 context 長度與記憶體調整；entity／relation 上限相加要小於總上限，其餘留給文字 chunk |
