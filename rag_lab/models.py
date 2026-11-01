@@ -15,12 +15,16 @@ rerank_model_func。這裡用 lightrag 內建的 OpenAI 相容 helper 與通用 
 - rerank 函式沿用 lightrag.rerank.generic_rerank_api 送請求（Jina／Cohere 格式，回 index＋relevance_score），
   不自己實作 HTTP；RERANK_BASE_URL 和其他端點一樣含 /v1，請求送到 `{RERANK_BASE_URL}/rerank`。函式必須在建立
   LightRAG 時傳入（pipeline.build_rag），初始化之後才設不會對 mix 生效。
-- LightRAG 的 apply_rerank_if_enabled 把 rerank 函式的例外吞掉、改用原本的排序，回傳空結果與回傳的 index 超出範圍時
-  也不報錯（空結果沿用原排序、超出範圍的項目靜默略過）。所以 rerank 函式自己判定失敗（請求例外、HTTP 錯誤、空結果、
-  index 超出範圍任一），記進目前這次查詢的失敗清單（collect_rerank_failures）後以 EndpointError("Rerank") 拋出
-  （LightRAG 照舊吞掉它，查詢本身繼續）；pipeline 在查詢結束後檢查清單，有失敗就讓該次查詢失敗。
-  清單用 ContextVar 綁在「這一次查詢」：進入 collect_rerank_failures 時換上新的清單，離開時還原，所以失敗不會帶到
-  下一次查詢，兩次查詢重疊執行時也各算各的（LightRAG 在查詢途中建立的子 task 繼承 context，寫入的是同一份清單）。
+- LightRAG 的 apply_rerank_if_enabled 只攔 Exception：rerank 函式拋例外、回傳空結果或 index 超出範圍時，它都記錄後改用
+  原本的排序，查詢繼續跑完並把沒經過 rerank 的答案寫進 LLM 快取（key 不含 rerank 結果），之後同一題 rerank 成功時反而
+  命中這筆舊答案。所以 rerank 函式自己判定失敗（請求例外、HTTP 錯誤、空結果，或回應內容不合法：筆數不等於
+  min(top_n, 候選數)、index 不是範圍內的 int 或重複、relevance_score 不是有限的數字，見 _rerank_problem），並拋出繼承
+  BaseException 的 RerankFailure，穿過 LightRAG 的查詢流程，在它呼叫 LLM 產生答案、寫入快取之前中止；pipeline 的查詢入口
+  （_answer、VLM 增強路徑）攔下它並轉成 PipelineError。穿過 LightRAG 安全的依據（lightrag-hku 1.4.16）：從 aquery_llm 到
+  apply_rerank_if_enabled 的呼叫鏈全是同一個 task 裡直接 await，沒有 gather／create_task／限流 worker／finally，aquery_llm
+  的 except 是 except Exception；Python 3.12 的 asyncio.Task 只對 KeyboardInterrupt、SystemExit 特別處理
+  （asyncio/tasks.py 的 __step）。results 不是 list、項目缺 index 或 relevance_score，generic_rerank_api 內就以空結果
+  或 KeyError 結束，同樣算失敗。
 - RAG-Anything 會吞掉 VLM 的失敗（描述退成原始 dict、匯入仍成功），所以 vision 函式
   自己計數（vision_stats），讓呼叫端能事後判斷「圖片描述是否真的來自 VLM」。
 - 表格與公式描述走 llm_model_func，失敗同樣被吞掉。所以另外提供 count_description_failures，

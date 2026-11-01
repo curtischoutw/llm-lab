@@ -21,7 +21,7 @@ rag_storage/   知識圖譜＋向量庫＋快取（＝知識庫本體）
 檢索（naive／local／global／hybrid／mix） → reranker 重新排序候選 chunk → 依 token 上限截斷成 context → LLM 依 context 產生答案
 ```
 
-查詢時，LightRAG 取得候選 chunk（向量相似度與圖譜關聯）之後、依 token 上限截斷之前，會先把候選 chunk 的內容連同問題送到 reranker 的 `POST {RERANK_BASE_URL}/rerank`，依回傳的分數由高到低重新排序，保留分數最高的 `chunk_top_k`（LightRAG 預設 20）個，再依 token 上限截斷；所以排在前面的是和問題最相關的 chunk，而不是向量相似度最高的。所有查詢入口一律如此（`query`、`query --vlm-enhanced`、`eval`、`Session.query`／`evaluate`、模組函式），沒有開關；匯入不使用。rerank 函式（`models.rerank_model_func`）必須在建立 LightRAG 實例時傳入（`pipeline.build_rag`），初始化之後才設不會對 mix 生效。rerank 沒有正常完成時，該次查詢以查詢失敗結束，不會拿到沒經過 rerank 的答案：LightRAG 在 rerank 函式拋例外時記錄錯誤並改用原本的排序，回傳空結果、回傳的 index 超出範圍時也不報錯（沿用原排序或靜默略過），所以判定放在 `models.rerank_model_func`：請求例外、HTTP 錯誤（含候選 chunk 有空白內容時 mlx-vlm 回的 400）、空結果、index 超出範圍任一種，都先記進「這一次查詢」的失敗清單（`models.collect_rerank_failures`，用 `ContextVar` 綁定，查詢結束即還原，所以不會帶到下一次查詢）再拋出；`pipeline` 在 LightRAG 查詢結束後檢查清單，有失敗就拋 `PipelineError`（`query` 結束碼 1、`eval` 記成該格的失敗、Python API 拋例外），訊息以「rerank 失敗」開頭，帶端點位址與端點回報的錯誤，不含 API key。做法與 ticket 12 處理 RAG-Anything 吞掉的寫入失敗相同：在 rag_lab 這一層記錄、在結果層判定。
+查詢時，LightRAG 取得候選 chunk（向量相似度與圖譜關聯）之後、依 token 上限截斷之前，會先把候選 chunk 的內容連同問題送到 reranker 的 `POST {RERANK_BASE_URL}/rerank`，依回傳的分數由高到低重新排序，保留分數最高的 `chunk_top_k` 個（`pipeline` 明確指定 20，`min_rerank_score` 指定 0.0；兩者等於 LightRAG 的預設值，但 LightRAG 會讀行程環境的 `CHUNK_TOP_K`、`MIN_RERANK_SCORE`，不明確指定的話使用者 shell 裡的環境變數會悄悄改變結果），再依 token 上限截斷；所以排在前面的是和問題最相關的 chunk，而不是向量相似度最高的。所有查詢入口一律如此（`query`、`query --vlm-enhanced`、`eval`、`Session.query`／`evaluate`、模組函式），沒有開關；匯入不使用。rerank 函式（`models.rerank_model_func`）必須在建立 LightRAG 實例時傳入（`pipeline.build_rag`），初始化之後才設不會對 mix 生效。查詢開始前先確認 rerank 端點連得上（`models.check_reachable`，和 LLM、embedding 並列；`query`、`eval`、`Session.query`／`evaluate` 與模組函式都檢查，匯入不檢查），連不上就拋 `EndpointError`，訊息含端點名稱與位址，此時還沒有送出任何請求。rerank 沒有正常完成時，該次查詢在產生答案之前就中止，不會拿到沒經過 rerank 的答案，也不會在 LLM 快取留下答案。原因是 LightRAG 的 `apply_rerank_if_enabled` 只攔 `Exception`：rerank 函式拋例外、回傳空結果、回傳的 index 超出範圍時，它都記錄後改用原本的排序，查詢繼續跑完並把沒經過 rerank 的答案寫進 LLM 快取（key 含 `enable_rerank=True`，不含 rerank 的結果），之後同一題 rerank 成功時反而命中這筆舊答案。所以 `models.rerank_model_func` 自己判定失敗，並拋出繼承 `BaseException` 的 `models.RerankFailure`，穿過 LightRAG。判定的情況：請求例外、HTTP 錯誤（含候選 chunk 有空白內容時 mlx-vlm 回的 400）、空結果，以及回應內容不合法（`models._rerank_problem`）：筆數不等於 `min(top_n, 候選數)`、`index` 不是範圍內的整數（bool 不算）或重複、`relevance_score` 不是有限的數字（bool 不算）；`results` 不是 list、項目缺 `index` 或 `relevance_score` 在 `generic_rerank_api` 內就以空結果或例外結束，同樣算失敗。`pipeline` 的 `_answer` 與 VLM 增強路徑攔下 `RerankFailure`，轉成 `PipelineError`（`query` 結束碼 1、`eval` 記成該格的失敗、Python API 拋例外），訊息以「rerank 失敗」開頭，帶端點位址與端點回報的錯誤，不含 API key。穿過 LightRAG 是安全的，查過 lightrag-hku 1.4.16 從 `aquery_llm` 到 `apply_rerank_if_enabled` 的呼叫鏈（`aquery_llm`、`kg_query`／`naive_query`、`_build_query_context`、`_build_context_str`、`process_chunks_unified`）：全程是同一個 task 裡直接 `await`，沒有 `asyncio.gather`、`create_task`、限流 worker 或 `finally` 包著 rerank；`aquery_llm` 的 `except` 是 `except Exception`，不會攔到它；Python 3.12 的 `asyncio.Task` 只對 `KeyboardInterrupt`、`SystemExit` 特別處理，其他 `BaseException` 照常當成 task 的例外。rerank 發生在 LLM 產生答案之前，所以中止時沒有答案請求、沒有 VLM 請求、沒有快取寫入（關鍵字抽取在 rerank 之前，已經送出，它的快取是正確的）。若 rerank 失敗的同時 LightRAG 自己也會失敗（例如答案階段的 LLM 出錯），只會看到 rerank 失敗：查詢在 rerank 就中止，後面的階段根本不會執行；反過來，rerank 之前的階段（關鍵字抽取、檢索）先失敗時，rerank 不會被呼叫，只報 LightRAG 的失敗。
 
 `ingest` 接受 PDF、PPT、Word、Excel 與 8 種圖片格式（副檔名清單在 `rag_lab/formats.py`）。解析由 RAG-Anything 的 `parse_document` 依副檔名分派：圖片直接交給 MinerU；`.png`、`.jpg`、`.jpeg` 以外的圖片先由 RAG-Anything 用 Pillow 轉成 png；Office 文件（.ppt .pptx .doc .docx .xls .xlsx）先由 RAG-Anything 呼叫 PATH 上的 LibreOffice（`libreoffice`，找不到再試 `soffice`）轉成 PDF，寫在 `PARSER_OUTPUT_DIR` 底下，再交給 MinerU。專案只決定放行哪些副檔名，不判斷怎麼解析。沒有安裝 LibreOffice 時，RAG-Anything 的原始錯誤（含安裝方式）成為那份文件的匯入失敗原因，專案沒有改寫它。
 
@@ -106,7 +106,7 @@ __main__ ──► config
 | `__main__.py` | CLI 入口：解析參數、驗證輸入、呼叫 `pipeline`／`graph_report`、格式化輸出、決定結束碼（0 成功、1 執行失敗、2 用法或輸入錯誤、3 設定錯誤） | `main(argv)`；子命令 `ingest`、`query`、`graph`、`eval` |
 | `formats.py` | 支援的格式清單（PDF、PPT、Word、Excel 與 8 種圖片副檔名），專案裡只定義這一次；CLI 的資料夾過濾與錯誤訊息都從這裡取值。只靠標準函式庫，所以輸入路徑驗證能在載入 LightRAG／torch 之前完成 | `FORMATS`、`SUPPORTED_EXTENSIONS`、`is_supported(path)`、`describe_supported()` |
 | `config.py` | 從 `.env` 與環境變數讀設定並驗證；必填欄位缺漏或格式錯就拋錯，不給預設值（只有 `EMBED_QUERY_PREFIX` 是選填，預設空字串） | `get_settings() -> Settings`、`ConfigError` |
-| `models.py` | 把三個 OpenAI 相容端點包成 RAG-Anything 需要的模型函式、把 rerank 端點包成 LightRAG 的 rerank 函式；失敗包成帶端點名稱與位址的錯誤；計數圖、表、公式描述的失敗與描述後的內容寫入索引的失敗（RAG-Anything 自己會吞掉）；判定 rerank 失敗並記進該次查詢的失敗清單（LightRAG 自己會吞掉） | `llm_model_func`、`vision_model_func`、`build_embedding_func()`、`rerank_model_func`、`check_reachable(...)`、`EndpointError` |
+| `models.py` | 把三個 OpenAI 相容端點包成 RAG-Anything 需要的模型函式、把 rerank 端點包成 LightRAG 的 rerank 函式；失敗包成帶端點名稱與位址的錯誤；計數圖、表、公式描述的失敗與描述後的內容寫入索引的失敗（RAG-Anything 自己會吞掉）；判定 rerank 失敗（含回應內容驗證）並以 `BaseException` 子類 `RerankFailure` 拋出，穿過 LightRAG（LightRAG 自己會吞掉一般例外） | `llm_model_func`、`vision_model_func`、`build_embedding_func()`、`rerank_model_func`、`check_reachable(...)`、`EndpointError` |
 | `tables.py` | 把太大的表格縮短（拿掉值為 1 的 `rowspan`／`colspan`），仍超過 800 token 就依列切成小表，每張重複表頭列；只靠標準函式庫。`pipeline.LabRAGAnything.parse_document` 在 RAG-Anything 算好文件 ID、存好解析快取之後，才對回傳給呼叫端的 content list 套用它，所以文件 ID 與解析快取不變 | `limit_table_sizes(content_list, count_tokens)`、`TABLE_BODY_MAX_TOKENS` |
 | `pipeline.py` | 核心流程：建立 RAGAnything 實例（`LabRAGAnything`：切大表格、計數寫入失敗）、匯入（解析、建圖、多模態描述）、查詢、批次比較；把 LightRAG 會吞掉的錯誤轉成可偵測的失敗（圖表公式描述或多模態寫入失敗的文件，整批結束後改記成 `failed`）；`Session` 讓同一個 process 只初始化一次、依序呼叫 | `Session`（`ingest`、`query`、`evaluate`、`close`）、模組函式 `ingest(documents) -> IngestSummary`、`query(question, mode, vlm_enhanced=False) -> str`、`evaluate(questions) -> list[list[Cell]]`、`PipelineError`、`SessionError`、`SessionClosedError` |
 | `evaluation.py` | `eval` 的題目檔讀取驗證與 Markdown 對照表排版，不需要任何模型 | `load_questions(path)`、`render_report(...)`、`RETRIEVAL_MODES`、`QuestionFileError` |
@@ -132,15 +132,15 @@ __main__ ──► config
 | 檔案 | 內容 |
 |---|---|
 | `__init__.py` | 測試套件的說明：測試從子行程進入、模型用假 server |
-| `fake_openai_server.py` | 假的 OpenAI 相容 server：chat、vision、embedding、rerank 都回固定且合法的內容，並記錄收到的請求（含 `Authorization` 標頭）；可注入故障（`fail_chat`、`fail_vision`、`fail_chat_containing`、`fail_embed_containing`、`rerank_fault` 等），rerank 的順序可由 `rerank_promote`／`rerank_demote` 指定 |
+| `fake_openai_server.py` | 假的 OpenAI 相容 server：chat、vision、embedding、rerank 都回固定且合法的內容，並記錄收到的請求（含 `Authorization` 標頭）；可注入故障（`fail_chat`、`fail_vision`、`fail_chat_containing`、`fail_embed_containing`、`rerank_fault` 等），rerank 的順序可由 `rerank_promote`／`rerank_demote` 指定，`rerank_results` 可原樣指定回應的 `results` 內容（造出不合法的回應） |
 | `fake_mineru.py` | 假的 `mineru` 指令：依主檔名寫出固定的解析結果（PDF、圖片與假 LibreOffice 轉出的 PDF 相同）（文字、一張圖、一個表、一條公式）；主檔名以 `bigtable` 開頭時表格換成 60 列 × 6 欄的大表格（`bigspan` 開頭的版本有一格 rowspan 跨到表尾），以 `spans` 開頭時小表格的儲存格帶 `rowspan=1 colspan=1`；PDF 裡有假 LibreOffice 寫的來源標記行時，多輸出一段 `Converted from Office document: <來源第一行>`，讓主檔名相同的 Office 文件分辨得出來；設了 `FAKE_MINERU_VERSION_LOG` 時記錄每次 `--version`，用來計算初始化次數 |
 | `fake_libreoffice.py` | 假的 `libreoffice`／`soffice` 指令：收到 `--headless --convert-to pdf --outdir <dir> <檔案>` 時在 `<dir>` 寫出 `<主檔名>.pdf`，內容含輸入檔第一行的來源標記；引數形式不符時以非零碼結束；主檔名以 `broken` 開頭時以非零碼結束，模擬轉檔失敗。`test_pipeline.py` 的 `PipelineCase` 以兩個名稱放在 PATH 最前面；「沒有 LibreOffice」的測試把 PATH 改成只有假 mineru 的資料夾 |
 | `test_cli.py` | 設定驗證、子命令註冊、結束碼；提供其他測試共用的 `run_cli`、`valid_env` |
 | `test_fake_server.py` | 以 `scripts/smoke_test.py` 當客戶端對假 server 執行，確認假 server 符合同一份介面（smoke test 曾對真 server 通過，所以把它當作介面的定義）；不連真 server |
-| `test_pipeline.py` | `ingest`、`query` 的完整流程（含各種圖片與 Office 格式、資料夾挑選與略過、不支援格式的錯誤、沒有 LibreOffice 的錯誤、轉檔失敗、重複匯入、失敗重試、大表格切成小表、描述與寫入失敗、端點不可達、查詢總 token 上限與 entity／relation 上限、rerank 的請求與順序、rerank 失敗讓查詢失敗）；提供共用的 `PipelineCase`、產生各格式小圖的 `write_image`（用 Pillow）與寫出 Office 替身檔的 `write_office`（內容是一行文字，不是真的 Office 檔：假 LibreOffice 與假 mineru 都不讀內容） |
+| `test_pipeline.py` | `ingest`、`query` 的完整流程（含各種圖片與 Office 格式、資料夾挑選與略過、不支援格式的錯誤、沒有 LibreOffice 的錯誤、轉檔失敗、重複匯入、失敗重試、大表格切成小表、描述與寫入失敗、端點不可達、查詢總 token 上限與 entity／relation 上限、rerank 的請求與順序、rerank 失敗讓查詢失敗且不送答案請求、失敗後同一題再問會重新生成答案、不合法的 rerank 回應、rerank 端點不可達在查詢前就失敗、環境的 `CHUNK_TOP_K`／`MIN_RERANK_SCORE` 不影響結果）；提供共用的 `PipelineCase`、產生各格式小圖的 `write_image`（用 Pillow）與寫出 Office 替身檔的 `write_office`（內容是一行文字，不是真的 Office 檔：假 LibreOffice 與假 mineru 都不讀內容） |
 | `test_graph.py` | `graph` 指令的抽樣與可重現性 |
-| `test_eval.py` | `eval` 指令的題目檔驗證與結果表、rerank 的順序與 rerank 失敗只記在發生的那幾格 |
-| `test_python_api.py` | 在同一個 process 裡依序呼叫 `rag_lab.pipeline` 的模組函式與 `Session`：連續呼叫、每次 ingest 的統計獨立、同一個 `Session` 只初始化一次並在關閉後釋放實例、誤用時的 `SessionError`、開 `Session` 失敗後不留狀態、忘了 `close()` 時的收尾、匯入圖片與 Office 文件、不支援的格式整批被拒絕、大表格切成小表與描述失敗後的重試、rerank 失敗讓 `query` 拋例外與 `evaluate` 記成失敗格、下一次呼叫不受影響 |
+| `test_eval.py` | `eval` 指令的題目檔驗證與結果表、rerank 的順序、rerank 失敗只記在發生的那幾格、rerank 端點不可達時查詢前就失敗 |
+| `test_python_api.py` | 在同一個 process 裡依序呼叫 `rag_lab.pipeline` 的模組函式與 `Session`：連續呼叫、每次 ingest 的統計獨立、同一個 `Session` 只初始化一次並在關閉後釋放實例、誤用時的 `SessionError`、開 `Session` 失敗後不留狀態、忘了 `close()` 時的收尾、匯入圖片與 Office 文件、不支援的格式整批被拒絕、大表格切成小表與描述失敗後的重試、rerank 失敗讓 `query` 拋例外、rerank 端點不可達在查詢前就拋 `EndpointError`與 `evaluate` 記成失敗格、下一次呼叫不受影響 |
 | `test_examples.py` | 實際執行 `examples/` 的範例，確認在一個 `Session` 裡連續提問能跑完 |
 
 ### 3.4 `examples/`：範例
@@ -191,9 +191,9 @@ with Session() as session:
 
 | 方法 | 回傳 | 失敗時 |
 |---|---|---|
-| `query(question, mode, vlm_enhanced=False)` | 答案字串 | `mode` 不是五種檢索模式之一拋 `ValueError`（LightRAG 另外接受的 `bypass` 不檢索，這裡不允許）；開始前端點不可達拋 `EndpointError`；查詢失敗（含查詢途中 LLM 失敗）或沒有答案拋 `PipelineError`；`vlm_enhanced=True` 時 VLM 呼叫失敗拋 `EndpointError` |
+| `query(question, mode, vlm_enhanced=False)` | 答案字串 | `mode` 不是五種檢索模式之一拋 `ValueError`（LightRAG 另外接受的 `bypass` 不檢索，這裡不允許）；開始前端點（LLM、embedding、rerank，`vlm_enhanced=True` 時加 VLM）不可達拋 `EndpointError`；查詢失敗（含 rerank 失敗與查詢途中 LLM 失敗）或沒有答案拋 `PipelineError`；`vlm_enhanced=True` 時 VLM 呼叫失敗拋 `EndpointError` |
 | `ingest(documents: list[Path])` | `IngestSummary`：每篇的耗時與錯誤、圖譜統計、這一次的 VLM 與描述統計 | 單篇失敗記在該篇的 `error`、圖表公式描述或多模態寫入失敗也記在該篇的 `error`（同時文件在索引裡改記成 `failed`，重新執行會重試）並彙整在 `description_error`，都不拋例外；`documents` 裡有任何一份不是支援的格式（`rag_lab/formats.py`），在呼叫任何模型或解析之前拋 `PipelineError`，整批都不匯入；開始前端點不可達拋 `EndpointError` |
-| `evaluate(questions: list[Question])` | `cells[i][j]`：第 i 題在第 j 種模式的答案或錯誤 | 單格失敗記在該格的 `error`，不拋例外；開始前 LLM 或 embedding 端點不可達拋 `EndpointError` |
+| `evaluate(questions: list[Question])` | `cells[i][j]`：第 i 題在第 j 種模式的答案或錯誤 | 單格失敗記在該格的 `error`，不拋例外；開始前 LLM、embedding 或 rerank 端點不可達拋 `EndpointError` |
 | `close()` | — | 離開 `with` 時自動呼叫；重複呼叫不做事 |
 
 開 `Session()` 時就會檢查 LLM 與 embedding 端點並初始化知識庫：設定有誤拋 `rag_lab.config.ConfigError`，端點不可達拋 `EndpointError`，初始化失敗拋 `PipelineError`。
@@ -246,6 +246,6 @@ with Session() as session:
 
 所有欄位與註解在 `.env.example`；搬機器、換模型時要改哪些欄位，見 README 第 6 節。改程式之外的東西（端點、模型、路徑、並行數、查詢 token 上限）都只改 `.env`。
 
-查詢時的 rerank 由 `RERANK_BASE_URL`、`RERANK_MODEL`、`RERANK_API_KEY` 三個必填欄位設定（驗證規則同其他端點），不能關閉；eval 對照表表頭的「固定查詢設定」與 `RERANK_MODEL` 記下當時用的 reranker。
+查詢時的 rerank 由 `RERANK_BASE_URL`、`RERANK_MODEL`、`RERANK_API_KEY` 三個必填欄位設定（驗證規則同其他端點），不能關閉；eval 對照表表頭的「固定查詢設定」由實際送進 LightRAG 的查詢參數（`pipeline.query_kwargs`）產生，與 `RERANK_MODEL` 一起記下當時用的 reranker；LLM 快取的 key 不含 `RERANK_MODEL`、`LLM_MODEL`，換模型後要先刪掉 `:query:` 快取項目才能比較（見 README）。
 
 查詢 context 的 token 分配由三個欄位決定：`QUERY_MAX_TOTAL_TOKENS`（總上限）、`QUERY_MAX_ENTITY_TOKENS` 與 `QUERY_MAX_RELATION_TOKENS`（圖譜 context 裡 entity 與 relation 描述各自的上限），其餘留給文字 chunk。`config.get_settings` 檢查兩個上限是 0 以上的整數、相加小於總上限；`pipeline.query_kwargs` 把三個值原樣交給 LightRAG 的 `QueryParam`（CLI 的 `query` 與 `eval`、`Session.query`、`pipeline.query`、`pipeline.evaluate`、VLM 增強查詢都走同一個函式），不依 LightRAG 預設比例縮放。

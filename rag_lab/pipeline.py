@@ -13,7 +13,7 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   LightRAG 的 adelete_by_doc_id 刪掉舊紀錄與部分結果，再重新匯入。LightRAG 遇到已存在的
   doc ID 不會重新排入，只會另寫一筆 status=failed 的 dup- 紀錄；刪除時保留 LLM 快取，
   上次已成功的 chunk 重跑時直接命中快取。
-- 開始處理前先確認要用的端點連得上（models.check_reachable），不可達就指出名稱與位址並立即
+- 開始處理前先確認要用的端點連得上（models.check_reachable；匯入檢查 LLM、VLM、Embedding，查詢另加 Rerank），不可達就指出名稱與位址並立即
   失敗，不要等到解析完才發現。圖／表／公式的描述失敗不會讓 RAG-Anything 報錯（processor 吞掉
   後寫入 fallback 實體），描述後的內容寫入索引（儲存、embedding、實體抽取、合併）失敗也一樣：批次處理的例外被吞掉，
   改走逐項處理的備援流程，最後文件仍標成 processed 且 multimodal_processed=True。所以匯入時把每個 modal processor
@@ -37,15 +37,16 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   處理 chunk 時讀的是儲存層初始化時拿到的設定副本，初始化之後才設不會生效（LightRAG 1.4.16）。匯入不用 rerank。
   chunk_top_k 固定 20、min_rerank_score 固定 0.0（等於 LightRAG 的預設值，但明確傳入：LightRAG 會讀行程環境的
   CHUNK_TOP_K 與 MIN_RERANK_SCORE，不指定的話使用者 shell 裡的環境變數會悄悄改變查詢與 eval 的結果）。
-- rerank 失敗讓該次查詢失敗：LightRAG 在 rerank 例外、空結果、index 超出範圍時都會改用原本的排序、查詢照常成功，
-  使用者會拿到沒經過 rerank 的答案卻不知道。做法比照寫入失敗：models.rerank_model_func 自己判定失敗並記進清單
-  （models.collect_rerank_failures），_answer 與 VLM 增強路徑在 LightRAG 查詢結束後檢查清單，有失敗就拋 PipelineError
-  （訊息含端點回報的錯誤，不含 API key）。清單只屬於那一次查詢（ContextVar，查詢結束即還原）：eval 的某一格失敗記在該格的
-  Cell.error，下一格重新開始；Session 的呼叫本來就一個接一個執行，清單綁 context 讓重疊的查詢也不會互相污染。
+- rerank 失敗讓該次查詢在產生答案之前中止：LightRAG 在 rerank 例外、空結果、index 超出範圍時都會改用原本的排序、查詢照常成功，
+  還會把沒經過 rerank 的答案寫進 LLM 快取（key 不含 rerank 結果），之後同一題 rerank 成功時命中這筆舊答案。做法：
+  models.rerank_model_func 判定失敗後拋出繼承 BaseException 的 models.RerankFailure，穿過 LightRAG（它只攔 Exception），
+  _answer 與 VLM 增強路徑攔下並轉成 PipelineError（訊息含端點位址與端點回報的錯誤，不含 API key）。因為 rerank 發生在答案
+  LLM 與 VLM 呼叫之前，中止時不會送出答案請求，也不會寫入答案快取。失敗只屬於那一次查詢：eval 的某一格失敗記在該格的
+  Cell.error，下一格重新開始。rerank 與 LightRAG 自己同時會失敗時只報 rerank（查詢在 rerank 就中止，後面的階段不會執行）。
 - eval（evaluate）在同一個 Session（同一個 RAGAnything 實例）上，依題目順序、五種模式順序依序查詢，
   不是每格重新初始化。每格沿用 query 的 _answer（aquery_llm、三個查詢 token 上限、vlm_enhanced=False、
   enable_rerank=True）；單格失敗（含沒有答案內容）記在該格的 Cell.error，不中斷其餘格。
-  開始前只檢查 LLM 與 Embedding 端點可達（eval 不走 VLM）。
+  開始前檢查 LLM、Embedding 與 Rerank 端點可達（eval 不走 VLM）。
 - 多篇匯入時單篇失敗不中斷整批：失敗記在該篇的 IngestReport.error，其餘照常處理並保留，
   由 CLI 印出是哪一篇並以非零碼結束。重新執行時已完整處理的篇略過、失敗的篇重試。
 - 查詢 context 的 token 分配由三個設定決定：QUERY_MAX_TOTAL_TOKENS（總上限）、QUERY_MAX_ENTITY_TOKENS 與
@@ -89,8 +90,8 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   `mineru --version` 檢查 parser，查詢不解析文件也一樣要通過。
 
 已知極限：
-- rerank 失敗的偵測在 models.rerank_model_func：只涵蓋它自己看得到的情況（請求例外、HTTP 錯誤、空結果、index 超出範圍）。
-  rerank 函式回傳的格式正確、index 也在範圍內，但排序品質差，這裡看不出來。
+- rerank 失敗的偵測在 models.rerank_model_func：只涵蓋回應的格式與內容（請求例外、HTTP 錯誤、空結果、筆數、index、分數是否合法）。
+  格式正確但排序品質差，這裡看不出來。
 - 使用 RAGAnything 的私有方法 _ensure_lightrag_initialized：官方沒有公開的等價 API，
   但不先初始化就查詢會直接拋 ValueError。
 - VLM 增強查詢（aquery_vlm_enhanced）沒有 aquery_llm 的 status／message：LLM 失敗時只回 None，
@@ -740,7 +741,7 @@ async def _evaluate(rag: RAGAnything, questions: list[Question], settings: Setti
         cells[i][j] 是第 i 題在 RETRIEVAL_MODES[j] 的結果。
 
     Raises:
-        EndpointError: LLM 或 embedding 端點在開始前就不可達。
+        EndpointError: LLM、embedding 或 rerank 端點在開始前就不可達。
     """
     models.check_reachable("LLM", "Embedding", "Rerank")
     cells: list[list[Cell]] = []
@@ -769,7 +770,7 @@ def evaluate(questions: list[Question]) -> list[list[Cell]]:
         cells[i][j] 是第 i 題在 RETRIEVAL_MODES[j] 的結果；單格失敗記在該格的 error。
 
     Raises:
-        EndpointError: LLM 或 embedding 端點在開始前就不可達。
+        EndpointError: LLM、embedding 或 rerank 端點在開始前就不可達。
         PipelineError: 初始化失敗。
         SessionError: 已有開啟中的 Session，或在不允許的環境呼叫（見 Session）。
     """
@@ -947,7 +948,7 @@ class Session:
 
         Raises:
             SessionError: Session 已關閉，或從不允許的執行緒／環境呼叫。
-            EndpointError: LLM 或 embedding 端點在開始前就不可達。
+            EndpointError: LLM、embedding 或 rerank 端點在開始前就不可達。
         """
         self._check_usable()
         return self._runner.run(_evaluate(self._rag, questions, self._settings))
