@@ -5,8 +5,12 @@
 ## Language
 
 **文件**（document）：
-匯入知識庫的一個來源檔，格式可以是 PDF、PPT、Word、Excel 或圖片。
+匯入知識庫的一個來源檔，格式可以是 PDF、PPT、Word、Excel 或圖片。以路徑認定：同一個路徑的內容改了，仍是同一份文件；改名或搬位置，算是移除一份、新增一份。
 _Avoid_：PDF（只用來指 PDF 這一種格式）、論文（只用來指學術論文這一類內容）、檔案
+
+**版本**（version）：
+一份文件在某次匯入時的內容，以文件 ID（解析後內容的雜湊）區分。知識庫裡同一份文件只有一個版本；兩份文件內容相同時，共用同一個版本。
+_Avoid_：修訂（「修訂」指約定條款本身的條文修訂）
 
 **格式**（format）：
 文件的檔案類型，以副檔名判定：PDF、PPT（.ppt .pptx）、Word（.doc .docx）、Excel（.xls .xlsx）、圖片（.png .jpg .jpeg .bmp .tiff .tif .gif .webp）。
