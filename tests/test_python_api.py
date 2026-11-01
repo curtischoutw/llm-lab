@@ -29,6 +29,7 @@ from tests.test_pipeline import (
     LINK_DESCRIPTION,
     RERANK_BUDGET_ENV,
     RERANK_MARKER,
+    WALL_CLOCK_FAST_ENV,
     PipelineCase,
     closed_port_url,
     query_prompts,
@@ -41,6 +42,7 @@ from tests.test_pipeline import (
 # 依 argv 的步驟依序呼叫公開函式；每一步印一行結果。
 # argv[1] 是文件路徑，argv[2] 是題目檔，argv[3] 是 functions（模組函式）或 session（同一個 Session），其餘是步驟。
 # 步驟 stats:<檔名> 匯入文件旁邊的另一個檔案，印出這一次的 VLM 與描述統計；
+# 步驟 timings:<檔名> 匯入文件旁邊的另一個檔案，每份報告印出略過、四個秒數（parse、graph、multimodal、total）與錯誤（最後，內容可含空白）；
 # 步驟 doc:<檔名> 匯入文件旁邊的另一個檔案，每份報告印出 report.document 的檔名、略過與錯誤；
 # 步驟 reject:<檔名>,<檔名>… 一次匯入這些文件，印出拋出的例外類別與訊息（預期不支援的格式整批被拒絕）；
 # 步驟 query_poisoned 問一個題目文字含 Poisoned 的問題，印出拋出的例外類別與訊息（測試讓 rerank 只對這種題目出錯）；
@@ -115,6 +117,13 @@ with pipeline.Session() if use_session else contextlib.nullcontext(pipeline) as 
                 f"stats {name} vlm_ok={summary.vlm_ok} vlm_failed={summary.vlm_failed} "
                 f"description_failed={failed} description_error={summary.description_error is not None}"
             )
+        elif step.startswith("timings:"):
+            summary = api.ingest([document.parent / step.removeprefix("timings:")])
+            for report in summary.reports:
+                print(
+                    f"timings skipped={report.skipped} parse={report.parse_seconds!r} graph={report.graph_seconds!r} "
+                    f"multimodal={report.multimodal_seconds!r} total={report.total_seconds!r} error={report.error}"
+                )
         elif step.startswith("doc:"):
             summary = api.ingest([document.parent / step.removeprefix("doc:")])
             for report in summary.reports:
@@ -645,6 +654,51 @@ class IngestStatsTest(PythonApiCase):
                 "stats b.pdf vlm_ok=0 vlm_failed=1 description_failed=1 description_error=True",
             ],
         )
+
+
+class IngestStageTimingTest(PythonApiCase):
+    """報告的各階段時間和文件耗時用同一個時鐘：牆上時鐘比 perf_counter 快（電腦睡眠）時，階段時間不會比文件耗時長。"""
+
+    def timings(self, *steps: str, **overrides: str) -> list[dict[str, str]]:
+        """執行 timings 步驟並解析輸出。
+
+        Args:
+            *steps: timings:<檔名> 步驟。
+            **overrides: 覆蓋的環境變數。
+
+        Returns:
+            每份報告一個 dict，鍵是 skipped、error、parse、graph、multimodal、total，值是字串。
+        """
+        result = self.run_api(*steps, **overrides)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        reports = []
+        for line in result.stdout.splitlines():
+            fields, error = line.removeprefix("timings ").split(" error=", 1)
+            reports.append({**dict(field.split("=", 1) for field in fields.split()), "error": error})
+        return reports
+
+    def test_stage_times_are_not_negative_and_add_up_to_no_more_than_the_document_time(self):
+        (report,) = self.timings("timings:paper.pdf", **WALL_CLOCK_FAST_ENV)
+        self.assertEqual((report["skipped"], report["error"]), ("False", "None"), report)
+        parse, graph, multimodal, total = (float(report[key]) for key in ("parse", "graph", "multimodal", "total"))
+        self.assertGreaterEqual(min(parse, graph, multimodal), 0.0, report)
+        self.assertGreater(min(parse, graph, multimodal), 0.0, f"三個階段都應該有時間：{report}")
+        self.assertLessEqual(parse + graph + multimodal, total, report)
+
+    def test_a_skipped_document_reports_only_the_parse_time_and_it_stays_within_the_document_time(self):
+        first, second = self.timings("timings:paper.pdf", "timings:paper.pdf", **WALL_CLOCK_FAST_ENV)
+        self.assertEqual((first["skipped"], second["skipped"]), ("False", "True"))
+        parse, total = float(second["parse"]), float(second["total"])
+        self.assertEqual((second["graph"], second["multimodal"]), ("0.0", "0.0"), second)
+        self.assertGreaterEqual(parse, 0.0)
+        self.assertLessEqual(parse, total, second)
+
+    def test_a_failed_document_reports_zero_stage_times(self):
+        broken = self.tmp / "broken.pdf"
+        broken.write_bytes(b"%PDF-1.4 broken")
+        (report,) = self.timings("timings:broken.pdf", **WALL_CLOCK_FAST_ENV)
+        self.assertNotEqual(report["error"], "None", report)
+        self.assertEqual((report["parse"], report["graph"], report["multimodal"]), ("0.0", "0.0", "0.0"), report)
 
 
 class OversizedTableTest(PythonApiCase):
