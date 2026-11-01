@@ -64,6 +64,11 @@ TABLE_BODY_MAX_TOKENS = 800
 HANG_TIMEOUT = 60
 # .env 內以字面 \n 表示換行；CLI 讀進來後是真正的換行
 QUERY_PREFIX_ENV = r"Instruct: Given a question, retrieve relevant passages that answer the question\nQuery:"
+# 讓子行程的 time.time 走得比 perf_counter 快 1000 倍，模擬電腦睡眠（夾具見 tests/wall_clock_fast/sitecustomize.py）
+WALL_CLOCK_FAST_ENV = {
+    "PYTHONPATH": str(REPO_ROOT / "tests" / "wall_clock_fast"),
+    "WALL_CLOCK_SPEED": "1000",
+}
 
 # ==============================
 # 工具函式
@@ -593,6 +598,18 @@ class IngestTest(PipelineCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertRegex(result.stdout, r"\[1/2\] a\.pdf.*耗時 \d+\.\d s")
         self.assertRegex(result.stdout, r"\[2/2\] b\.pdf.*耗時 \d+\.\d s")
+
+    def test_stage_times_do_not_exceed_the_document_time_even_when_the_wall_clock_runs_ahead_of_it(self):
+        # 電腦睡眠時牆上時鐘繼續走、perf_counter 停住；報告的階段時間和文件耗時必須用同一個時鐘
+        result = self.ingest(**WALL_CLOCK_FAST_ENV)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        total = float(re.search(r"耗時 (\d+\.\d) s", result.stdout).group(1))
+        stages = [
+            float(re.search(rf"{label}[^：\n]*：(\d+\.\d) s", result.stdout).group(1)) for label in ("解析", "建圖", "多模態")
+        ]
+        self.assertTrue(all(seconds >= 0 for seconds in stages), stages)
+        # 報告印到小數一位：三個階段各最多進位 0.05、文件耗時最多捨去 0.05
+        self.assertLessEqual(sum(stages), total + 0.2, f"階段 {stages}，文件耗時 {total}")
 
     def test_a_folder_does_not_treat_lock_files_and_hidden_files_as_documents(self):
         # Word 開檔時產生的 ~$ 鎖定檔、macOS 在非 HFS 磁碟上寫的 ._ AppleDouble 檔、.DS_Store：

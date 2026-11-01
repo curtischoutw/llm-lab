@@ -282,27 +282,44 @@ async def _initialize(rag: RAGAnything) -> None:
 
 
 class StageTimer(ProcessingCallback):
-    """收集單一文件各階段耗時的 callback。"""
+    """收集單一文件各階段耗時的 callback。
+
+    階段時間由開始與完成兩個 callback 各取一次 `time.perf_counter` 相減，和 `_ingest` 量文件耗時用同一個時鐘，
+    所以兩者可以互相比較，電腦睡眠的時間兩邊都不算。不用 callback 傳來的 `duration_seconds`：RAG-Anything 用
+    `time.time` 算它，牆上時鐘在睡眠期間繼續走，階段時間會比文件耗時還長。
+    """
 
     def __init__(self) -> None:
         self.parse_seconds: float | None = None
         self.text_insert_seconds = 0.0
         self.multimodal_seconds = 0.0
         self.multimodal_items = 0
+        self._parse_started = 0.0
+        self._text_insert_started = 0.0
+        self._multimodal_started = 0.0
 
-    def on_parse_complete(self, file_path: str, duration_seconds: float = 0.0, **kwargs) -> None:
+    def on_parse_start(self, file_path: str, **kwargs) -> None:
+        """第一次解析才記開始時刻：之後 process_document_complete 內的 parse 是快取命中。"""
+        if self.parse_seconds is None:
+            self._parse_started = time.perf_counter()
+
+    def on_parse_complete(self, file_path: str, **kwargs) -> None:
         """只記第一次：之後 process_document_complete 內的 parse 是快取命中。"""
         if self.parse_seconds is None:
-            self.parse_seconds = duration_seconds
+            self.parse_seconds = time.perf_counter() - self._parse_started
 
-    def on_text_insert_complete(self, file_path: str, duration_seconds: float = 0.0, **kwargs) -> None:
-        self.text_insert_seconds += duration_seconds
+    def on_text_insert_start(self, file_path: str, **kwargs) -> None:
+        self._text_insert_started = time.perf_counter()
 
-    def on_multimodal_complete(
-        self, file_path: str, processed_count: int = 0, duration_seconds: float = 0.0, **kwargs
-    ) -> None:
+    def on_text_insert_complete(self, file_path: str, **kwargs) -> None:
+        self.text_insert_seconds += time.perf_counter() - self._text_insert_started
+
+    def on_multimodal_start(self, file_path: str, **kwargs) -> None:
+        self._multimodal_started = time.perf_counter()
+
+    def on_multimodal_complete(self, file_path: str, processed_count: int = 0, **kwargs) -> None:
         self.multimodal_items += processed_count
-        self.multimodal_seconds += duration_seconds
+        self.multimodal_seconds += time.perf_counter() - self._multimodal_started
 
 
 @dataclass
@@ -314,7 +331,8 @@ class IngestReport:
         skipped: True 表示已完整處理過，沒有重新匯入。
         parse_seconds: 解析耗時，Office 文件含 LibreOffice 轉 PDF（skipped 時為快取查詢時間）。
         graph_seconds: 文字建圖耗時（含 LLM 實體抽取）。
-        multimodal_seconds: 圖／表／公式描述耗時。
+        multimodal_seconds: 圖／表／公式描述耗時。三個階段時間和 total_seconds 同樣用 time.perf_counter 量，
+            不含電腦睡眠，同一篇的三者加總不超過 total_seconds。
         multimodal_items: 處理的圖／表／公式數。
         total_seconds: 這一篇從開始到結束的總耗時。
         error: 失敗時的「型別：訊息」；None 表示成功。

@@ -145,12 +145,13 @@ __main__ ──► config
 | `fake_mineru.py` | 假的 `mineru` 指令：依主檔名寫出固定的解析結果（PDF、圖片與假 LibreOffice 轉出的 PDF 相同）（文字、一張圖、一個表、一條公式）；主檔名以 `bigtable` 開頭時表格換成 60 列 × 6 欄的大表格（`bigspan` 開頭的版本有一格 rowspan 跨到表尾），以 `spans` 開頭時小表格的儲存格帶 `rowspan=1 colspan=1`；PDF 裡有假 LibreOffice 寫的來源標記行時，多輸出一段 `Converted from Office document: <來源第一行>`，讓主檔名相同的 Office 文件分辨得出來；設了 `FAKE_MINERU_VERSION_LOG` 時記錄每次 `--version`，用來計算初始化次數 |
 | `fake_chrome.py` | 假的 headless Chrome 命令列，給 `scripts/test_fetch_taishin.py` 用：照 `fetch_taishin.py` 呼叫 Chrome 的引數格式寫出小 PDF，內容是假 PDF 檔頭加收到的 HTML；引數格式不符時以非零碼結束 |
 | `fake_libreoffice.py` | 假的 `libreoffice`／`soffice` 指令：收到 `--headless --convert-to pdf --outdir <dir> <檔案>` 時在 `<dir>` 寫出 `<主檔名>.pdf`，內容含輸入檔第一行的來源標記；引數形式不符時以非零碼結束；主檔名以 `broken` 開頭時以非零碼結束，模擬轉檔失敗。`test_pipeline.py` 的 `PipelineCase` 以兩個名稱放在 PATH 最前面；「沒有 LibreOffice」的測試把 PATH 改成只有假 mineru 的資料夾 |
+| `wall_clock_fast/sitecustomize.py` | 測試夾具：子行程的 `PYTHONPATH` 含這個資料夾且設了 `WALL_CLOCK_SPEED` 時，把 `time.time` 換成走得快 N 倍的版本、`time.perf_counter` 不動，模擬電腦睡眠；用來驗證匯入報告的階段時間和文件耗時用同一個時鐘 |
 | `test_cli.py` | 設定驗證、子命令註冊、結束碼；提供其他測試共用的 `run_cli`、`valid_env` |
 | `test_fake_server.py` | 以 `scripts/smoke_test.py` 當客戶端對假 server 執行，確認假 server 符合同一份介面（smoke test 曾對真 server 通過，所以把它當作介面的定義）；不連真 server |
-| `test_pipeline.py` | `ingest`、`query` 的完整流程（含各種圖片與 Office 格式、資料夾挑選與略過、不支援格式的錯誤、沒有 LibreOffice 的錯誤、轉檔失敗、重複匯入、失敗重試、大表格切成小表、描述與寫入失敗、端點不可達、查詢總 token 上限與 entity／relation 上限、rerank 的請求與順序、rerank 失敗讓查詢失敗且不送答案請求、失敗後同一題再問會重新生成答案、不合法的 rerank 回應、rerank 端點不可達在查詢前就失敗、環境的 `CHUNK_TOP_K`／`MIN_RERANK_SCORE` 不影響結果）；提供共用的 `PipelineCase`、產生各格式小圖的 `write_image`（用 Pillow）與寫出 Office 替身檔的 `write_office`（內容是一行文字，不是真的 Office 檔：假 LibreOffice 與假 mineru 都不讀內容） |
+| `test_pipeline.py` | `ingest`、`query` 的完整流程（含各種圖片與 Office 格式、資料夾挑選與略過、不支援格式的錯誤、沒有 LibreOffice 的錯誤、轉檔失敗、重複匯入、失敗重試、大表格切成小表、描述與寫入失敗、端點不可達、查詢總 token 上限與 entity／relation 上限、rerank 的請求與順序、rerank 失敗讓查詢失敗且不送答案請求、失敗後同一題再問會重新生成答案、不合法的 rerank 回應、rerank 端點不可達在查詢前就失敗、牆上時鐘比 `perf_counter` 快時階段時間加總仍不超過文件耗時、環境的 `CHUNK_TOP_K`／`MIN_RERANK_SCORE` 不影響結果）；提供共用的 `PipelineCase`、產生各格式小圖的 `write_image`（用 Pillow）與寫出 Office 替身檔的 `write_office`（內容是一行文字，不是真的 Office 檔：假 LibreOffice 與假 mineru 都不讀內容） |
 | `test_graph.py` | `graph` 指令的抽樣與可重現性 |
 | `test_eval.py` | `eval` 指令的題目檔驗證與結果表、rerank 的順序、rerank 失敗只記在發生的那幾格、rerank 端點不可達時查詢前就失敗 |
-| `test_python_api.py` | 在同一個 process 裡依序呼叫 `rag_lab.pipeline` 的模組函式與 `Session`：連續呼叫、每次 ingest 的統計獨立、同一個 `Session` 只初始化一次並在關閉後釋放實例、誤用時的 `SessionError`、開 `Session` 失敗後不留狀態、忘了 `close()` 時的收尾、匯入圖片與 Office 文件、不支援的格式整批被拒絕、大表格切成小表與描述失敗後的重試、rerank 失敗讓 `query` 拋例外、rerank 端點不可達在查詢前就拋 `EndpointError`與 `evaluate` 記成失敗格、下一次呼叫不受影響 |
+| `test_python_api.py` | 在同一個 process 裡依序呼叫 `rag_lab.pipeline` 的模組函式與 `Session`：連續呼叫、每次 ingest 的統計獨立、同一個 `Session` 只初始化一次並在關閉後釋放實例、誤用時的 `SessionError`、開 `Session` 失敗後不留狀態、忘了 `close()` 時的收尾、匯入圖片與 Office 文件、報告的階段時間和文件耗時用同一個時鐘（略過與失敗的文件欄位不變）、不支援的格式整批被拒絕、大表格切成小表與描述失敗後的重試、rerank 失敗讓 `query` 拋例外、rerank 端點不可達在查詢前就拋 `EndpointError`與 `evaluate` 記成失敗格、下一次呼叫不受影響 |
 | `test_examples.py` | 實際執行 `examples/` 的範例，確認在一個 `Session` 裡連續提問能跑完 |
 
 ### 3.4 `examples/`：範例
@@ -202,7 +203,7 @@ with Session() as session:
 | 方法 | 回傳 | 失敗時 |
 |---|---|---|
 | `query(question, mode, vlm_enhanced=False)` | 答案字串 | `mode` 不是五種檢索模式之一拋 `ValueError`（LightRAG 另外接受的 `bypass` 不檢索，這裡不允許）；開始前端點（LLM、embedding、rerank，`vlm_enhanced=True` 時加 VLM）不可達拋 `EndpointError`；查詢失敗（含 rerank 失敗與查詢途中 LLM 失敗）或沒有答案拋 `PipelineError`；`vlm_enhanced=True` 時 VLM 呼叫失敗拋 `EndpointError` |
-| `ingest(documents: list[Path])` | `IngestSummary`：每篇的耗時與錯誤、圖譜統計、這一次的 VLM 與描述統計 | 單篇失敗記在該篇的 `error`、圖表公式描述或多模態寫入失敗也記在該篇的 `error`（同時文件在索引裡改記成 `failed`，重新執行會重試）並彙整在 `description_error`，都不拋例外；`documents` 裡有任何一份不是支援的格式（`rag_lab/formats.py`），在呼叫任何模型或解析之前拋 `PipelineError`，整批都不匯入；開始前端點不可達拋 `EndpointError` |
+| `ingest(documents: list[Path])` | `IngestSummary`：每篇的耗時（`total_seconds`）與解析、建圖、多模態三個階段的時間（`parse_seconds`、`graph_seconds`、`multimodal_seconds`；都用 `time.perf_counter` 量，不含電腦睡眠，階段時間加總不超過耗時）與錯誤、圖譜統計、這一次的 VLM 與描述統計 | 單篇失敗記在該篇的 `error`、圖表公式描述或多模態寫入失敗也記在該篇的 `error`（同時文件在索引裡改記成 `failed`，重新執行會重試）並彙整在 `description_error`，都不拋例外；`documents` 裡有任何一份不是支援的格式（`rag_lab/formats.py`），在呼叫任何模型或解析之前拋 `PipelineError`，整批都不匯入；開始前端點不可達拋 `EndpointError` |
 | `evaluate(questions: list[Question])` | `cells[i][j]`：第 i 題在第 j 種模式的答案或錯誤 | 單格失敗記在該格的 `error`，不拋例外；開始前 LLM、embedding 或 rerank 端點不可達拋 `EndpointError` |
 | `close()` | — | 離開 `with` 時自動呼叫；重複呼叫不做事 |
 
