@@ -28,6 +28,8 @@ from tests.test_pipeline import (
     ALPHA_DESCRIPTION,
     INGEST_TIMEOUT,
     LINK_DESCRIPTION,
+    RERANK_BUDGET_ENV,
+    RERANK_MARKER,
     PipelineCase,
     closed_port_url,
     query_prompts,
@@ -310,8 +312,9 @@ class EvalRunTest(IngestedEvalCase):
         markdown = self.result_files()[0].read_text(encoding="utf-8")
         preamble = markdown.split("| id |")[0]
         self.assertIn("vlm_enhanced=False", preamble)
-        self.assertIn("enable_rerank=False", preamble)
+        self.assertIn("enable_rerank=True", preamble)
         self.assertIn("fake-llm", preamble)
+        self.assertIn("- RERANK_MODEL：fake-rerank", preamble)
 
     def test_pipes_and_newlines_in_fields_cannot_break_the_row(self):
         path = self.write_questions(
@@ -401,6 +404,41 @@ class EvalQueryBudgetTest(IngestedEvalCase):
         self.assertIn("- QUERY_MAX_TOTAL_TOKENS：12000", header)
         self.assertIn("- QUERY_MAX_ENTITY_TOKENS：500", header)
         self.assertIn("- QUERY_MAX_RELATION_TOKENS：400", header)
+
+
+class EvalRerankTest(EvalCase):
+    """eval 的每一格查詢也經過 rerank：rerank 的順序決定哪些 chunk 在截斷後進得了 prompt。"""
+
+    def setUp(self):
+        super().setUp()
+        self.document = self.tmp / "multichunk.pdf"
+        self.document.write_bytes(b"%PDF-1.4 fake")
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+        self.asked = 0
+
+    def eval_prompts(self) -> list[str]:
+        """以只放得下一個 chunk 的 token 上限跑一題 eval，回傳這次送出的答案 prompt。
+
+        Returns:
+            五種模式各一個答案 prompt。每次的題目不同，LightRAG 的 LLM 快取 key 不含 rerank 的順序。
+        """
+        self.asked += 1
+        before = len(self.server.requests)
+        question = f"What relates to Fake Entity 3-17? ({self.asked})"
+        result = self.run_eval(self.write_questions(question_line(question=question)), **RERANK_BUDGET_ENV)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        prompts = query_prompts(self.server.requests[before:])
+        self.assertEqual(len(prompts), 5)
+        return prompts
+
+    def test_prompts_follow_the_rerank_order(self):
+        self.assertFalse([p for p in self.eval_prompts() if RERANK_MARKER in p])
+        self.server.rerank_promote = RERANK_MARKER
+        self.assertTrue([p for p in self.eval_prompts() if RERANK_MARKER in p])
+        self.server.rerank_promote = None
+        self.server.rerank_demote = RERANK_MARKER
+        self.assertFalse([p for p in self.eval_prompts() if RERANK_MARKER in p])
 
 
 class EvalResultFileTest(IngestedEvalCase):

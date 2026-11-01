@@ -283,12 +283,13 @@ def _run_eval(questions_path: str, output_dir: str) -> int:
     meta = [
         ("題目檔", str(path.resolve())),
         ("題數", str(len(questions))),
-        ("固定查詢設定", "vlm_enhanced=False、enable_rerank=False（檢索模式是唯一變因）"),
+        ("固定查詢設定", "vlm_enhanced=False、enable_rerank=True（檢索模式是唯一變因）"),
         ("QUERY_MAX_TOTAL_TOKENS", str(settings.query_max_total_tokens)),
         ("QUERY_MAX_ENTITY_TOKENS", str(settings.query_max_entity_tokens)),
         ("QUERY_MAX_RELATION_TOKENS", str(settings.query_max_relation_tokens)),
         ("LLM_MODEL", settings.llm_model),
         ("EMBED_MODEL", settings.embed_model),
+        ("RERANK_MODEL", settings.rerank_model),
     ]
     result_path.write_text(render_report(questions, cells, meta, generated_at), encoding="utf-8")
     print(f"對照表：{result_path.resolve()}")

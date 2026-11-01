@@ -1,6 +1,6 @@
 """從環境變數（含 .env）讀取並驗證 RAG 實驗設定。
 
-為什麼存在：三個模型端點（LLM、VLM、embedding）、儲存路徑與併發度都要能只靠
+為什麼存在：四個模型端點（LLM、VLM、embedding、rerank）、儲存路徑與併發度都要能只靠
 .env 切換，這樣搬到別台機器換大模型時，程式碼完全不用動。
 
 關鍵設計決策：
@@ -9,6 +9,8 @@
 - 查詢 context 的 token 分配由三個欄位決定：QUERY_MAX_TOTAL_TOKENS 是總上限，QUERY_MAX_ENTITY_TOKENS
   與 QUERY_MAX_RELATION_TOKENS 是圖譜 context 裡 entity 與 relation 各自的上限，其餘留給文字 chunk。
   後兩者可以是 0（LightRAG 照常執行，只是不放該類描述），但兩者相加必須小於總上限，否則 chunk 分不到 token。
+- RERANK_BASE_URL／RERANK_MODEL／RERANK_API_KEY 三個欄位必填、規則與其他端點相同：查詢一律用 rerank，
+  沒有開關；chunk_top_k 與分數門檻不在這裡設定，維持 LightRAG 的預設值。
 - EMBED_QUERY_PREFIX 只套用在查詢端（LightRAG 會以 context="query" 呼叫），
   文件端不加前綴；Qwen3-Embedding 的官方用法即為此非對稱形式。
 
@@ -98,6 +100,9 @@ class Settings:
     embed_max_token_size: int
     embed_max_async: int
     embed_query_prefix: str
+    rerank_base_url: str
+    rerank_model: str
+    rerank_api_key: str
     working_dir: str
     parser_output_dir: str
     llm_max_async: int
@@ -142,6 +147,9 @@ def get_settings() -> Settings:
         embed_max_async=_positive_int("EMBED_MAX_ASYNC"),
         # .env 內以字面 \n 表示換行
         embed_query_prefix=os.environ.get("EMBED_QUERY_PREFIX", "").replace("\\n", "\n"),
+        rerank_base_url=_url("RERANK_BASE_URL"),
+        rerank_model=_required("RERANK_MODEL"),
+        rerank_api_key=_required("RERANK_API_KEY"),
         working_dir=_required("WORKING_DIR"),
         parser_output_dir=_required("PARSER_OUTPUT_DIR"),
         llm_max_async=_positive_int("LLM_MAX_ASYNC"),
