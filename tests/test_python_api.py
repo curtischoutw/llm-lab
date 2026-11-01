@@ -418,14 +418,14 @@ class RerankUnreachableTest(PythonApiCase):
 
 
 class UnmanagedLightragEnvTest(PythonApiCase):
-    """環境裡有 rag_lab 沒管理的 LightRAG／RAG-Anything 變數時，模組函式與 Session 都在連線檢查之前拋出 ConfigError。"""
+    """環境裡有 rag_lab 沒管理的 LightRAG／RAG-Anything／MinerU 變數時，模組函式與 Session 都在連線檢查之前拋出 ConfigError。"""
 
     def test_module_functions_and_session_raise_config_error_naming_the_variable_before_any_connection(self):
         value = "sentinel-value-7731"
         dead = closed_port_url()
         endpoints = {"LLM_BASE_URL": dead, "VLM_BASE_URL": dead, "EMBED_BASE_URL": dead, "RERANK_BASE_URL": dead}
         for mode, step in (("functions", "ingest"), ("functions", "query"), ("functions", "evaluate"), ("session", "query")):
-            for name in ("TOP_K", "WORKSPACE"):
+            for name in ("TOP_K", "WORKSPACE", "MINERU_TABLE_ENABLE"):
                 with self.subTest(mode=mode, step=step, name=name):
                     result = self.run_api(step, mode=mode, **{**endpoints, name: value})
                     self.assertNotEqual(result.returncode, 0, result.stdout)

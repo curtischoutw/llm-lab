@@ -13,10 +13,11 @@
   沒有開關；chunk_top_k 與分數門檻不在這裡設定，由 pipeline 固定為 20 與 0.0，不受行程環境的 CHUNK_TOP_K、MIN_RERANK_SCORE 影響。
 - EMBED_QUERY_PREFIX 只套用在查詢端（LightRAG 會以 context="query" 呼叫），
   文件端不加前綴；Qwen3-Embedding 的官方用法即為此非對稱形式。
-- 拒絕 rag_lab 沒有管理的 LightRAG／RAG-Anything 環境變數（UNMANAGED_LIBRARY_ENV）：兩個套件在 import 時
-  會從環境變數與目前工作目錄的 .env（load_dotenv(".env", override=False)）讀幾十個設定當預設值，
-  會悄悄改變匯入與查詢結果、eval 結果檔也看不出來。環境裡出現名單內的變數就以 ConfigError 中止，
-  訊息只列名稱、不印值。檢查函式 reject_unmanaged_library_env 有兩個呼叫點：get_settings（CLI 的每個子命令
+- 拒絕 rag_lab 沒有管理的 LightRAG／RAG-Anything／MinerU 環境變數（UNMANAGED_LIBRARY_ENV）：LightRAG 與
+  RAG-Anything 在 import 時會從環境變數與目前工作目錄的 .env（load_dotenv(".env", override=False)）讀幾十個設定
+  當預設值；MinerU 是 RAG-Anything 以子行程執行的 `mineru` 指令，繼承 rag_lab 行程的環境（.env 經 load_dotenv
+  也進了行程環境），自己讀一批 MINERU_* 變數。這些變數會悄悄改變匯入與查詢結果、eval 結果檔也看不出來。
+  環境裡出現名單內的變數就以 ConfigError 中止，訊息只列名稱、不印值。檢查函式 reject_unmanaged_library_env 有兩個呼叫點：get_settings（CLI 的每個子命令
   與 Python API 的 Session、ingest、query、evaluate 都在連線檢查之前被擋下），以及 rag_lab.pipeline 與
   rag_lab.models 在 import lightrag 之前（LightRAG 在 import 時就把這些變數讀成預設值，值不合法時 import 本身會拋
   ValueError 並帶出值，所以要搶在它之前）。檢查前先照 LightRAG 的方式載入目前工作目錄的 .env（override=False；
@@ -41,8 +42,24 @@
      ENABLE_VIDEO_PROCESSING、VIDEO_*、WHISPER_*；OLLAMA_EMULATING_*；RAGANYTHING_PUBLIC_ASSET_* 只加欄位不改內容）；
      HISTORY_TURNS（1.4.16 裡沒有任何程式讀它，rag_lab 也不傳對話歷史）；Postgres、Neo4j、Mongo 等外部資料庫的連線變數
      （rag_lab 用的是 LightRAG 預設的檔案型儲存）。
-  已知極限：這份名單只涵蓋 lightrag-hku 與 raganything 的 Python 原始碼。MinerU 子行程繼承行程環境，
-  它自己讀的變數（MINERU_*）不在名單內，要另外審。
+  MinerU 的名單另外產生（升級 mineru 時照做一次）：
+  1. 在 site-packages 的 mineru、mineru_vl_utils、mineru_llama_cpp 裡搜尋 MINERU_，涵蓋 os.getenv、os.environ.get、
+     os.environ[...]、os.environ.setdefault，以及先存成常數或參數再讀的寫法（例如 MODEL_SOURCE_ENV_VAR、
+     get_op_num_threads(name)、env_flag_enabled(name)）；另搜不含 MINERU_ 字樣的 os.environ／getenv 讀取，確認沒有漏。
+  2. 只收「rag_lab 實際走得到」且「會改變解析結果」的變數。走得到與否看 RAG-Anything 怎麼呼叫：
+     `mineru -p <檔案> -o <輸出> -m auto -b pipeline`，沒有 -l -s -e -f -t -d -u --source，所以 backend 是 pipeline、
+     method 是 auto，公式與表格開關由 mineru 的 CLI 預設（開）決定。vlm 與 hybrid 後端才讀的變數
+     （MINERU_VLM_TABLE_ENABLE、MINERU_VLM_FORMULA_ENABLE、MINERU_HYBRID_BATCH_RATIO、MINERU_LMDEPLOY_BACKEND、
+     MINERU_VLLM_DEVICE、MINERU_VL_*、MINERU_VLM_END_TOKEN）不收；rag_lab 改 MINERU_BACKEND 時要重新審。
+  3. 不收的類別：速度與記憶體（MINERU_PROCESSING_WINDOW_SIZE、MINERU_VIRTUAL_VRAM_SIZE、MINERU_PDF_RENDER_*、
+     MINERU_INTRA_OP_NUM_THREADS、MINERU_INTER_OP_NUM_THREADS、MINERU_ENABLE_PIPELINE_INFERENCE_LOCKS、
+     MINERU_API_MAX_CONCURRENT_REQUESTS、MINERU_LMDEPLOY_DEVICE）；log 與除錯輸出（MINERU_LOG_LEVEL、
+     MINERU_SEAL_OCR_DEBUG*）；本機 API 服務的啟動、逾時與維運（MINERU_LOCAL_API_*、MINERU_TASK_RESULT_*、
+     MINERU_API_*、MINERU_ROUTER_*、MINERU_GRADIO_*）。逾時類的變數逾時會讓 mineru 失敗，不會悄悄改變內容。
+  已知極限：名單只涵蓋環境變數。MinerU 還會讀 `~/mineru.json`（或 MINERU_TOOLS_CONFIG_JSON 指的檔案）裡的
+  latex-delimiter-config、llm-aided-config、models-dir、model-source，那是檔案設定，rag_lab 不檢查。
+  MINERU_DEVICE_MODE 與 MINERU_MODEL_SOURCE 是否「會改變解析結果」是判斷（不同裝置的運算子實作、不同來源的模型權重
+  可能有差異），無法從原始碼證明，依「寧可多擋」收進名單。
 
 Dependencies: python-dotenv（由 raganything 帶入）。
 """
@@ -55,11 +72,11 @@ from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 # ==============================
-# rag_lab 沒有管理的 LightRAG／RAG-Anything 環境變數
+# rag_lab 沒有管理的 LightRAG／RAG-Anything／MinerU 環境變數
 # ==============================
 
-# 名單對應的套件與版本；升級這兩個套件時照模組 docstring 的步驟重新產生名單，再更新這裡
-UNMANAGED_LIBRARY_ENV_VERSIONS = {"lightrag-hku": "1.4.16", "raganything": "1.4.3"}
+# 名單對應的套件與版本；升級這三個套件時照模組 docstring 的步驟重新產生名單，再更新這裡
+UNMANAGED_LIBRARY_ENV_VERSIONS = {"lightrag-hku": "1.4.16", "raganything": "1.4.3", "mineru": "3.4.5"}
 
 UNMANAGED_LIBRARY_ENV = frozenset(
     {
@@ -98,12 +115,21 @@ UNMANAGED_LIBRARY_ENV = frozenset(
         "CONTENT_FORMAT",
         "USE_FULL_PATH",
         "MINERU_PARSE_METHOD",
+        # MinerU（`mineru -b pipeline -m auto` 子行程讀的）：設定檔位置、推論裝置、公式與表格的開關與模型、模型來源
+        "MINERU_TOOLS_CONFIG_JSON",
+        "MINERU_DEVICE_MODE",
+        "MINERU_FORMULA_ENABLE",
+        "MINERU_TABLE_ENABLE",
+        "MINERU_OCR_DET_MASK_INLINE_FORMULA_ENABLE",
+        "MINERU_TABLE_MERGE_ENABLE",
+        "MINERU_FORMULA_CH_SUPPORT",
+        "MINERU_MODEL_SOURCE",
     }
 )
 
 
 def reject_unmanaged_library_env() -> None:
-    """環境裡有 rag_lab 沒管理的 LightRAG／RAG-Anything 變數就中止。
+    """環境裡有 rag_lab 沒管理的 LightRAG／RAG-Anything／MinerU 變數就中止。
 
     先照 LightRAG 的方式載入目前工作目錄的 .env（override=False），名單檢查才看得到那份檔案的內容。
     必須在 import lightrag 與 raganything 之前呼叫：它們在 import 時就把這些變數讀成預設值，
@@ -117,7 +143,7 @@ def reject_unmanaged_library_env() -> None:
     if present:
         raise ConfigError(
             "、".join(present),
-            "是 rag_lab 沒有管理的 LightRAG／RAG-Anything 設定，會悄悄改變匯入或查詢結果；"
+            "是 rag_lab 沒有管理的 LightRAG／RAG-Anything／MinerU 設定，會悄悄改變匯入或查詢結果；"
             "請從環境變數與 .env 刪掉它們，或改用 rag_lab 的設定欄位（見 README 的設定說明）",
         )
 
@@ -219,7 +245,7 @@ def get_settings() -> Settings:
         Settings：同一個 process 內只解析一次。
 
     Raises:
-        ConfigError: 任一必要欄位缺漏或格式不合法，或環境裡有 rag_lab 沒管理的 LightRAG／RAG-Anything 變數。
+        ConfigError: 任一必要欄位缺漏或格式不合法，或環境裡有 rag_lab 沒管理的 LightRAG／RAG-Anything／MinerU 變數。
     """
     load_dotenv()
     reject_unmanaged_library_env()
