@@ -35,7 +35,7 @@
 - [x] 以 CLI 子行程與 Python API 兩個既有的縫測試。假 OpenAI server 已經記錄收到的請求；送給 LightRAG 的參數若不能直接觀察，就用最高的縫觀察得到的行為來驗證，並在實作結果說明怎麼驗證的。
 - [x] README（設定說明、第 5 節有提到比例縮放的地方）與 `docs/architecture.md` 一併更新。
 - [x] 主測試套件全綠。
-- [ ] 實機驗證，由主對話做，implementer 不跑：
+- [x] 實機驗證，由主對話做，implementer 不跑：
   1. 使用者在 `.env` 加上這兩行；
   2. 刪掉 `kv_store_llm_response_cache.json` 裡 key 含 `:query:` 的項目；
   3. 重跑完整的 20 題 eval，用和 ticket 09 相同的判讀方式比較，原本答對的題目也要檢查有沒有變差。
@@ -63,3 +63,12 @@
 - 設定檢查違反時只丟一個 `ConfigError`，欄位寫 `QUERY_MAX_ENTITY_TOKENS`、訊息提到另外兩個欄位。
 - `valid_env` 的基準值用 6000／8000（對 30000），與舊程式在 30000 下算出的值相同。
 - README 第 5 節的歷史數據（2,400／3,200 時的結果）保留，只加註當時的上限。
+
+## 實機驗證結果（2026-11-01，主對話）
+
+- 使用者在 `.env` 加上兩個欄位（以 `grep -c` 確認各 1 行，`get_settings` 讀到 12000／500／500）；刪掉 LLM 快取 100 個 `:query:` 項目（備份 `rag_storage/kv_store_llm_response_cache.json.bak-20261101-095116`）。
+- 完整 eval：`eval_results/eval_20261101-095122.md`，100 格，失敗 0 格，耗時 1:34:31，GPU wired 峰值 19 GB。判讀與比較在 `output/taishin_eval2/judgement.md`（兩位判讀者 85/100 格一致，分歧都是 △／✗，不影響 ✓ 數）。
+- 各模式 ✓：naive 8→8、local 4→2、global 8→4、hybrid 4→1、mix 4→7。naive 的答案兩次逐字相同，判讀的 ✓ 也相同，所以 mix 的變化來自答案本身。
+- mix 原本 ✓、這次不是 ✓ 的有 benefit-01、fee-02；從 △ 變 ✗ 的有 switch-03、rule-01。
+- local、global、hybrid 變差的原因：global 模式的 probe 顯示 relation 從每題 40 個降到 5–11 個，global 原本答對的 4 題關鍵字句從 12/12 降到 6/12。
+- 使用者決定（2026-11-01）：只用 mix，維持 500／500，不依模式分開設定；README 與 `.env.example` 已註明。

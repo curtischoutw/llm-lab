@@ -28,3 +28,11 @@
   - mix 答案引用的 65 份文件中，44 份是活動頁；rule-01、rule-02 完全沒有引用到題目的來源文件。
   - terms-01 混入 iCash 聯名卡條款的規定。
 - 已回報使用者，等使用者決定下一步。README、架構文件、read-back 與關閉 server 這 4 項，等決定後再做。
+
+## 第二次評估（2026-11-01，ticket 13 之後）
+
+- 使用者決定先查根本原因，再調 mix 的 token 分配（ticket 13）並加 reranker。
+- `eval_results/eval_20261101-095122.md`：entity／relation 上限 500／500，mix 的 ✓ 從 4 題增加到 7 題。判讀在 `output/taishin_eval2/judgement.md`。
+- **驗收仍未通過**：7 類中 5 類通過。回饋規則這次通過（rule-03）；約定條款（terms-01 △、terms-02 ✗）、跨卡比較（cross-01、cross-02 ✗）仍未通過。
+- 改善提案與實驗結果在 `.scratch/taishin-credit-card-kb/proposal-answer-quality.md`：回答規則（方案 A）沒有效果；拆成單卡子問題（方案 C）讓 cross-01、cross-02 的檢索覆蓋增加，還沒有實作。
+- 使用者決定下一步：另開 reranker 的 spec（方案 B）。這張 ticket 等 reranker 之後重新評估。
