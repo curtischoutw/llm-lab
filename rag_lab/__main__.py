@@ -15,6 +15,8 @@ rag_lab.graph_report 後格式化輸出。
 - ingest 資料夾時只處理支援格式的文件（見 rag_lab.formats；不遞迴），其他檔案在 stdout 說明
   「略過不支援的格式：<檔名>」，不算錯誤；檔名以 `.` 或 `~$` 開頭的檔案（.DS_Store、macOS 的 ._ 檔、
   Word 的鎖定檔）不算文件，不匯入也不列出；
+- 匯入報告在原有的逐篇耗時與統計之後，另列分類的數量與清單（目前是「新增」「沒變」；分類由 rag_lab.pipeline 依
+  對照表判斷，見 rag_lab.registry）。對照表壞掉或寫不進去時 pipeline 拋 PipelineError，由 main 轉成結束碼 1。
 - 匯入報告的解析階段標籤：Office 格式（rag_lab.formats.is_office）寫「解析（含 Office 轉 PDF）」，其餘寫「解析」；
   某一篇失敗時其餘照常匯入，失敗的篇名與原因印到 stderr，整體以 1 結束。
 - eval 的結果檔寫到 --output-dir（預設 ./eval_results，已在 .gitignore），檔名含時間戳記
@@ -194,6 +196,10 @@ def _run_ingest(raw_path: str) -> int:
         f"（其中 RAG-Anything 加的 belongs_to 邊 {summary.belongs_to}，其餘 {summary.relations - summary.belongs_to}）"
     )
     print("文件狀態：" + "，".join(f"{status}={count}" for status, count in sorted(summary.status_counts.items())))
+    for label, paths in (("新增", summary.added), ("沒變", summary.unchanged)):
+        print(f"{label} {len(paths)} 份")
+        for path in paths:
+            print(f"  {path}")
     stuck = summary.status_counts.get("handling", 0)
     if stuck:
         print(f"注意：{stuck} 篇文件停在 handling（先前匯入在多模態階段被中斷）；對該文件重新執行 ingest 會重試")
