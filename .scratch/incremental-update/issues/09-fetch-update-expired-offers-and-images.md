@@ -55,3 +55,5 @@ ASSUMPTION：
 - 新舊主視覺網址只有資料夾或 query 不同、檔名相同時，衍生出的本地檔名一樣，新圖原本會被當成「已存在略過」。新增 `replaced_banners`、`remove_replaced_images`：偵測到這種情況，先把本地舊圖搬到 `_meta/removed/<日期>/offer_images/`（記「下架」），新圖再下載（記「已下載」）；`collect_banners_to_fill` 不把它算成已佔名額，並且因為網址變了而排在補名額的最前面。判斷靠「新網址的檔名 == 舊網址單獨存在時的檔名」；舊網址若和別的主視覺同名，新網址會加雜湊後綴，檔名不同，不需要處理。
 - 測試：`test_activity_whose_only_change_is_the_main_visual_url_is_a_content_change_and_its_image_is_replaced`（先紅：活動記「未變」）、`test_new_main_visual_with_the_same_base_name_replaces_the_old_file_instead_of_being_skipped`（先紅：新圖沒下載）。
 - 模組說明、README 拿掉「只換主視覺偵測不到」，改寫成新行為。
+
+2026-11-02，驗證者指出的已知限制（未修）：活動換了主視覺、但 8 個名額已被其他活動佔滿時，新主視覺不會補；舊圖若和新網址算出同一個檔名，孤兒判斷會把它當成現行圖片留著，要等名額空出來的那次執行才會換掉。發生條件是名額全滿且新舊主視覺檔名相同，暫不處理。

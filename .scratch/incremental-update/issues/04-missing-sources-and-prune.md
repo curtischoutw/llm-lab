@@ -34,3 +34,5 @@ ticket 05 實作者的懷疑成立。`test_prune_removes_only_the_path_when_anot
 
 - 測資改成 `textonly-shared.pdf`（`textonly` 開頭的檔名讓假 mineru 不輸出圖片，兩個資料夾裡同名的檔案文件 ID 相同，做法同 tests/test_answer_cache.py 與 tests/test_replace.py），並加上兩個路徑文件 ID 相同的前置斷言。
 - 變異檢查：暫時把 `_remove_version` 的「別的路徑還用同一個版本就不刪」整段拿掉，修正後的測試轉紅（`1 != 2`：共用版本被刪了），還原後綠。
+
+2026-11-02，code-review 修正批次第 9 項（來源資料夾的驗證在 CLI、模組 `ingest()`、`Session.ingest` 三處）沒有合併：CLI 要在 import lightrag 之前就以結束碼 2 拒絕（`__main__` 的設計），模組 `ingest()` 要在建立 Session（會建 WORKING_DIR、連端點）之前拒絕；兩個 API 入口已共用同一個驗證函式，資料夾列舉也共用 `list_folder`。驗證者同意這個理由。
