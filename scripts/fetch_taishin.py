@@ -25,12 +25,21 @@
   還有「過期略過」（活動）、「格式不支援略過」（活動圖片）、「外部網域略過」與「重複略過」（權益附件）。
   更新模式另有「內容變更」與「未變」（見下面「更新模式」）。
 
-更新模式（--update，增量更新 spec 的下載端；目前只涵蓋文件下載區的 PDF，其他類別還沒有）：
+更新模式（--update，增量更新 spec 的下載端；目前涵蓋文件下載區的 PDF 與網頁類，其他類別還沒有）：
 - 文件下載區的 PDF：本地已有的檔案重新下載一次並比對 SHA-256。內容不同才換掉原檔，清單記「內容變更」；相同就不碰原檔
   （位元組與修改時間都不變，清單記「未變」），這樣之後匯入時沒變的文件可以走 RAG-Anything 的解析快取（快取鍵含修改時間與內容雜湊）。
   新出現的 PDF 沿用「已下載」。下載失敗（HTTP、網路、內容不是 PDF）時原檔不動，清單記「失敗」，結束碼 1。
-- 其他類別（卡片、權益、權益附件、活動、活動圖片）在更新模式下和不加 --update 時一樣：本地已有就略過。
-  網頁類與權益附件的比對、下架（本地有、官網列表沒有）、活動過期與圖片的處理都還沒做。
+- 網頁類（卡片頁、權益子頁、活動頁）：重新取得原始 HTML，和 DIR/_meta/html/ 存的上一份比對主內容區（轉檔實際用的那一塊：
+  卡片頁與權益子頁是 id="centercontainer"，活動頁是 class 含 page-content 的第一個元素，取出後拿掉會執行的部分；grill Q29）。
+  主內容區相同就不轉檔、不碰文件、列印用 HTML 與存檔的原始 HTML（位元組與修改時間不變，清單記「未變」），
+  主內容區以外的差異（例如活動頁 <head> 的 _csrf token，2026-11-02 實測 2 頁都和 10-30 存的不同）不算變更。
+  主內容區不同才重新轉檔，轉檔成功後依序換掉文件、列印用 HTML、原始 HTML（原始 HTML 是下次比對的基準，最後換，中途中斷時
+  下次還會比對到差異），清單記「內容變更」。下載、轉檔失敗或找不到主內容區時三者都不動，清單記「失敗」，結束碼 1，下次執行會再比對到差異並重試。
+  文件不存在（存檔的原始 HTML 在，第一次下載時轉檔失敗留下的狀態）時不比對，照新增處理：用這次取得的原始 HTML 轉檔，成功記「已下載」；
+  活動的存檔 HTML 讀出的期間已過期時除外，不請求、不轉檔，記「過期略過」。
+  文件在但存檔的原始 HTML 不在（無法比對）時視為變更（ASSUMPTION）。
+- 其他類別（權益附件、活動圖片）在更新模式下和不加 --update 時一樣：本地已有就略過。
+  權益附件的比對、下架（本地有、官網列表沒有）、活動過期與圖片的處理都還沒做。
 - 結束時多印一段「各類別統計」：每個類別每種結果的數量。不加 --update 時不印。
 - 請求間隔、網域限制與轉址規則和不加 --update 時相同。
 
@@ -105,7 +114,7 @@
   「轉址到外部網域 <網域>」。2026-10-30 實測，權益頁的 Visa、Mastercard、JCB 子頁會轉址到國際組織的網站。
   「原請求的網域」是環境變數替換後實際請求的網域，所以本機 server 的測試也適用。
 - 再次執行時（不加 --update），本地檔案已存在就略過（不發請求）並記入清單，內容不會更新；要用這種方式更新內容，
-  刪除資料夾後重新下載。加 --update 時文件下載區的 PDF 會重新下載並比對，見「更新模式」。
+  刪除資料夾後重新下載。加 --update 時文件下載區的 PDF 與網頁類會重新取得並比對，見「更新模式」。
 - 請求間隔：腳本自己發出的每個 HTTP 請求之間至少 TAISHIN_REQUEST_INTERVAL_SEC 秒（預設 2）。
   這個環境變數只給測試調小。
 - 三個網域的前綴各用一個環境變數取代，只給測試指向本機假 server 用：TAISHIN_WWW_BASE 取代
@@ -132,10 +141,10 @@
 - 刷卡優惠每個分類的翻頁上限 OFFER_MAX_PAGES（ASSUMPTION：20，2026-10-30 實測 A=5、B=4、I=2 頁，C–H 未實測）。
   翻滿上限仍有新連結時，視為刷卡優惠列表失敗。
 - 圖片只檢查檔頭和副檔名一致，不檢查圖片是否完整、能不能解碼。沒有大小上限（ASSUMPTION）。
-- 活動已存在而再次執行時（不論有沒有加 --update，更新模式還沒涵蓋活動），不重新判斷是否過期：已下載的活動 PDF 與圖片留著，
-  清單記為已存在略過。
+- 活動已存在而再次執行時（不論有沒有加 --update，更新模式還沒做活動過期），不重新判斷是否過期：已下載的活動 PDF 與圖片留著
+  （加 --update 時活動頁仍會比對主內容區，內容變了就重新轉檔，期間過期了也一樣）；不加 --update 時清單記為已存在略過。
 - 已過期的活動，再次執行時依上次存下的原始 HTML 判斷，不再請求；官網之後延長該活動的期間，要刪除 `_meta/html` 裡那個檔案才會重新下載
-  （更新模式還沒涵蓋活動，加 --update 也一樣）。
+  （更新模式還沒做活動過期，加 --update 也一樣）。
 - 更新模式的 PDF 比對把整份回應讀進記憶體再算雜湊（ASSUMPTION：2026-10-30 下載區最大的 PDF 約 6.7 MB，不另外做串流；現有的下載本來就是整份讀進記憶體）。
 - 行內 `style="display:none"` 沒有處理：2026-10-30 實測轉出率 0.93–1.01，沒有因此漏字。
 - 列印前拿掉註解與 <iframe>、樣式表連結，所以 iframe 裡的內容與外部樣式表不會出現在 PDF／.docx；<object>、<embed> 沒有處理
@@ -1335,6 +1344,72 @@ def web_page_producer(
     return produce
 
 
+def web_page_refresher(
+    convert: Callable[[Tools, Path, Path, Path], None],
+    main_content: tuple[str, str] = ("id", "centercontainer"),
+) -> Callable[[Run, Category, str, str, Path, Record], bool]:
+    """產生更新模式的 refresh 函式：重新取得網頁，主內容區和存檔的上一份不同才重新轉檔。
+
+    Args:
+        convert: 轉檔函式，同 web_page_producer。
+        main_content: 主內容區怎麼找，必須和同一個類別的 web_page_producer 相同，比對的就是轉檔實際用的那一塊。
+
+    Returns:
+        可放進 Category.refresh 的函式。
+    """
+
+    def refresh(run: Run, category: Category, url: str, name: str, target: Path, record: Record) -> bool:
+        """重新取得網頁並比對主內容區；不同才轉檔，轉檔成功後才換掉文件、列印用 HTML 與存檔的原始 HTML。
+
+        比對的是 extract_main_content 的結果（轉檔實際用的那一塊），所以主內容區以外的差異（例如 <head> 的 _csrf token）
+        不算變更，存檔的原始 HTML 也不換。存檔的原始 HTML 不存在（無法比對）時視為變更。
+        換檔的順序是文件、列印用 HTML、原始 HTML：原始 HTML 是下次比對的基準，最後換，中途中斷時下次還會比對到差異並重試。
+
+        Args:
+            run: 一次執行共用的設定。
+            category: 這個網頁所屬的類別；reads_period 時補上清單的活動期間。
+            url: 網頁完整網址。
+            name: 本地名稱（不含副檔名）。
+            target: 文件路徑（已存在）。
+            record: 清單紀錄；補上 html_sha256，活動頁還有 period。
+
+        Returns:
+            主內容區變了、文件已換成新內容時為 True；沒變、三個檔案都原封不動時為 False。
+
+        Raises:
+            FetchError: 下載失敗、頁面不是 UTF-8、找不到主內容區或轉檔失敗；三個檔案都不動。
+        """
+        raw_path = run.out / "_meta" / "html" / f"{name}.html"
+        print_path = run.out / "_meta" / "print" / f"{name}.html"
+        raw = run.fetcher.get(url)
+        page = decode_page(raw)
+        content = extract_main_content(page, *main_content)
+        if content is None:
+            raise FetchError("找不到主內容區")
+        if category.reads_period:
+            record.period = period_label(read_offer_period(page))
+        if raw_path.is_file() and extract_main_content(saved_html(raw_path), *main_content) == content:
+            record.html_sha256 = sha256_of(raw_path)
+            return False
+        for folder in (raw_path.parent, print_path.parent):
+            folder.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=run.out / "_meta") as tmp:
+            new_raw = Path(tmp) / "raw.html"
+            # 暫時的列印用 HTML 與文件要和最終檔案同名：LibreOffice 輸出的檔名由 HTML 的主檔名決定
+            new_print = Path(tmp) / print_path.name
+            new_target = Path(tmp) / target.name
+            new_raw.write_bytes(raw)
+            new_print.write_text(build_print_html(content, url), encoding="utf-8")
+            convert(run.tools, new_print, new_target, run.out / "_meta")
+            new_target.replace(target)
+            new_print.replace(print_path)
+            new_raw.replace(raw_path)
+        record.html_sha256 = hashlib.sha256(raw).hexdigest()
+        return True
+
+    return refresh
+
+
 def download_pdf(run: Run, url: str) -> bytes:
     """下載 PDF，確認檔頭是 %PDF-。
 
@@ -1544,6 +1619,16 @@ def save_image(run: Run, category: Category, url: str, name: str, target: Path, 
         tmp_image.replace(target)
 
 
+def print_with_chrome(tools: Tools, html_path: Path, target: Path, work_dir: Path) -> None:
+    """網頁類的轉檔函式（卡片頁、活動頁）：用 Chrome 列印成 PDF。參數與例外同 print_to_pdf，Chrome 路徑取自 tools。"""
+    print_to_pdf(tools.chrome, html_path, target, work_dir)
+
+
+def convert_with_office(tools: Tools, html_path: Path, target: Path, work_dir: Path) -> None:
+    """網頁類的轉檔函式（權益子頁）：用 LibreOffice 轉成 .docx。參數與例外同 convert_to_docx，命令取自 tools。"""
+    convert_to_docx(tools.office, html_path, target, work_dir)
+
+
 CARDS = Category(
     name="卡片",
     list_label="總覽頁",
@@ -1560,10 +1645,8 @@ CARDS = Category(
     keeps_html=True,
     reads_period=False,
     collect=collect_from_one_page,
-    produce=web_page_producer(
-        lambda tools, html_path, target, work_dir: print_to_pdf(tools.chrome, html_path, target, work_dir)
-    ),
-    refresh=None,
+    produce=web_page_producer(print_with_chrome),
+    refresh=web_page_refresher(print_with_chrome),
 )
 RIGHTS = Category(
     name="權益",
@@ -1582,10 +1665,8 @@ RIGHTS = Category(
     keeps_html=True,
     reads_period=False,
     collect=collect_from_one_page,
-    produce=web_page_producer(
-        lambda tools, html_path, target, work_dir: convert_to_docx(tools.office, html_path, target, work_dir)
-    ),
-    refresh=None,
+    produce=web_page_producer(convert_with_office),
+    refresh=web_page_refresher(convert_with_office),
 )
 DOWNLOADS = Category(
     name="下載",
@@ -1667,11 +1748,11 @@ ACTIVITIES = Category(
     reads_period=True,
     collect=collect_offers,
     produce=web_page_producer(
-        lambda tools, html_path, target, work_dir: print_to_pdf(tools.chrome, html_path, target, work_dir),
+        print_with_chrome,
         main_content=("class", "page-content"),
         inspect=check_offer_period,
     ),
-    refresh=None,
+    refresh=web_page_refresher(print_with_chrome, main_content=("class", "page-content")),
 )
 IMAGES = Category(
     name="活動圖片",
@@ -1794,7 +1875,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--update",
         action="store_true",
-        help="更新模式：已存在的下載區 PDF 重新下載並比對內容，不同才換掉；結束時印出各類別、各結果的數量",
+        help="更新模式：已存在的下載區 PDF 與網頁類重新取得並比對內容，不同才換掉；結束時印出各類別、各結果的數量",
     )
     return parser.parse_args(argv)
 
