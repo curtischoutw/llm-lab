@@ -34,6 +34,8 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   不論哪一步失敗都算）、清掉先前失敗的舊紀錄與呼叫 adelete_by_doc_id（刪除失敗也算呼叫過）；解析階段就失敗的、沒變、
   與別的路徑共用版本而沒有寫入或刪除的不標記，所以不清。不用 LightRAG 的 aclear_cache：它 drop 整個 LLM 快取。
   清掉的筆數累計在 IngestSummary.answer_cache_cleared。
+  每份文件先寫對照表再清答案快取，整個逐份處理的迴圈包在 try/finally 裡：清快取（或迴圈裡其他步驟）丟出例外時，例外照樣往上拋，
+  但這份與前面文件的 _mark_swallowed_failures 一定會做，描述失敗的文件才不會留在 processed。
 - 來源已不在與 prune（_ingest 的 source_folder、prune 參數，spec「匯入端：替換與移除」）：對照表的來源資料夾記 `ingest <資料夾>`
   的那個資料夾（resolve() 後；Python API 指定了就記指定的，沒指定記檔案實體路徑所在的資料夾），所以資料夾裡指向別處的 symlink
   檔，對照表的路徑可以不在來源資料夾底下。指定了來源資料夾才在匯入之後檢查：對照表裡來源資料夾等於它、路徑在檔案系統上已不存在的
@@ -994,29 +996,34 @@ async def _ingest(
     summary = IngestSummary()
     folder = str(source_folder) if source_folder is not None else None
     registry_error: registry.RegistryError | None = None
-    for document in documents:
-        description_before, write_before = models.failure_counts()
-        started = time.perf_counter()
-        change = _KnowledgeBaseChange()
-        try:
-            report = await _ingest_one(rag, document, known, change)
-        except Exception as exc:
-            # 單篇失敗不中斷整批：記下是哪一篇、為什麼，CLI 據此印出並以非零碼結束
-            report = IngestReport(document, skipped=False, parse_seconds=0.0, error=f"{type(exc).__name__}: {exc}")
-        report.total_seconds = time.perf_counter() - started
-        report.description_failed = models.description_stats.failed - description_before
-        report.write_failed = models.description_stats.write_failed - write_before
-        if change.changed:
-            summary.answer_cache_cleared += await _clear_answer_cache(rag)
-        summary.reports.append(report)
-        if report.error is None:
+    try:
+        for document in documents:
+            description_before, write_before = models.failure_counts()
+            started = time.perf_counter()
+            change = _KnowledgeBaseChange()
             try:
-                _record_success(settings, known, report, folder)
-            except registry.RegistryError as exc:
-                # 對照表寫不進去就不再處理後面的文件（它們也記不進去）；先把前面文件的收尾做完再拋
-                registry_error = exc
+                report = await _ingest_one(rag, document, known, change)
+            except Exception as exc:
+                # 單篇失敗不中斷整批：記下是哪一篇、為什麼，CLI 據此印出並以非零碼結束
+                report = IngestReport(document, skipped=False, parse_seconds=0.0, error=f"{type(exc).__name__}: {exc}")
+            report.total_seconds = time.perf_counter() - started
+            report.description_failed = models.description_stats.failed - description_before
+            report.write_failed = models.description_stats.write_failed - write_before
+            summary.reports.append(report)
+            # 先記對照表再清答案快取：清快取丟出例外時，這份文件已匯入的事實不能漏記
+            if report.error is None:
+                try:
+                    _record_success(settings, known, report, folder)
+                except registry.RegistryError as exc:
+                    # 對照表寫不進去就不再處理後面的文件（它們也記不進去）；先把這份文件的答案快取清掉、前面文件的收尾做完再拋
+                    registry_error = exc
+            if change.changed:
+                summary.answer_cache_cleared += await _clear_answer_cache(rag)
+            if registry_error is not None:
                 break
-    await _mark_swallowed_failures(rag, summary.reports)
+    finally:
+        # 清答案快取等步驟丟出的例外照樣往上拋，但已處理的文件（含目前這份）的收尾一定要做：沒做的話，描述失敗的文件會留在 processed
+        await _mark_swallowed_failures(rag, summary.reports)
     if registry_error is not None:
         raise PipelineError(
             f"{registry_error}。{summary.reports[-1].document.name} 已匯入知識庫但沒有記進對照表，"
