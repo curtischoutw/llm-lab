@@ -10,12 +10,20 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   副作用（LightRAG 留下 status=failed 的 dup 紀錄、原文件卡在 handling 使
   get_status_counts() 拋 KeyError）。
 - 對照表（rag_lab.registry，`WORKING_DIR/rag_lab_documents.json`）：每份文件處理成功後記下它的實體路徑、文件 ID、
-  匯入時間與來源資料夾，並在報告分類（IngestReport.outcome、IngestSummary.added／unchanged）。分類依解析出的文件 ID
-  與對照表決定，見 _classify_fully_processed：沒完整匯入過的一律照一般匯入、成功記「新增」；已完整匯入的，對照表記著同一個 ID
-  或對照表沒有這個路徑也沒有別的路徑用這個 ID 時記「沒變」，否則記「新增」（共用版本，知識庫不寫入）。對照表在處理任何文件之前
-  載入，壞掉就拋 PipelineError（不當成空表）；每份成功的文件處理完立刻寫回，寫入失敗時不再處理後面的文件，
-  前面文件的收尾（_mark_swallowed_failures）做完才拋 PipelineError。失敗的文件不分類、不寫入。
-  替換、移除與清答案快取是後續 ticket 的範圍（.scratch/incremental-update/）。
+  匯入時間與來源資料夾，並在報告分類（IngestReport.outcome、IngestSummary.added／replaced／unchanged）。分類依解析出的
+  文件 ID 與對照表決定：沒完整匯入過的一律照一般匯入、成功記「新增」；已完整匯入的，對照表記著同一個 ID 或對照表沒有這個路徑
+  也沒有別的路徑用這個 ID 時記「沒變」，新路徑與別的路徑共用同一個版本時記「新增」（知識庫不寫入），這個路徑記著另一個 ID 時
+  是上次替換中斷（見 _classify_fully_processed）。對照表在處理任何文件之前載入，壞掉就拋 PipelineError（不當成空表）；
+  每份成功的文件處理完立刻寫回，寫入失敗時不再處理後面的文件，前面文件的收尾（_mark_swallowed_failures）做完才拋
+  PipelineError。失敗的文件不分類、不寫入。
+- 替換（_ingest_one，spec「匯入端：替換與移除」）：對照表記的 ID 不等於這次的 ID 時，先匯入新版本、成功後刪舊版本
+  （_remove_superseded_version → _remove_version，保留 LLM 抽取快取）、再更新對照表，記「替換」。新版本已完整匯入而對照表
+  仍指向舊 ID（上次中斷）直接補刪舊版本；記的舊 ID 已不在知識庫則照一般匯入、記「新增」、不刪任何東西。新版本匯入失敗
+  （例外，或描述／寫入失敗而文字已寫入）時 _discard_new_version 用 adelete_by_doc_id 刪掉它寫進知識庫的部分，不留失敗
+  紀錄，所以 IngestReport.mark_failed 不設（整批結束後的 _mark_swallowed_failures 只改記 mark_failed 的新文件）；舊版本與
+  對照表不變。清除本身失敗或舊版本刪不掉時，錯誤訊息寫出新舊兩個文件 ID。_remove_version 刪除前先查對照表：別的路徑
+  還指向同一個文件 ID 時不刪，也不改對照表（呼叫端改寫或移除該路徑那一筆）；`--prune`（後續 ticket）直接重用它。
+  用檔名遷移、prune、答案快取是後續 ticket 的範圍（.scratch/incremental-update/）。
 - 重試未完成的文件（上次失敗、被中斷而卡在 processing，或文字完成但多模態沒做完）：先用
   LightRAG 的 adelete_by_doc_id 刪掉舊紀錄與部分結果，再重新匯入。LightRAG 遇到已存在的
   doc ID 不會重新排入，只會另寫一筆 status=failed 的 dup- 紀錄；刪除時保留 LLM 快取，
@@ -155,6 +163,7 @@ STATUS_PAGE_SIZE = 200
 
 # 報告對每份成功的文件的分類（失敗的文件沒有分類）
 OUTCOME_ADDED = "added"
+OUTCOME_REPLACED = "replaced"
 OUTCOME_UNCHANGED = "unchanged"
 
 # rerank 之後保留的 chunk 數與分數門檻。數值等於 LightRAG 的預設值，但 LightRAG 會讀行程環境的 CHUNK_TOP_K 與
@@ -355,7 +364,8 @@ class IngestReport:
         description_failed: 這一篇的圖／表／公式描述失敗次數。
         write_failed: 這一篇的多模態內容寫入索引失敗次數。
         doc_id: 內容雜湊的文件 ID（RAG-Anything 的 doc- 開頭）；解析前就失敗的文件為 None。
-        outcome: 分類，OUTCOME_ADDED（新增）或 OUTCOME_UNCHANGED（沒變）；失敗的文件為 None。
+        mark_failed: True 表示整批結束後要把這份文件在索引裡改記成 failed（新文件的圖／表／公式描述或寫入失敗）。
+        outcome: 分類，OUTCOME_ADDED（新增）、OUTCOME_REPLACED（替換）或 OUTCOME_UNCHANGED（沒變）；失敗的文件為 None。
     """
 
     document: Path
@@ -369,6 +379,7 @@ class IngestReport:
     description_failed: int = 0
     write_failed: int = 0
     doc_id: str | None = None
+    mark_failed: bool = False
     outcome: str | None = None
 
 
@@ -387,6 +398,7 @@ class IngestSummary:
         vlm_sample: 第一則 VLM 圖片描述（供人工判斷與原圖是否相符）。
         description_error: 有圖／表／公式描述或多模態內容寫入失敗時的完整說明（含端點與位址）；None 表示沒有。
         added: 分類為新增的文件（取 resolve() 後的絕對路徑，即對照表的鍵）。
+        replaced: 分類為替換的文件（同上）。
         unchanged: 分類為沒變的文件（同上）。
     """
 
@@ -400,6 +412,7 @@ class IngestSummary:
     vlm_sample: str | None = None
     description_error: str | None = None
     added: list[Path] = field(default_factory=list)
+    replaced: list[Path] = field(default_factory=list)
     unchanged: list[Path] = field(default_factory=list)
 
 
@@ -431,20 +444,98 @@ def _classify_fully_processed(known: dict[str, dict[str, str]], key: str, doc_id
 
     Returns:
         OUTCOME_UNCHANGED：對照表記的就是這個 ID，或對照表沒有這個路徑而且沒有別的路徑對照到這個 ID
-        （建立對照表之前就匯入的文件）。OUTCOME_ADDED：新的路徑和已對照的另一個路徑內容相同（共用版本），
-        或這個路徑記的是另一個 ID。
-        ASSUMPTION：後一種（路徑已對照到別的 ID、這次的 ID 已完整匯入）是替換中斷的狀態，替換由 ticket 02 實作，
-        這裡先記「新增」。
+        （建立對照表之前就匯入的文件）。OUTCOME_REPLACED：這個路徑記的是另一個 ID（上次替換中斷：新版本已匯入、
+        舊版本沒刪，呼叫端要補刪舊版本）。OUTCOME_ADDED：新的路徑和已對照的另一個路徑內容相同（共用版本）。
     """
     entry = known.get(key)
     if entry is not None:
-        return OUTCOME_UNCHANGED if entry["doc_id"] == doc_id else OUTCOME_ADDED
+        return OUTCOME_UNCHANGED if entry["doc_id"] == doc_id else OUTCOME_REPLACED
     shared = any(other["doc_id"] == doc_id for other in known.values())
     return OUTCOME_ADDED if shared else OUTCOME_UNCHANGED
 
 
+async def _remove_version(rag: RAGAnything, known: dict[str, dict[str, str]], key: str, doc_id: str) -> None:
+    """從知識庫刪掉一個版本，保留它的 LLM 抽取快取；還有別的路徑對照到它時不刪。
+
+    替換的舊版本與 `--prune` 共用這個步驟（spec「匯入端：替換與移除」）：兩者都是「這個路徑不再使用這個版本」。
+    這個函式不改對照表：呼叫端依情境改寫或移除 `key` 那一筆。
+
+    Args:
+        rag: 已初始化的 RAGAnything。
+        known: 對照表（路徑 → 紀錄），只讀。
+        key: 不再使用這個版本的路徑（對照表的鍵）。
+        doc_id: 要刪的版本的文件 ID。
+
+    Raises:
+        PipelineError: LightRAG 回報刪除失敗（訊息含狀態與原因）。
+    """
+    if any(other != key and entry["doc_id"] == doc_id for other, entry in known.items()):
+        return
+    deletion = await rag.lightrag.adelete_by_doc_id(doc_id, delete_llm_cache=False)
+    # not_found：知識庫已經沒有它（例如上次刪到一半被中斷），目標狀態已達成
+    if deletion.status not in ("success", "not_found"):
+        raise PipelineError(f"刪除 {doc_id} 失敗（{deletion.status}）：{deletion.message}")
+
+
+async def _remove_superseded_version(
+    rag: RAGAnything, known: dict[str, dict[str, str]], document: Path, old_id: str, new_id: str
+) -> None:
+    """新版本已完整匯入後刪掉舊版本；失敗時訊息寫出新舊兩個文件 ID。
+
+    Args:
+        rag: 已初始化的 RAGAnything。
+        known: 對照表（路徑 → 紀錄），只讀。
+        document: 被替換的文件。
+        old_id: 對照表記的舊版本文件 ID。
+        new_id: 已完整匯入的新版本文件 ID。
+
+    Raises:
+        PipelineError: 刪除舊版本失敗。對照表沒有改，下次 ingest 會依「這次的 ID 已完整匯入」補刪舊版本。
+    """
+    try:
+        await _remove_version(rag, known, _registry_key(document), old_id)
+    except Exception as exc:
+        raise PipelineError(
+            f"{document.name} 的新版本 {new_id} 已匯入，但刪除舊版本 {old_id} 失敗：{exc}。"
+            f"知識庫現在可能同時有新舊兩個版本，對照表仍指向舊版本；修好後重新執行 ingest 會補刪舊版本"
+        ) from exc
+
+
+async def _discard_new_version(
+    rag: RAGAnything, document: Path, new_id: str, old_id: str, reason: str
+) -> PipelineError:
+    """替換時新版本匯入失敗：刪掉它已寫進知識庫的部分，舊版本不動。
+
+    不為新版本留下失敗紀錄：文件狀態裡的紀錄一併刪掉（見 _mark_swallowed_failures，替換失敗的新版本要排除在外）。
+
+    Args:
+        rag: 已初始化的 RAGAnything。
+        document: 被替換的文件。
+        new_id: 新版本的文件 ID。
+        old_id: 舊版本的文件 ID（仍在知識庫）。
+        reason: 新版本匯入失敗的原因。
+
+    Returns:
+        要呈現給使用者的 PipelineError：清除成功時說明舊版本仍在；清除本身失敗時寫出兩個文件 ID 與原因。
+    """
+    try:
+        if await rag.lightrag.doc_status.get_by_id(new_id) is not None:
+            deletion = await rag.lightrag.adelete_by_doc_id(new_id, delete_llm_cache=False)
+            if deletion.status != "success":
+                raise PipelineError(f"清除新版本 {new_id} 失敗（{deletion.status}）：{deletion.message}")
+    except Exception as exc:
+        return PipelineError(
+            f"{document.name} 的新版本 {new_id} 匯入失敗：{reason}。清除它寫了一半的部分也失敗：{exc}。"
+            f"舊版本 {old_id} 仍在知識庫，但新版本的殘留內容可能還在；重新執行 ingest 會重試"
+        )
+    return PipelineError(
+        f"{document.name} 的新版本 {new_id} 匯入失敗：{reason}。已清除新版本寫了一半的部分，"
+        f"舊版本 {old_id} 仍在知識庫、對照表不變；修好後重新執行 ingest 會重試替換"
+    )
+
+
 async def _ingest_one(rag: RAGAnything, document: Path, known: dict[str, dict[str, str]]) -> IngestReport:
-    """匯入單篇文件；已完整處理就略過，先前未完成的先清掉舊紀錄再重匯。
+    """匯入單篇文件；已完整處理就略過，先前未完成的先清掉舊紀錄再重匯，內容變了的先匯入新版本再刪舊版本。
 
     Args:
         rag: 已初始化的 RAGAnything。
@@ -453,16 +544,18 @@ async def _ingest_one(rag: RAGAnything, document: Path, known: dict[str, dict[st
 
     Returns:
         這一篇的 IngestReport（total_seconds、description_failed、write_failed 由呼叫端填入）。成功時 outcome 是分類；
-        圖／表／公式描述或多模態內容寫入失敗時，文件在索引裡改記成 failed（重新執行不會被略過），
-        report.error 寫出原因，沒有分類。
+        新文件的圖／表／公式描述或多模態內容寫入失敗時，文件在索引裡改記成 failed（重新執行不會被略過），
+        report.error 寫出原因，沒有分類；替換時同樣的失敗改成清掉新版本，舊版本留著，不為新版本留下失敗紀錄。
 
     Raises:
-        PipelineError: 解析不出內容，或清除舊紀錄失敗。
+        PipelineError: 解析不出內容，清除舊紀錄失敗，替換時新版本匯入失敗（含清除寫了一半的部分失敗），
+            或新版本已匯入但刪不掉舊版本。
         Exception: MinerU、LLM 等匯入過程的失敗（由 _ingest 轉成該篇的 report.error）。
     """
     timer = StageTimer()
     description_before, write_before = models.failure_counts()
     rag.callback_manager.register(timer)
+    key = _registry_key(document)
     try:
         parse_kwargs: dict[str, object] = {"backend": MINERU_BACKEND}
         if is_office(document):
@@ -471,21 +564,31 @@ async def _ingest_one(rag: RAGAnything, document: Path, known: dict[str, dict[st
         content_list, doc_id = await rag.parse_document(str(document), **parse_kwargs)
         if not content_list:
             raise PipelineError(f"MinerU 沒有從 {document.name} 解析出任何內容（輸出資料夾：{rag.config.parser_output_dir}）")
+        entry = known.get(key)
+        old_id = entry["doc_id"] if entry is not None and entry["doc_id"] != doc_id else None
         if await rag.is_document_fully_processed(doc_id):
+            outcome = _classify_fully_processed(known, key, doc_id)
+            if outcome == OUTCOME_REPLACED:
+                # 上次替換中斷：新版本已完整匯入、舊版本沒刪
+                await _remove_superseded_version(rag, known, document, old_id, doc_id)
             return IngestReport(
-                document,
-                skipped=True,
-                parse_seconds=timer.parse_seconds or 0.0,
-                doc_id=doc_id,
-                outcome=_classify_fully_processed(known, _registry_key(document), doc_id),
+                document, skipped=True, parse_seconds=timer.parse_seconds or 0.0, doc_id=doc_id, outcome=outcome
             )
+        if old_id is not None and await rag.lightrag.doc_status.get_by_id(old_id) is None:
+            # 對照表記的舊版本已不在知識庫：照一般匯入新版本，不刪任何東西
+            old_id = None
         if await rag.lightrag.doc_status.get_by_id(doc_id) is not None:
             deletion = await rag.lightrag.adelete_by_doc_id(doc_id)
             if deletion.status != "success":
                 raise PipelineError(
                     f"{document.name} 先前的匯入沒有完成，清除舊紀錄 {doc_id} 失敗（{deletion.status}）：{deletion.message}"
                 )
-        await rag.process_document_complete(str(document), **parse_kwargs)
+        try:
+            await rag.process_document_complete(str(document), **parse_kwargs)
+        except Exception as exc:
+            if old_id is None:
+                raise
+            raise await _discard_new_version(rag, document, doc_id, old_id, f"{type(exc).__name__}: {exc}") from exc
     finally:
         rag.callback_manager.unregister(timer)
     report = IngestReport(
@@ -499,15 +602,21 @@ async def _ingest_one(rag: RAGAnything, document: Path, known: dict[str, dict[st
     )
     description_after, write_after = models.failure_counts()
     if description_after > description_before or write_after > write_before:
-        # RAG-Anything 吞掉這些失敗，仍把文件標成 processed 且 multimodal_processed=True；
-        # 這裡只寫出原因，_ingest 在整批結束後把它改記成 failed
-        report.error = (
-            models.describe_failures(description_after - description_before, write_after - write_before)
-            + "。文件已記成失敗，修好端點後重新執行 ingest 會重試這份文件"
-        )
-    else:
-        # 沒有完整匯入過（新文件、先前失敗、或對照表記的是另一個版本）：照一般匯入，成功就是新增
+        # RAG-Anything 吞掉這些失敗，仍把文件標成 processed 且 multimodal_processed=True
+        reason = models.describe_failures(description_after - description_before, write_after - write_before)
+        if old_id is not None:
+            # 替換：清掉新版本、舊版本留著；沒有失敗紀錄，所以不用整批結束後改記
+            report.error = str(await _discard_new_version(rag, document, doc_id, old_id, reason))
+        else:
+            # 新文件：_ingest 在整批結束後把它改記成 failed
+            report.error = reason + "。文件已記成失敗，修好端點後重新執行 ingest 會重試這份文件"
+            report.mark_failed = True
+    elif old_id is None:
+        # 沒有完整匯入過（新文件、先前失敗、或對照表記的舊版本已不在知識庫）：照一般匯入，成功就是新增
         report.outcome = OUTCOME_ADDED
+    else:
+        await _remove_superseded_version(rag, known, document, old_id, doc_id)
+        report.outcome = OUTCOME_REPLACED
     return report
 
 
@@ -519,10 +628,10 @@ async def _mark_swallowed_failures(rag: RAGAnything, reports: list[IngestReport]
 
     Args:
         rag: 已初始化的 RAGAnything。
-        reports: 這一批的報告；有 doc_id 且有 error 的才處理（解析前就失敗的沒有 doc_id）。
+        reports: 這一批的報告；只處理 mark_failed 的（新文件的描述或寫入失敗；替換失敗的新版本已被清掉，不記失敗紀錄）。
     """
     for report in reports:
-        if report.doc_id is not None and report.error is not None:
+        if report.mark_failed:
             await rag._upsert_doc_status(
                 report.doc_id,
                 str(report.document),
@@ -704,6 +813,7 @@ async def _ingest(rag: RAGAnything, documents: list[Path], settings: Settings) -
             f"後面的文件沒有處理；修好後重新執行同一個 ingest 即可"
         ) from registry_error
     summary.added = [r.document.resolve() for r in summary.reports if r.outcome == OUTCOME_ADDED]
+    summary.replaced = [r.document.resolve() for r in summary.reports if r.outcome == OUTCOME_REPLACED]
     summary.unchanged = [r.document.resolve() for r in summary.reports if r.outcome == OUTCOME_UNCHANGED]
     summary.entities, summary.relations, summary.belongs_to = await _graph_stats(rag)
     summary.status_counts = await _status_counts(rag)
@@ -714,7 +824,7 @@ async def _ingest(rag: RAGAnything, documents: list[Path], settings: Settings) -
         affected = sum(1 for report in summary.reports if report.description_failed or report.write_failed)
         summary.description_error = (
             f"有 {affected} 份文件的圖／表／公式描述或多模態內容寫入失敗（{models.describe_failures(described.failed, described.write_failed)}）。"
-            f"RAG-Anything 不會因此報錯；這些文件已記成失敗，修好端點後重新執行同一個 ingest 就會重試，"
+            f"RAG-Anything 不會因此報錯；這些文件匯入失敗（新文件記成失敗；替換的文件已清掉新版本、舊版本仍在），修好端點後重新執行同一個 ingest 就會重試，"
             f"不需要刪除 {settings.working_dir} 或 {settings.parser_output_dir}。"
         )
     return summary
