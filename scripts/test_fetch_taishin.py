@@ -2850,8 +2850,8 @@ class UpdateModeRemovedFromListTests(ScriptTestCase):
         self.assertTrue((self.out / "_meta" / "html" / "card_cg047_card001.html").is_file())
         records = {r["filename"]: r for r in self.manifest() if r["category"] == "卡片"}
         self.assertEqual(records["card_cg010_card001.pdf"]["result"], "下架")
-        self.assertEqual(records["card_cg047_card001.pdf"]["result"], "已存在略過")
-        self.assertIn("卡片：已存在略過 1、下架 1", result.stdout)
+        self.assertEqual(records["card_cg047_card001.pdf"]["result"], "未變")
+        self.assertIn("卡片：未變 1、下架 1", result.stdout)
 
     def test_rights_downloads_and_activities_missing_from_their_lists_are_moved_too(self) -> None:
         self.serve_rights({INSURANCE: card_html("INSURANCE"), PARKING: card_html("PARKING")})
