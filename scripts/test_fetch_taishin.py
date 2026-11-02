@@ -3401,6 +3401,25 @@ class UpdateModeOfferImageTests(ScriptTestCase):
         )
         self.assertNotIn(self.image_name(9), [p.name for p in (self.out / "offer_images").iterdir()])
 
+    def test_banners_with_the_same_base_name_get_the_same_file_name_in_download_and_in_update(self) -> None:
+        # 活動 8、9 的主視覺只有資料夾不同、檔名相同：兩個都要加雜湊後綴；第一次下載只取前 8 個（只有活動 8），
+        # 但檔名要用全部活動的主視覺網址算，更新模式才認得剛下載的圖，不會搬走又重新下載
+        banners = {n: banner_path(n) for n in range(1, 8)}
+        banners[8] = f"{UPLOAD_PREFIX}dirB/dup_banner.png"
+        banners[9] = f"{UPLOAD_PREFIX}dirC/dup_banner.png"
+        self.first_download(banners)
+        folder = self.out / "offer_images"
+        names = sorted(p.name for p in folder.iterdir())
+        self.assertEqual(len(names), 8)
+        self.assertRegex(names[-1], r"^offer_image_dup_banner_[0-9a-f]{8}\.png$")
+        for _ in range(2):
+            result = self.run_update()
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(self.image_requests(), [])
+            self.assertEqual(sorted(p.name for p in folder.iterdir()), names)
+            self.assertFalse((self.out / "_meta" / "removed").exists() and list((self.out / "_meta" / "removed").rglob("*.png")))
+            self.assertEqual(self.image_records()[names[-1]]["result"], "已存在略過")
+
     def test_report_says_so_when_there_are_not_enough_candidates_to_fill_8_slots(self) -> None:
         self.first_download({1: banner_path(1), 2: banner_path(2), 3: None})
         result = self.run_update()

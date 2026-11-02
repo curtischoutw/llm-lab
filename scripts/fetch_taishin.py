@@ -135,6 +135,8 @@
   支援的副檔名取自 rag_lab/formats.py 的 FORMATS["圖片"]（專案裡唯一的一份），腳本啟動時把 repo 根目錄放進 sys.path 來 import。
   主視覺網址若是指向官網 mkp 網域的絕對網址，和活動詳情頁連結一樣換成 TAISHIN_MKP_BASE 的前綴（Run.to_mkp），所以用本機
   server 測試時真實格式的主視覺也會向本機請求。
+  活動圖片的本地檔名一律用「活動文件仍在的活動的全部主視覺網址」算（banner_universe），下載（只下載其中前 8 個或名額內補的）、名額判斷、
+  孤兒圖片判斷都用同一組：兩個主視覺網址的檔名相同（只有資料夾或 query 不同）時，兩個都加雜湊後綴，檔名在三處一致。
   圖片是不可信資料：只向 mkp 網域請求（其他網域的主視覺記為失敗，訊息列出該網域與 mkp 網域），存檔前檢查檔頭（magic bytes）和副檔名一致
   （png、jpg／jpeg、bmp、gif、tif／tiff、webp 各有檢查），不符的記為失敗、不存檔。副檔名取自網址，轉成小寫。
 - 權益附件（ASSUMPTION：類別名「權益附件」、資料夾 rights_attachments、檔名前綴 attachment，ticket 11 只指定類別名，
@@ -1653,6 +1655,37 @@ def live_banners(run: Run) -> dict[str, str | None]:
     return live
 
 
+def banner_universe(run: Run) -> list[str]:
+    """活動文件仍在的活動的主視覺網址（去除重複，依活動被找到的順序）；活動圖片的本地檔名都以這一組網址算。
+
+    檔名取決於整批網址（兩個網址的檔名相同時都加雜湊後綴），所以下載、名額判斷與孤兒圖片判斷必須用同一組網址，
+    不能一個用全部、一個只用這次要下載的子集合，否則同一張圖在不同地方的檔名不同。
+
+    Args:
+        run: 一次執行共用的設定（found 裡要有活動類別找到的網址）。
+
+    Returns:
+        主視覺的完整網址；活動列表失敗時為空。
+    """
+    return list(dict.fromkeys(banner for banner in live_banners(run).values() if banner is not None))
+
+
+def local_names_for(run: Run, category: Category, urls: list[str]) -> dict[str, str]:
+    """這次要處理的網址的本地檔名；活動圖片用 banner_universe 算，其他類別用 urls 本身。
+
+    Args:
+        run: 一次執行共用的設定。
+        category: 要處理的類別。
+        urls: 這次要處理的網址（活動圖片時是 banner_universe 的子集合）。
+
+    Returns:
+        網址對本地檔名（不含副檔名）。
+    """
+    if category is IMAGES:
+        return IMAGES.local_names(banner_universe(run))
+    return category.local_names(urls)
+
+
 def collect_banners_to_fill(run: Run) -> list[str]:
     """更新模式：現有的圖片照舊，名額少於 IMAGE_LIMIT 個時才補。
 
@@ -1669,7 +1702,7 @@ def collect_banners_to_fill(run: Run) -> list[str]:
         候選不足 IMAGE_LIMIT 個時，印出名額數寫進報告。活動列表失敗時為空：那個失敗已經回報過。
     """
     live = live_banners(run)
-    banners = list(dict.fromkeys(banner for banner in live.values() if banner is not None))
+    banners = banner_universe(run)
     names = IMAGES.local_names(banners)
     occupied = [
         banner
@@ -1708,8 +1741,7 @@ def collect_banners(run: Run, category: Category) -> list[str]:
     """
     if run.update:
         return collect_banners_to_fill(run)
-    banners = dict.fromkeys(banner for banner in live_banners(run).values() if banner is not None)
-    return list(banners)[:IMAGE_LIMIT]
+    return banner_universe(run)[:IMAGE_LIMIT]
 
 
 def save_image(run: Run, category: Category, url: str, name: str, target: Path, record: Record) -> None:
@@ -2095,7 +2127,7 @@ def remove_unreferenced_images(run: Run) -> list[Record]:
     """
     if ACTIVITIES.name not in run.found:
         return []
-    referenced = list(dict.fromkeys(banner for banner in live_banners(run).values() if banner is not None))
+    referenced = banner_universe(run)
     names = IMAGES.local_names(referenced)
     kept = {document_filename(IMAGES, url, names[url]) for url in referenced}
     return [
@@ -2275,7 +2307,7 @@ def main(argv: list[str]) -> int:
         run.found[category.name] = urls
         expected = "" if category.expected_count is None else f"（預期 {category.expected_count}）"
         print(f"{category.list_label}找到 {len(urls)} {category.unit}{expected}")
-        names = category.local_names(urls)
+        names = local_names_for(run, category, urls)
         records.extend(fetch_document(run, category, url, names[url]) for url in urls)
         if removable:
             listed = {document_filename(category, url, names[url]) for url in urls}
