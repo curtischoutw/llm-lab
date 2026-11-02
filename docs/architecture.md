@@ -82,7 +82,39 @@ rag_storage/   知識圖譜＋向量庫＋快取（＝知識庫本體）
 | `kv_store_doc_status.json` | 每份文件的處理狀態；`ingest` 依它判斷哪篇已完成、可以略過 |
 | `kv_store_llm_response_cache.json` | LLM 回應快取；同一個問題再問一次會直接命中，不呼叫 LLM |
 | `kv_store_parse_cache.json` | RAG-Anything 的解析快取，重複匯入同一個檔案時不重跑 MinerU |
+| `rag_lab_documents.json` | **rag_lab 自己的檔案，不是 LightRAG 的**：匯入對照表，見下面的「匯入對照表」 |
 | `kv_store_llm_response_cache.json.bak-<時間>` | 手動刪除 `:query:` 快取項目之前的備份（2026-11-01 的第二、三次 eval 前各一份），rag_lab 不讀；可以刪 |
+
+### 匯入對照表
+
+`WORKING_DIR/rag_lab_documents.json` 由 rag_lab 自己維護（LightRAG 的文件狀態只記檔名、不記路徑，知識庫裡沒有「某個路徑對應哪個版本」的紀錄）。格式是公開契約，測試與使用者都可以直接讀寫：
+
+```json
+{"version": 1, "documents": {"<文件的絕對路徑>": {"doc_id": "doc-…", "ingested_at": "<ISO 8601>", "source_folder": "<絕對路徑>"}}}
+```
+
+- 鍵是 `resolve()` 後的實體路徑（symlink 已解析）；CLI 與 Python API 相同。`source_folder` 是 `ingest <資料夾>` 的那個資料夾（`resolve()` 後）；匯入單一檔案時是檔案所在的資料夾；Python API 指定了來源資料夾就是指定的資料夾。所以資料夾裡指向別處的 symlink 檔，鍵（實體路徑）可以不在 `source_folder` 底下，判斷「來源已不在」時只比對表裡記的 `source_folder` 與鍵，不假設兩者有上下層關係。
+- 每份文件處理成功（新增、替換、沒變）之後更新那一筆，先寫同資料夾的暫存檔再改名。失敗的文件不寫入。沒有檔案視為空表；檔案存在但不是合法的 JSON 或格式不符時，`ingest` 在處理任何文件之前失敗並指出檔案路徑（CLI 結束碼 1，Python API 拋 `PipelineError`），寫入失敗相同。
+- 每份文件匯入時先解析（走解析快取）取得這次的文件 ID，再分類：
+
+| 對照表 | 知識庫 | 分類 | 動作 |
+|---|---|---|---|
+| 有這個路徑，ID 相同 | 已完整匯入 | 沒變 | 不呼叫模型，那一筆保留 |
+| 有這個路徑，ID 相同 | 沒有完整匯入（例如先前失敗） | 新增 | 照一般匯入（先清掉舊紀錄再重匯），成功後更新那一筆 |
+| 沒有這個路徑 | 這次的 ID 已完整匯入，沒有別的路徑對照到它 | 沒變 | 補上那一筆（現有知識庫第一次建對照表） |
+| 沒有這個路徑 | 這次的 ID 已完整匯入，別的路徑已對照到它 | 新增 | 補上那一筆，知識庫沒有寫入（兩個路徑共用同一個版本） |
+| 沒有這個路徑 | 這次的 ID 沒有完整匯入 | 新增 | 照一般匯入，成功後補上那一筆 |
+| 有這個路徑，ID 不同 | 這次的 ID 已完整匯入（上次替換中斷） | 替換 | 補刪舊 ID（先查共用），更新那一筆 |
+| 有這個路徑，ID 不同 | 記的舊 ID 已不在知識庫 | 新增 | 照一般匯入新版本，不刪任何東西，更新那一筆 |
+| 有這個路徑，ID 不同 | 其他 | 替換 | 先匯入新版本，成功後刪舊版本（先查共用，保留 LLM 抽取快取），更新那一筆 |
+
+第五列目前一律照一般匯入；後續的增量更新 ticket 會改成用檔名到文件狀態找舊版本。其餘列不會再變。完整的設計在 `.scratch/incremental-update/spec.md`。
+
+替換的失敗處理（`pipeline._ingest_one`）：
+
+- 新版本匯入失敗（例外，或圖／表／公式描述、多模態寫入失敗而文字已寫入）：刪掉新版本已寫進知識庫的部分（`adelete_by_doc_id`，保留 LLM 快取），文件狀態裡不留失敗紀錄，所以不進整批結束後的 `_mark_swallowed_failures`（只處理 `IngestReport.mark_failed` 的新文件）。舊版本與對照表不變，報告的 `error` 寫出舊版本的文件 ID。清除本身失敗時，`error` 寫出新舊兩個文件 ID 與原因。
+- 新版本匯入成功、舊版本刪除失敗：`error` 寫出新舊兩個文件 ID，對照表仍指向舊版本；下次 `ingest` 走表中第四列補刪。
+- 刪除前查對照表（`pipeline._remove_version`）：別的路徑也指向同一個文件 ID 時不刪知識庫的內容。這個函式不改對照表，替換與之後的 `--prune` 共用，一律保留 LLM 抽取快取；知識庫回報 `not_found` 視為已刪除。
 
 ## 3. 程式碼
 
@@ -98,6 +130,7 @@ __main__ ──► config
    │  ├────► evaluation
    │  ├────► pipeline ──► models ──► config
    │  │         ├───────► config
+   │  │         ├───────► registry
    │  │         ├───────► tables
    │  │         ├───────► formats
    │  │         └───────► evaluation
@@ -113,8 +146,9 @@ __main__ ──► config
 | `formats.py` | 支援的格式清單（PDF、PPT、Word、Excel 與 8 種圖片副檔名），專案裡只定義這一次；CLI 的資料夾過濾與錯誤訊息都從這裡取值。只靠標準函式庫，所以輸入路徑驗證能在載入 LightRAG／torch 之前完成 | `FORMATS`、`SUPPORTED_EXTENSIONS`、`is_supported(path)`、`describe_supported()` |
 | `config.py` | 從 `.env` 與環境變數讀設定並驗證；必填欄位缺漏或格式錯就拋錯，不給預設值（只有 `EMBED_QUERY_PREFIX` 是選填，預設空字串）；環境裡出現 rag_lab 沒管理的 LightRAG／RAG-Anything／MinerU 變數（`UNMANAGED_LIBRARY_ENV`，39 個）也拋錯，`pipeline` 與 `models` 在 import lightrag 之前就呼叫這項檢查 | `get_settings() -> Settings`、`reject_unmanaged_library_env()`、`UNMANAGED_LIBRARY_ENV`、`ConfigError` |
 | `models.py` | 把三個 OpenAI 相容端點包成 RAG-Anything 需要的模型函式、把 rerank 端點包成 LightRAG 的 rerank 函式；失敗包成帶端點名稱與位址的錯誤；計數圖、表、公式描述的失敗與描述後的內容寫入知識庫的失敗（RAG-Anything 自己會吞掉）；判定 rerank 失敗（含回應內容驗證）並以 `BaseException` 子類 `RerankFailure` 拋出，穿過 LightRAG（LightRAG 自己會吞掉一般例外） | `llm_model_func`、`vision_model_func`、`build_embedding_func()`、`rerank_model_func`、`check_reachable(...)`、`EndpointError` |
+| `registry.py` | 匯入對照表 `WORKING_DIR/rag_lab_documents.json` 的讀寫：每份處理成功的文件的絕對路徑 → 文件 ID、匯入時間、來源資料夾。沒有檔案視為空表；檔案存在但讀不了、不是合法 JSON 或格式不符就拋 `RegistryError`（訊息含檔案路徑），不當成空表；寫入先寫暫存檔 `rag_lab_documents.json.tmp` 再改名。只靠標準函式庫，不 import `pipeline`，`pipeline` 把 `RegistryError` 轉成 `PipelineError`。用途與格式見下面的「匯入對照表」 | `load(working_dir)`、`save(working_dir, documents)`、`registry_path(working_dir)`、`RegistryError` |
 | `tables.py` | 把太大的表格縮短（拿掉值為 1 的 `rowspan`／`colspan`），仍超過 800 token 就依列切成小表，每張重複表頭列；只靠標準函式庫。`pipeline.LabRAGAnything.parse_document` 在 RAG-Anything 算好文件 ID、存好解析快取之後，才對回傳給呼叫端的 content list 套用它，所以文件 ID 與解析快取不變 | `limit_table_sizes(content_list, count_tokens)`、`TABLE_BODY_MAX_TOKENS` |
-| `pipeline.py` | 核心流程：建立 RAGAnything 實例（`LabRAGAnything`：切大表格、計數寫入失敗）、匯入（解析、建圖、多模態描述）、查詢、批次比較；把 LightRAG 會吞掉的錯誤轉成可偵測的失敗（圖表公式描述或多模態寫入失敗的文件，整批結束後改記成 `failed`）；`Session` 讓同一個 process 只初始化一次、依序呼叫 | `Session`（`ingest`、`query`、`evaluate`、`close`）、模組函式 `ingest(documents) -> IngestSummary`、`query(question, mode, vlm_enhanced=False) -> str`、`evaluate(questions) -> list[list[Cell]]`、`PipelineError`、`SessionError`、`SessionClosedError` |
+| `pipeline.py` | 核心流程：建立 RAGAnything 實例（`LabRAGAnything`：切大表格、計數寫入失敗）、匯入（解析、建圖、多模態描述）、查詢、批次比較；把 LightRAG 會吞掉的錯誤轉成可偵測的失敗（圖表公式描述或多模態寫入失敗的文件，整批結束後改記成 `failed`）；匯入時讀寫對照表並把每份成功的文件分類（新增、替換、沒變）；指定來源資料夾時列出來源已不在的文件，加 `prune` 才刪（`_prune_missing`，重用 `_remove_version`）；內容變了的文件先匯入新版本再刪舊版本，新版本失敗時清掉寫了一半的部分；`Session` 讓同一個 process 只初始化一次、依序呼叫 | `Session`（`ingest`、`query`、`evaluate`、`close`）、模組函式 `ingest(documents) -> IngestSummary`、`query(question, mode, vlm_enhanced=False) -> str`、`evaluate(questions) -> list[list[Cell]]`、`PipelineError`、`SessionError`、`SessionClosedError` |
 | `evaluation.py` | `eval` 的題目檔讀取驗證與 Markdown 對照表排版，不需要任何模型 | `load_questions(path)`、`render_report(...)`、`RETRIEVAL_MODES`、`QuestionFileError` |
 | `graph_report.py` | 直接讀 `rag_storage/` 的 graphml，抽樣列出實體與關係，不需要模型 server | `load_graph(working_dir)`、`format_report(graph, sample_size, seed)` |
 
@@ -142,13 +176,17 @@ __main__ ──► config
 |---|---|
 | `__init__.py` | 測試套件的說明：測試從子行程進入、模型用假 server |
 | `fake_openai_server.py` | 假的 OpenAI 相容 server：chat、vision、embedding、rerank 都回固定且合法的內容，並記錄收到的請求（含 `Authorization` 標頭）；可注入故障（`fail_chat`、`fail_vision`、`fail_chat_containing`、`fail_embed_containing`、`rerank_fault` 等），rerank 的順序可由 `rerank_promote`／`rerank_demote` 指定，`rerank_results` 可原樣指定回應的 `results` 內容（造出不合法的回應） |
-| `fake_mineru.py` | 假的 `mineru` 指令：依主檔名寫出固定的解析結果（PDF、圖片與假 LibreOffice 轉出的 PDF 相同）（文字、一張圖、一個表、一條公式）；主檔名以 `bigtable` 開頭時表格換成 60 列 × 6 欄的大表格（`bigspan` 開頭的版本有一格 rowspan 跨到表尾），以 `spans` 開頭時小表格的儲存格帶 `rowspan=1 colspan=1`；PDF 裡有假 LibreOffice 寫的來源標記行時，多輸出一段 `Converted from Office document: <來源第一行>`，讓主檔名相同的 Office 文件分辨得出來；設了 `FAKE_MINERU_VERSION_LOG` 時記錄每次 `--version`，用來計算初始化次數 |
+| `fake_mineru.py` | 假的 `mineru` 指令：依主檔名寫出固定的解析結果（PDF、圖片與假 LibreOffice 轉出的 PDF 相同）（文字、一張圖、一個表、一條公式）；主檔名以 `bigtable` 開頭時表格換成 60 列 × 6 欄的大表格（`bigspan` 開頭的版本有一格 rowspan 跨到表尾），以 `spans` 開頭時小表格的儲存格帶 `rowspan=1 colspan=1`，以 `textonly` 開頭時不輸出圖片（文件 ID 含圖片的絕對路徑，沒有圖片時不同資料夾裡同名的文件得到相同的 ID）；PDF 裡有假 LibreOffice 寫的來源標記行時，多輸出一段 `Converted from Office document: <來源第一行>`，讓主檔名相同的 Office 文件分辨得出來；PDF 裡有 `% fake version: <文字>` 行時多輸出一段 `Version marker: <文字>` 並把表格說明改成帶這個文字，文件 ID 隨之改變（測試用它造出同一個路徑上內容改了的新版本）；設了 `FAKE_MINERU_VERSION_LOG` 時記錄每次 `--version`，用來計算初始化次數 |
 | `fake_chrome.py` | 假的 headless Chrome 命令列，給 `scripts/test_fetch_taishin.py` 用：照 `fetch_taishin.py` 呼叫 Chrome 的引數格式寫出小 PDF，內容是假 PDF 檔頭加收到的 HTML；引數格式不符時以非零碼結束 |
 | `fake_libreoffice.py` | 假的 `libreoffice`／`soffice` 指令：收到 `--headless --convert-to pdf --outdir <dir> <檔案>` 時在 `<dir>` 寫出 `<主檔名>.pdf`，內容含輸入檔第一行的來源標記；引數形式不符時以非零碼結束；主檔名以 `broken` 開頭時以非零碼結束，模擬轉檔失敗。`test_pipeline.py` 的 `PipelineCase` 以兩個名稱放在 PATH 最前面；「沒有 LibreOffice」的測試把 PATH 改成只有假 mineru 的資料夾 |
 | `wall_clock_fast/sitecustomize.py` | 測試夾具：子行程的 `PYTHONPATH` 含這個資料夾且設了 `WALL_CLOCK_SPEED` 時，把 `time.time` 換成走得快 N 倍的版本、`time.perf_counter` 不動，模擬電腦睡眠；用來驗證匯入報告的階段時間和文件耗時用同一個時鐘 |
+| `delete_failure/sitecustomize.py` | 測試夾具：子行程的 `PYTHONPATH` 含這個資料夾且設了 `FAIL_NTH_DELETE=N` 時，LightRAG 的第 N 次 `adelete_by_doc_id` 不真的刪、直接回 `status="fail"`；假 OpenAI server 碰不到刪除，這是替換時「清除新版本失敗」與「刪舊版本失敗」的注入方式 |
 | `test_cli.py` | 設定驗證、子命令註冊、結束碼、名單內的 LightRAG／RAG-Anything／MinerU 環境變數被拒絕（含工作目錄的 `.env`、不在名單內的 MinerU 變數不被拒絕、名單版本與已安裝套件版本一致）；提供其他測試共用的 `run_cli`、`valid_env` |
 | `test_fake_server.py` | 以 `scripts/smoke_test.py` 當客戶端對假 server 執行，確認假 server 符合同一份介面（smoke test 曾對真 server 通過，所以把它當作介面的定義）；不連真 server |
 | `test_pipeline.py` | `ingest`、`query` 的完整流程（含各種圖片與 Office 格式、資料夾挑選與略過、不支援格式的錯誤、沒有 LibreOffice 的錯誤、轉檔失敗、重複匯入、失敗重試、大表格切成小表、描述與寫入失敗、端點不可達、查詢總 token 上限與 entity／relation 上限、rerank 的請求與順序、rerank 失敗讓查詢失敗且不送答案請求、失敗後同一題再問會重新生成答案、不合法的 rerank 回應、rerank 端點不可達在查詢前就失敗、牆上時鐘比 `perf_counter` 快時階段時間加總仍不超過文件耗時、環境的 `CHUNK_TOP_K`／`MIN_RERANK_SCORE` 不影響結果）；提供共用的 `PipelineCase`、產生各格式小圖的 `write_image`（用 Pillow）與寫出 Office 替身檔的 `write_office`（內容是一行文字，不是真的 Office 檔：假 LibreOffice 與假 mineru 都不讀內容） |
+| `test_registry.py` | 匯入對照表：第一次匯入記「新增」並寫入一筆（單檔與資料夾的來源資料夾、symlink 解析成實體路徑）、再次匯入沒變的文件記「沒變」且不呼叫模型、對照表有這個路徑但知識庫沒有該文件時重新匯入、沒有對照表的現有知識庫補登並記「沒變」、新路徑內容與已對照的路徑相同時記「新增」且不寫入知識庫、對照表壞掉時在處理任何文件之前失敗並指出檔案路徑、對照表寫不進去時失敗（CLI 結束碼 1，Python API 拋 `PipelineError`）；Python API 版涵蓋模組函式與 `Session` 的 `summary.added`、`summary.unchanged` |
+| `test_prune.py` | 來源已不在與 `--prune`：沒有 prune 只列出、知識庫與對照表不變且結束碼 0；prune 刪除並移除對照表那一筆、保留抽取快取（同一份文件再回來時不再呼叫實體抽取）；只處理來源資料夾等於這次資料夾的紀錄；單一檔案匯入的文件在它所在的資料夾 prune 時也在範圍內；別的路徑共用同一個版本時只移除那一筆；刪除失敗（`tests/delete_failure`）結束碼 1 且對照表不變；資料夾不存在或沒有支援的文件結束碼 2 且不做移除；單一檔案加 `--prune` 結束碼 2、單一檔案不檢查移除；對照表的來源資料夾記 `ingest` 的資料夾、指向資料夾外的 symlink 檔也找得到；Python API 版涵蓋 `summary.missing`／`removed`／`remove_failed`、來源資料夾不存在或沒有文件與沒有來源資料夾卻給 prune 時拋 `PipelineError`、指定的來源資料夾寫進對照表 |
+| `test_replace.py` | 替換變更的文件：改過內容的路徑再次匯入記「替換」、查詢只看到新內容；新版本匯入失敗（例外、圖片描述失敗）時清掉新版本、舊版本與對照表不變、沒有失敗紀錄、重試成功記「替換」；清掉寫了一半的部分失敗與刪舊版本失敗（`tests/delete_failure` 讓 LightRAG 的第 1 次刪除失敗）時報告寫出新舊兩個文件 ID、結束碼 1，下次補刪；替換中斷後補刪舊版本；記的舊 ID 不在知識庫時記「新增」；別的路徑共用舊版本時不刪；新文件失敗維持失敗紀錄；資料夾匯入；Python API 版涵蓋 `summary.replaced` 與失敗的 `report.error` |
 | `test_graph.py` | `graph` 指令的抽樣與可重現性 |
 | `test_eval.py` | `eval` 指令的題目檔驗證與結果表、rerank 的順序、rerank 失敗只記在發生的那幾格、rerank 端點不可達時查詢前就失敗 |
 | `test_python_api.py` | 在同一個 process 裡依序呼叫 `rag_lab.pipeline` 的模組函式與 `Session`：連續呼叫、每次 ingest 的統計獨立、同一個 `Session` 只初始化一次並在關閉後釋放實例、誤用時的 `SessionError`、開 `Session` 失敗後不留狀態、忘了 `close()` 時的收尾、匯入圖片與 Office 文件、報告的階段時間和文件耗時用同一個時鐘（略過與失敗的文件欄位不變）、不支援的格式整批被拒絕、大表格切成小表與描述失敗後的重試、rerank 失敗讓 `query` 拋例外、rerank 端點不可達在查詢前就拋 `EndpointError`與 `evaluate` 記成失敗格、下一次呼叫不受影響 |
@@ -203,7 +241,7 @@ with Session() as session:
 | 方法 | 回傳 | 失敗時 |
 |---|---|---|
 | `query(question, mode, vlm_enhanced=False)` | 答案字串 | `mode` 不是五種檢索模式之一拋 `ValueError`（LightRAG 另外接受的 `bypass` 不檢索，這裡不允許）；開始前端點（LLM、embedding、rerank，`vlm_enhanced=True` 時加 VLM）不可達拋 `EndpointError`；查詢失敗（含 rerank 失敗與查詢途中 LLM 失敗）或沒有答案拋 `PipelineError`；`vlm_enhanced=True` 時 VLM 呼叫失敗拋 `EndpointError` |
-| `ingest(documents: list[Path])` | `IngestSummary`：每篇的耗時（`total_seconds`）與解析、建圖、多模態三個階段的時間（`parse_seconds`、`graph_seconds`、`multimodal_seconds`；都用 `time.perf_counter` 量，不含電腦睡眠，階段時間加總不超過耗時）與錯誤、圖譜統計、這一次的 VLM 與描述統計 | 單篇失敗記在該篇的 `error`、圖表公式描述或多模態寫入失敗也記在該篇的 `error`（同時文件在索引裡改記成 `failed`，重新執行會重試）並彙整在 `description_error`，都不拋例外；`documents` 裡有任何一份不是支援的格式（`rag_lab/formats.py`），在呼叫任何模型或解析之前拋 `PipelineError`，整批都不匯入；開始前端點不可達拋 `EndpointError` |
+| `ingest(documents: list[Path], *, source_folder: Path \| None = None, prune: bool = False)` | `IngestSummary`：每篇的耗時（`total_seconds`）與解析、建圖、多模態三個階段的時間（`parse_seconds`、`graph_seconds`、`multimodal_seconds`；都用 `time.perf_counter` 量，不含電腦睡眠，階段時間加總不超過耗時）與錯誤、圖譜統計、這一次的 VLM 與描述統計、分類（`added` 新增、`replaced` 替換、`unchanged` 沒變，都是 `resolve()` 後的路徑清單；每篇的 `outcome` 是 `"added"`、`"replaced"`、`"unchanged"` 或失敗時的 `None`；指定 `source_folder` 時另有 `missing`（來源已不在、沒有刪的文件，沒給 `prune` 時才有）、`removed`（`prune` 刪除成功的文件）、`remove_failed`（刪除失敗的文件 → 「型別：訊息」），每份文件只歸一類） | 單篇失敗記在該篇的 `error`、圖表公式描述或多模態寫入失敗也記在該篇的 `error`（同時文件在索引裡改記成 `failed`，重新執行會重試）並彙整在 `description_error`，都不拋例外；`documents` 裡有任何一份不是支援的格式（`rag_lab/formats.py`），在呼叫任何模型或解析之前拋 `PipelineError`，整批都不匯入；開始前端點不可達拋 `EndpointError`；匯入對照表壞掉（不是合法的 JSON 或格式不符）時在處理任何文件之前拋 `PipelineError`，訊息含檔案路徑；對照表寫不進去時拋 `PipelineError`（已匯入的文件之前的收尾照常完成）；`source_folder` 不存在、不是資料夾或裡面沒有支援的文件（不論有沒有給 `prune`），或給了 `prune` 卻沒有 `source_folder`，在做任何事之前拋 `PipelineError`（和 CLI 的結束碼 2 相同，防止路徑打錯時刪光一個資料夾的文件） |
 | `evaluate(questions: list[Question])` | `cells[i][j]`：第 i 題在第 j 種模式的答案或錯誤 | 單格失敗記在該格的 `error`，不拋例外；開始前 LLM、embedding 或 rerank 端點不可達拋 `EndpointError` |
 | `close()` | — | 離開 `with` 時自動呼叫；重複呼叫不做事 |
 

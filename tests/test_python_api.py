@@ -44,6 +44,14 @@ from tests.test_pipeline import (
 # 步驟 stats:<檔名> 匯入文件旁邊的另一個檔案，印出這一次的 VLM 與描述統計；
 # 步驟 timings:<檔名> 匯入文件旁邊的另一個檔案，每份報告印出略過、四個秒數（parse、graph、multimodal、total）與錯誤（最後，內容可含空白）；
 # 步驟 doc:<檔名> 匯入文件旁邊的另一個檔案，每份報告印出 report.document 的檔名、略過與錯誤；
+# 步驟 classify:<檔名>,<檔名>… 一次匯入文件旁邊的這些檔案，印出 summary.added、summary.replaced 與 summary.unchanged
+# （路徑用 | 分隔），拋出例外時改印例外類別與訊息；
+# 步驟 sync:<資料夾>[:prune] 以文件旁邊的這個資料夾（不存在時視為沒有文件）為來源資料夾，匯入裡面的 .pdf，印出
+# summary.missing、summary.removed 與 summary.remove_failed 的檔名（用 | 分隔），拋出例外時改印例外類別與訊息；
+# 步驟 into:<檔名>:<資料夾> 匯入文件旁邊的這個檔案，並指定文件旁邊的那個資料夾為來源資料夾；
+# 步驟 bare_prune:<檔名> 匯入文件旁邊的這個檔案、加 prune 但不指定來源資料夾，印出拋出的例外類別與訊息；
+# 步驟 cache:<檔名> 匯入文件旁邊的另一個檔案，印出 summary.answer_cache_cleared；
+# 步驟 rewrite:<檔名>:<標記> 把文件旁邊的這個 PDF 替身改寫成帶有版本標記的新內容（假 mineru 的 `% fake version:` 行，文件 ID 隨之改變）；
 # 步驟 reject:<檔名>,<檔名>… 一次匯入這些文件，印出拋出的例外類別與訊息（預期不支援的格式整批被拒絕）；
 # 步驟 query_poisoned 問一個題目文字含 Poisoned 的問題，印出拋出的例外類別與訊息（測試讓 rerank 只對這種題目出錯）；
 # 步驟 instances 印出存活的 RAGAnything 實例數，並在最後（Session 已關閉）再印一次；
@@ -128,6 +136,47 @@ with pipeline.Session() if use_session else contextlib.nullcontext(pipeline) as 
             summary = api.ingest([document.parent / step.removeprefix("doc:")])
             for report in summary.reports:
                 print(f"doc {report.document.name} skipped={report.skipped} error={report.error}")
+        elif step.startswith("classify:"):
+            names = step.removeprefix("classify:").split(",")
+
+            def classify():
+                summary = api.ingest([document.parent / n for n in names])
+                added = "|".join(str(path) for path in summary.added)
+                replaced = "|".join(str(path) for path in summary.replaced)
+                unchanged = "|".join(str(path) for path in summary.unchanged)
+                print(f"classify added={added} replaced={replaced} unchanged={unchanged}")
+
+            name, message = error_name(classify)
+            if name != "ok":
+                print(f"classify raised {name} {' '.join(message.split())}")
+        elif step.startswith("sync:"):
+            name, _, option = step.removeprefix("sync:").partition(":")
+            folder = document.parent / name
+
+            def sync():
+                files = sorted(p for p in folder.iterdir() if p.suffix == ".pdf") if folder.is_dir() else []
+                summary = api.ingest(files, source_folder=folder, prune=option == "prune")
+                missing = "|".join(path.name for path in summary.missing)
+                removed = "|".join(path.name for path in summary.removed)
+                failed = "|".join(path.name for path in summary.remove_failed)
+                print(f"sync missing={missing} removed={removed} failed={failed}")
+
+            outcome, message = error_name(sync)
+            if outcome != "ok":
+                print(f"sync raised {outcome} {' '.join(message.split())}")
+        elif step.startswith("into:"):
+            name, folder = step.removeprefix("into:").split(":")
+            api.ingest([document.parent / name], source_folder=document.parent / folder)
+        elif step.startswith("bare_prune:"):
+            name = step.removeprefix("bare_prune:")
+            outcome, message = error_name(lambda: api.ingest([document.parent / name], prune=True))
+            print(f"bare_prune {outcome} {' '.join(message.split())}")
+        elif step.startswith("cache:"):
+            summary = api.ingest([document.parent / step.removeprefix("cache:")])
+            print(f"cache cleared={summary.answer_cache_cleared}")
+        elif step.startswith("rewrite:"):
+            name, marker = step.removeprefix("rewrite:").split(":")
+            (document.parent / name).write_bytes(f"%PDF-1.4 fake\\n% fake version: {marker}\\n".encode())
         elif step.startswith("reject:"):
             names = step.removeprefix("reject:").split(",")
             name, message = error_name(lambda: api.ingest([document.parent / n for n in names]))
@@ -209,7 +258,7 @@ class PythonApiCase(PipelineCase):
         """以子行程在同一個 process 內依序執行步驟。
 
         Args:
-            *steps: ingest、stats:<檔名>、doc:<檔名>、reject:<檔名>,…、query、query_poisoned、evaluate、instances、second、
+            *steps: ingest、stats:<檔名>、doc:<檔名>、classify:<檔名>,…、sync:<資料夾>[:prune]、into:<檔名>:<資料夾>、bare_prune:<檔名>、cache:<檔名>、rewrite:<檔名>:<標記>、reject:<檔名>,…、query、query_poisoned、evaluate、instances、second、
                 closed、thread、loop、bad_mode、orphan、init_fail、forget 的任意序列。
             mode: functions 呼叫模組函式；session 在同一個 Session 裡呼叫。
             question_texts: evaluate 步驟用的題目文字，依序是題目檔的每一題。

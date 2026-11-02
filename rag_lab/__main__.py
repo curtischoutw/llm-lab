@@ -15,6 +15,11 @@ rag_lab.graph_report 後格式化輸出。
 - ingest 資料夾時只處理支援格式的文件（見 rag_lab.formats；不遞迴），其他檔案在 stdout 說明
   「略過不支援的格式：<檔名>」，不算錯誤；檔名以 `.` 或 `~$` 開頭的檔案（.DS_Store、macOS 的 ._ 檔、
   Word 的鎖定檔）不算文件，不匯入也不列出；
+- 匯入報告在原有的逐篇耗時與統計之後，另列分類的數量與清單（「新增」「替換」「沒變」，資料夾還有「來源已不在（未刪）」「已刪除」；分類由 rag_lab.pipeline 依
+  對照表判斷，見 rag_lab.registry）。對照表壞掉或寫不進去時 pipeline 拋 PipelineError，由 main 轉成結束碼 1。
+- 報告另有一行「清掉答案快取 N 筆」：知識庫有改動的文件處理完就清掉查詢答案的快取（規則見 rag_lab.pipeline）。
+- `--prune` 只用於資料夾：單一檔案加 `--prune` 以結束碼 2 結束。「來源已不在（未刪）」不影響結束碼，刪除失敗以結束碼 1 結束。
+  資料夾不存在或沒有支援的文件照原有規則以結束碼 2 結束，所以路徑打錯不會進到刪除。
 - 匯入報告的解析階段標籤：Office 格式（rag_lab.formats.is_office）寫「解析（含 Office 轉 PDF）」，其餘寫「解析」；
   某一篇失敗時其餘照常匯入，失敗的篇名與原因印到 stderr，整體以 1 結束。
 - eval 的結果檔寫到 --output-dir（預設 ./eval_results，已在 .gitignore），檔名含時間戳記
@@ -36,7 +41,7 @@ from pathlib import Path
 
 from rag_lab.config import ConfigError, get_settings
 from rag_lab.evaluation import RETRIEVAL_MODES, QuestionFileError, load_questions, render_report
-from rag_lab.formats import describe_supported, is_office, is_supported
+from rag_lab.formats import describe_supported, is_office, is_supported, list_folder
 
 # ==============================
 # 常數
@@ -46,10 +51,6 @@ QUERY_MODES = RETRIEVAL_MODES
 DEFAULT_EVAL_OUTPUT_DIR = "eval_results"
 DEFAULT_GRAPH_SAMPLE = 10
 DEFAULT_GRAPH_SEED = 0
-
-# 資料夾內檔名以這些開頭的檔案不是文件：`.` 是隱藏檔（.DS_Store、macOS 的 ._ AppleDouble 檔），
-# `~$` 是 Office 開檔時產生的鎖定檔。它們可能帶著支援的副檔名，匯入只會在轉檔或解析時失敗
-NOT_A_DOCUMENT_PREFIXES = (".", "~$")
 
 EXIT_FAILURE = 1
 EXIT_USAGE = 2
@@ -93,6 +94,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     ingest = sub.add_parser("ingest", help="匯入單一文件或整個資料夾（資料夾內不支援的格式會略過）")
     ingest.add_argument("path", help="文件或資料夾路徑")
+    ingest.add_argument(
+        "--prune",
+        action="store_true",
+        help="（只用於資料夾）把之前從這個資料夾匯入、現在檔案已不在的文件從知識庫刪掉；不加時只列出",
+    )
 
     query = sub.add_parser("query", help="以指定檢索模式提問")
     query.add_argument("question", help="問題文字")
@@ -139,10 +145,7 @@ def _collect_documents(raw: str) -> tuple[list[Path], list[Path]]:
     """
     path = Path(raw).expanduser().resolve()
     if path.is_dir():
-        documents: list[Path] = []
-        unsupported: list[Path] = []
-        for file in sorted(p for p in path.iterdir() if p.is_file() and not p.name.startswith(NOT_A_DOCUMENT_PREFIXES)):
-            (documents if is_supported(file) else unsupported).append(file)
+        documents, unsupported = list_folder(path)
         if not documents:
             raise ValueError(f"資料夾內沒有支援的文件：{path}（支援的格式：{describe_supported()}）")
         return documents, unsupported
@@ -153,26 +156,33 @@ def _collect_documents(raw: str) -> tuple[list[Path], list[Path]]:
     return [path], []
 
 
-def _run_ingest(raw_path: str) -> int:
+def _run_ingest(raw_path: str, prune: bool) -> int:
     """執行 ingest 並印出各階段耗時、圖譜與 VLM 統計。
 
     Args:
         raw_path: 命令列的文件或資料夾路徑。
+        prune: 是否刪除來源已不在的文件（只用於資料夾）。
 
     Returns:
-        結束碼：0 成功；EXIT_USAGE 輸入路徑不合法；EXIT_FAILURE 有任何一篇匯入失敗，或有圖／表／公式描述、多模態寫入失敗。
+        結束碼：0 成功；EXIT_USAGE 輸入路徑不合法，或單一檔案加 --prune；EXIT_FAILURE 有任何一篇匯入失敗、有圖／表／公式描述或
+        多模態寫入失敗，或有文件 --prune 刪除失敗（「來源已不在（未刪）」不影響結束碼）。
     """
     try:
         documents, unsupported = _collect_documents(raw_path)
     except ValueError as exc:
         print(f"輸入錯誤：{exc}", file=sys.stderr)
         return EXIT_USAGE
+    path = Path(raw_path).expanduser().resolve()
+    source_folder = path if path.is_dir() else None
+    if prune and source_folder is None:
+        print("輸入錯誤：--prune 只能用在資料夾（單一檔案不檢查來源已不在的文件）", file=sys.stderr)
+        return EXIT_USAGE
     for other in unsupported:
         print(f"略過不支援的格式：{other.name}")
 
     from rag_lab import pipeline
 
-    summary = pipeline.ingest(documents)
+    summary = pipeline.ingest(documents, source_folder=source_folder, prune=prune)
     for index, report in enumerate(summary.reports, start=1):
         print(f"[{index}/{len(summary.reports)}] {report.document.name}：耗時 {report.total_seconds:.1f} s")
         if report.error:
@@ -194,16 +204,31 @@ def _run_ingest(raw_path: str) -> int:
         f"（其中 RAG-Anything 加的 belongs_to 邊 {summary.belongs_to}，其餘 {summary.relations - summary.belongs_to}）"
     )
     print("文件狀態：" + "，".join(f"{status}={count}" for status, count in sorted(summary.status_counts.items())))
+    labelled = [("新增", summary.added), ("替換", summary.replaced), ("沒變", summary.unchanged)]
+    if source_folder is not None:
+        labelled += [("來源已不在（未刪）", summary.missing), ("已刪除", summary.removed)]
+    for label, paths in labelled:
+        print(f"{label} {len(paths)} 份")
+        for path in paths:
+            print(f"  {path}")
+    print(f"清掉答案快取 {summary.answer_cache_cleared} 筆")
     stuck = summary.status_counts.get("handling", 0)
     if stuck:
         print(f"注意：{stuck} 篇文件停在 handling（先前匯入在多模態階段被中斷）；對該文件重新執行 ingest 會重試")
     for report in failures:
         print(f"匯入失敗：{report.document.name}：{report.error}", file=sys.stderr)
+    for path, error in summary.remove_failed.items():
+        print(f"刪除失敗：{path}：{error}", file=sys.stderr)
     if summary.description_error:
         print(summary.description_error, file=sys.stderr)
     if failures:
         print(f"{len(failures)}/{len(summary.reports)} 篇匯入失敗；其餘已匯入的資料保留，重新執行會重試失敗的篇", file=sys.stderr)
-    return EXIT_FAILURE if failures or summary.description_error else 0
+    if summary.remove_failed:
+        print(
+            f"{len(summary.remove_failed)} 份文件刪除失敗；它們的知識庫內容與對照表紀錄都沒有改動，重新執行同一個 ingest --prune 會重試",
+            file=sys.stderr,
+        )
+    return EXIT_FAILURE if failures or summary.description_error or summary.remove_failed else 0
 
 
 def _run_query(question: str, mode: str, vlm_enhanced: bool) -> int:
@@ -352,7 +377,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "eval":
             return _run_eval(args.questions, args.output_dir)
         if args.command == "ingest":
-            return _run_ingest(args.path)
+            return _run_ingest(args.path, args.prune)
         if args.command == "graph":
             return _run_graph(args.sample, args.seed)
         return _run_query(args.question, args.mode, args.vlm_enhanced)

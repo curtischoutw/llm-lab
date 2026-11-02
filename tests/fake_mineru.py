@@ -14,6 +14,14 @@
   `% fake libreoffice source: <文字>` 一行時，多輸出一段文字 `Converted from Office document: <文字>`，
   讓主檔名相同的兩份 Office 文件能分辨；PDF、圖片（method 為 ocr）與假 LibreOffice 轉出的 PDF（tests/fake_libreoffice.py，主檔名與原 Office 文件相同）輸出相同的內容。圖片若不是 png／jpg，
   RAG-Anything 會先轉成 `<主檔名>_converted.png` 再交給 mineru，所以主檔名會多一個 `_converted`。
+- 文件 ID 由內容算出，而內容含圖片的絕對路徑；圖片放在依原檔路徑雜湊命名的輸出資料夾，所以不同路徑的兩份文件
+  通常得到不同的 ID。主檔名以 `textonly` 開頭時不輸出圖片，兩個資料夾裡同名的 `textonly*.pdf` 因此得到相同的 ID
+  （內容只依主檔名），測試用它造出「內容相同的兩個路徑」。
+- 輸入的 PDF 帶有 `% fake version: <文字>` 一行時（測試用它造出「同一個路徑上內容改了」的新版本），多輸出一段文字
+  `Version marker: <文字>`，並把表格說明改成 `Table 1: numbers (<文字>)`：文字 chunk 與表格 chunk 都隨版本改變，
+  文件 ID 也跟著變。
+- 主檔名以 `stall` 開頭時，先在環境變數 `FAKE_MINERU_STALLED` 指定的路徑建立一個檔案（測試據此知道解析已經開始），
+  然後睡 10 分鐘不回應，模擬「這份文件處理到一半」；測試要自己結束整個行程群組。
 - 主檔名以 `broken` 開頭時以非零碼結束，模擬解析失敗。主檔名以 `multichunk` 開頭時
   多輸出 8 段長文字，讓 LightRAG 切出多個 chunk，測試能觀察多個 LLM 請求同時進行的情境。
 - 主檔名以 `bigtable` 開頭時，把固定的小表格換成 `big_table_html()` 的大表格（MinerU 的寫法：每個儲存格都帶
@@ -32,6 +40,7 @@ import base64
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 # 1x1 透明 PNG
@@ -105,6 +114,10 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     stem = Path(args.path).stem
+    if stem.startswith("stall"):
+        Path(os.environ["FAKE_MINERU_STALLED"]).write_text("stalled", encoding="utf-8")
+        time.sleep(600)
+        return 1
     if stem.startswith("broken"):
         print(f"fake mineru: cannot parse {stem}", file=sys.stderr)
         return 1
@@ -131,6 +144,8 @@ def main(argv: list[str]) -> int:
         },
         {"type": "equation", "text": "E = mc^2", "text_format": "latex", "page_idx": 1},
     ]
+    if stem.startswith("textonly"):
+        content = [block for block in content if block["type"] != "image"]
     if stem.startswith("bigtable") or stem.startswith("bigspan"):
         content[3]["table_body"] = big_table_html(span_to_end=stem.startswith("bigspan"))
     elif stem.startswith("spans"):
@@ -140,7 +155,12 @@ def main(argv: list[str]) -> int:
         )
     marker = b"% fake libreoffice source: "
     pdf_lines = Path(args.path).read_bytes().splitlines() if Path(args.path).suffix.lower() == ".pdf" else []
+    version_marker = b"% fake version: "
     for line in pdf_lines:
+        if line.startswith(version_marker):
+            version = line.removeprefix(version_marker).decode("utf-8", errors="replace")
+            content.append({"type": "text", "text": f"Version marker: {version}", "page_idx": 0})
+            content[3]["table_caption"] = [f"Table 1: numbers ({version})"]
         if line.startswith(marker):
             source_text = line.removeprefix(marker).decode("utf-8", errors="replace")
             content.append({"type": "text", "text": f"Converted from Office document: {source_text}", "page_idx": 0})
