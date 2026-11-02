@@ -22,8 +22,15 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   （例外，或描述／寫入失敗而文字已寫入）時 _discard_new_version 用 adelete_by_doc_id 刪掉它寫進知識庫的部分，不留失敗
   紀錄，所以 IngestReport.mark_failed 不設（整批結束後的 _mark_swallowed_failures 只改記 mark_failed 的新文件）；舊版本與
   對照表不變。清除本身失敗或舊版本刪不掉時，錯誤訊息寫出新舊兩個文件 ID。_remove_version 刪除前先查對照表：別的路徑
-  還指向同一個文件 ID 時不刪，也不改對照表（呼叫端改寫或移除該路徑那一筆）；`--prune`（後續 ticket）直接重用它。
-  用檔名遷移、prune、答案快取是後續 ticket 的範圍（.scratch/incremental-update/）。
+  還指向同一個文件 ID 時不刪，也不改對照表（呼叫端改寫或移除該路徑那一筆）；`--prune` 直接重用它。
+  用檔名遷移、答案快取是後續 ticket 的範圍（.scratch/incremental-update/）。
+- 來源已不在與 prune（_ingest 的 source_folder、prune 參數，spec「匯入端：替換與移除」）：對照表的來源資料夾記 `ingest <資料夾>`
+  的那個資料夾（resolve() 後；Python API 指定了就記指定的，沒指定記檔案實體路徑所在的資料夾），所以資料夾裡指向別處的 symlink
+  檔，對照表的路徑可以不在來源資料夾底下。指定了來源資料夾才在匯入之後檢查：對照表裡來源資料夾等於它、路徑在檔案系統上已不存在的
+  文件，沒給 prune 只列在 IngestSummary.missing；給了 prune 就逐一刪（_prune_missing → _remove_version，保留抽取快取，別的路徑
+  還用同一個版本時只移除這一筆）記在 removed，刪除失敗記在 remove_failed（知識庫與對照表那一筆都不動），每份文件只歸一類。
+  來源資料夾不存在或沒有支援的文件、沒有來源資料夾卻給 prune，在做任何事之前拋 PipelineError（_require_valid_sync，
+  防止路徑打錯時刪光一個資料夾的文件）。
 - 重試未完成的文件（上次失敗、被中斷而卡在 processing，或文字完成但多模態沒做完）：先用
   LightRAG 的 adelete_by_doc_id 刪掉舊紀錄與部分結果，再重新匯入。LightRAG 遇到已存在的
   doc ID 不會重新排入，只會另寫一筆 status=failed 的 dup- 紀錄；刪除時保留 LLM 快取，
@@ -138,7 +145,7 @@ from pathlib import Path
 
 from rag_lab.config import Settings, get_settings, reject_unmanaged_library_env
 from rag_lab.evaluation import RETRIEVAL_MODES, Cell, Question
-from rag_lab.formats import describe_supported, is_office, is_supported
+from rag_lab.formats import describe_supported, is_office, is_supported, list_folder
 
 # 必須在 import lightrag 與 raganything 之前：它們在 import 時就讀環境變數當預設值（見 rag_lab.config）
 reject_unmanaged_library_env()
@@ -400,6 +407,11 @@ class IngestSummary:
         added: 分類為新增的文件（取 resolve() 後的絕對路徑，即對照表的鍵）。
         replaced: 分類為替換的文件（同上）。
         unchanged: 分類為沒變的文件（同上）。
+        missing: 來源已不在（未刪）的文件：對照表記著來源資料夾等於這次的來源資料夾、檔案已不在檔案系統上，而且沒給 prune。
+            沒指定來源資料夾時不檢查；給了 prune 時每份來源已不在的文件不是刪除成功就是刪除失敗，所以永遠是空的
+            （每份文件只歸一類）。
+        removed: prune 刪除成功的文件（對照表的鍵）；別的路徑還對照到同一個文件 ID 而沒有刪知識庫內容的也算。
+        remove_failed: prune 刪除失敗的文件：對照表的鍵 → 「型別：訊息」。這些文件的知識庫內容與對照表那一筆都沒動。
     """
 
     reports: list[IngestReport] = field(default_factory=list)
@@ -414,6 +426,9 @@ class IngestSummary:
     added: list[Path] = field(default_factory=list)
     replaced: list[Path] = field(default_factory=list)
     unchanged: list[Path] = field(default_factory=list)
+    missing: list[Path] = field(default_factory=list)
+    removed: list[Path] = field(default_factory=list)
+    remove_failed: dict[Path, str] = field(default_factory=dict)
 
 
 def _office_output_dir(parser_output_dir: str, document: Path) -> Path:
@@ -708,6 +723,29 @@ def _require_supported(documents: list[Path]) -> None:
             raise PipelineError(f"不支援的格式：{document.name}（支援的格式：{describe_supported()}）")
 
 
+def _require_valid_sync(source_folder: Path | None, prune: bool) -> None:
+    """確認來源資料夾與 prune 的組合合法；不合法就拒絕整批（和 CLI 的使用錯誤相同）。
+
+    資料夾不存在或沒有任何支援的文件時不做移除（grill Q24：路徑打錯不能刪光一個資料夾的文件），不論有沒有給 prune。
+
+    Args:
+        source_folder: 來源資料夾；None 表示不檢查移除。
+        prune: 是否要刪除來源已不在的文件。
+
+    Raises:
+        PipelineError: 沒有來源資料夾卻給了 prune；來源資料夾不存在、不是資料夾，或裡面沒有支援格式的文件。
+    """
+    if source_folder is None:
+        if prune:
+            raise PipelineError("prune 需要指定來源資料夾（source_folder）：沒有來源資料夾就不知道要檢查哪些文件")
+        return
+    folder = source_folder.resolve()
+    if not folder.is_dir():
+        raise PipelineError(f"來源資料夾不存在：{folder}")
+    if not list_folder(folder)[0]:
+        raise PipelineError(f"來源資料夾內沒有支援的文件：{folder}（支援的格式：{describe_supported()}）")
+
+
 def _registry_key(document: Path) -> str:
     """文件在對照表裡的鍵：和 CLI 取路徑的方式相同，resolve() 成絕對的實體路徑。
 
@@ -738,41 +776,108 @@ def _load_registry(settings: Settings) -> dict[str, dict[str, str]]:
         raise PipelineError(str(exc)) from exc
 
 
-def _record_success(settings: Settings, known: dict[str, dict[str, str]], report: IngestReport) -> None:
+def _record_success(
+    settings: Settings, known: dict[str, dict[str, str]], report: IngestReport, source_folder: str | None
+) -> None:
     """文件處理成功後更新對照表那一筆並寫回檔案。
 
-    沒變而且對照表已經是這個 ID 時，保留原本那一筆、不寫檔。
+    沒變而且對照表已經是這個 ID 與這個來源資料夾時，保留原本那一筆、不寫檔。
 
     Args:
         settings: 已驗證的設定（取 WORKING_DIR）。
         known: 對照表（路徑 → 紀錄），會被更新。
         report: 成功的報告（outcome 與 doc_id 都有值）。
+        source_folder: 這次指定的來源資料夾（resolve() 後的絕對路徑）；None 表示沒指定，記文件所在的資料夾。
 
     Raises:
         registry.RegistryError: 對照表寫不進去。
     """
     key = _registry_key(report.document)
     entry = known.get(key)
+    # ASSUMPTION：來源資料夾記這次指定的資料夾，沒指定時記文件實體路徑所在的資料夾。資料夾裡的 symlink 檔 resolve 後
+    # 可能不在該資料夾底下，所以兩者不能假設有上下層關係
+    folder = source_folder if source_folder is not None else str(Path(key).parent)
     if report.outcome == OUTCOME_UNCHANGED and entry is not None and entry["doc_id"] == report.doc_id:
-        return
-    known[key] = {
-        "doc_id": report.doc_id,
-        # ASSUMPTION：對照表建立之前匯入的文件，真正的匯入時間已不可考，記補登的時間
-        "ingested_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-        # ASSUMPTION：來源資料夾記文件所在的資料夾。`ingest <資料夾>` 時文件都是該資料夾的直接子檔，兩者相同
-        # （資料夾裡的 symlink 檔除外）；Python API 指定來源資料夾的參數由 ticket 04 加入
-        "source_folder": str(Path(key).parent),
-    }
+        if entry["source_folder"] == folder:
+            return
+        known[key] = {**entry, "source_folder": folder}
+    else:
+        known[key] = {
+            "doc_id": report.doc_id,
+            # ASSUMPTION：對照表建立之前匯入的文件，真正的匯入時間已不可考，記補登的時間
+            "ingested_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "source_folder": folder,
+        }
     registry.save(settings.working_dir, known)
 
 
-async def _ingest(rag: RAGAnything, documents: list[Path], settings: Settings) -> IngestSummary:
+def _missing_sources(known: dict[str, dict[str, str]], source_folder: str) -> list[str]:
+    """對照表裡來源資料夾等於指定資料夾、而檔案已不在檔案系統上的路徑。
+
+    只比對表裡記的來源資料夾字串與路徑，不假設路徑在來源資料夾底下（資料夾裡的 symlink 檔 resolve 後可能在別處）。
+
+    Args:
+        known: 對照表（路徑 → 紀錄）。
+        source_folder: 這次的來源資料夾（resolve() 後的絕對路徑）。
+
+    Returns:
+        依路徑排序的對照表鍵。
+    """
+    return sorted(
+        key for key, entry in known.items() if entry["source_folder"] == source_folder and not Path(key).exists()
+    )
+
+
+async def _prune_missing(
+    rag: RAGAnything, settings: Settings, known: dict[str, dict[str, str]], missing: list[str], summary: IngestSummary
+) -> None:
+    """逐一刪除來源已不在的文件：從知識庫刪掉它的版本（保留 LLM 抽取快取），再移除對照表那一筆。
+
+    刪除前先查對照表：別的路徑還指向同一個文件 ID 時只移除這個路徑那一筆（見 _remove_version），仍記「已刪除」。
+    單一文件刪除失敗不中斷其餘文件：記在 summary.remove_failed，知識庫內容與對照表那一筆都不動。
+
+    Args:
+        rag: 已初始化的 RAGAnything。
+        settings: 已驗證的設定（取 WORKING_DIR）。
+        known: 對照表（路徑 → 紀錄），刪除成功的那一筆會被移除。
+        missing: 要刪除的對照表鍵。
+        summary: 刪除結果記在它的 removed 與 remove_failed。
+
+    Raises:
+        PipelineError: 對照表寫不進去（這份文件的知識庫內容已刪，後面的文件不再處理）。
+    """
+    for key in missing:
+        try:
+            await _remove_version(rag, known, key, known[key]["doc_id"])
+        except Exception as exc:
+            summary.remove_failed[Path(key)] = f"{type(exc).__name__}: {exc}"
+            continue
+        del known[key]
+        try:
+            registry.save(settings.working_dir, known)
+        except registry.RegistryError as exc:
+            raise PipelineError(
+                f"{exc}。{key} 已從知識庫刪除但對照表沒有更新，後面的文件沒有處理；修好後重新執行同一個 ingest --prune 即可"
+            ) from exc
+        summary.removed.append(Path(key))
+
+
+async def _ingest(
+    rag: RAGAnything,
+    documents: list[Path],
+    settings: Settings,
+    source_folder: Path | None = None,
+    prune: bool = False,
+) -> IngestSummary:
     """在已初始化的 RAGAnything 上匯入一批文件並彙整結果。
 
     Args:
         rag: 已完成 _initialize 的實例。
         documents: 要匯入的文件路徑。
         settings: 已驗證的設定。
+        source_folder: 來源資料夾（resolve() 後的絕對路徑）；給了就記成這批文件的來源資料夾，並在匯入之後檢查
+            來源已不在的文件。None 表示不檢查。
+        prune: True 時刪除來源已不在的文件（需要 source_folder）；False 時只列出。
 
     Returns:
         IngestSummary；單篇失敗與描述失敗都記在裡面，不拋例外。
@@ -780,12 +885,13 @@ async def _ingest(rag: RAGAnything, documents: list[Path], settings: Settings) -
     Raises:
         EndpointError: 開始前有端點不可達。
         PipelineError: 對照表壞掉（在處理任何文件之前）；對照表寫不進去（這份文件已匯入，後面的文件不再處理，
-            已處理的收尾照常做完才拋）。
+            已處理的收尾照常做完才拋；prune 刪除後寫不進去也拋，同樣不再處理後面的文件）。
     """
     known = _load_registry(settings)
     models.check_reachable("LLM", "VLM", "Embedding")
     models.reset_stats()
     summary = IngestSummary()
+    folder = str(source_folder) if source_folder is not None else None
     registry_error: registry.RegistryError | None = None
     for document in documents:
         description_before, write_before = models.failure_counts()
@@ -801,7 +907,7 @@ async def _ingest(rag: RAGAnything, documents: list[Path], settings: Settings) -
         summary.reports.append(report)
         if report.error is None:
             try:
-                _record_success(settings, known, report)
+                _record_success(settings, known, report, folder)
             except registry.RegistryError as exc:
                 # 對照表寫不進去就不再處理後面的文件（它們也記不進去）；先把前面文件的收尾做完再拋
                 registry_error = exc
@@ -815,6 +921,12 @@ async def _ingest(rag: RAGAnything, documents: list[Path], settings: Settings) -
     summary.added = [r.document.resolve() for r in summary.reports if r.outcome == OUTCOME_ADDED]
     summary.replaced = [r.document.resolve() for r in summary.reports if r.outcome == OUTCOME_REPLACED]
     summary.unchanged = [r.document.resolve() for r in summary.reports if r.outcome == OUTCOME_UNCHANGED]
+    if folder is not None:
+        missing = _missing_sources(known, folder)
+        if prune:
+            await _prune_missing(rag, settings, known, missing, summary)
+        else:
+            summary.missing = [Path(key) for key in missing]
     summary.entities, summary.relations, summary.belongs_to = await _graph_stats(rag)
     summary.status_counts = await _status_counts(rag)
     stats = models.vision_stats
@@ -830,11 +942,16 @@ async def _ingest(rag: RAGAnything, documents: list[Path], settings: Settings) -
     return summary
 
 
-def ingest(documents: list[Path]) -> IngestSummary:
+def ingest(documents: list[Path], *, source_folder: Path | None = None, prune: bool = False) -> IngestSummary:
     """匯入一批文件：開一個 Session、匯入一次、關閉。
 
     Args:
         documents: 要匯入的文件路徑。
+        source_folder: 來源資料夾（ASSUMPTION：參數名稱與型別由實作決定，spec 只規定要有）。給了就把它記成這批文件在
+            對照表的來源資料夾（沒給時記文件所在的資料夾），並在匯入之後把對照表裡來源資料夾等於它、檔案已不在的文件列在
+            IngestSummary.missing。沒給時不檢查。
+        prune: True 時把那些來源已不在的文件從知識庫刪掉（保留 LLM 抽取快取）並移除對照表那一筆，記在
+            IngestSummary.removed；只處理來源資料夾等於 source_folder 的紀錄。沒給 source_folder 時不能用。
 
     Returns:
         IngestSummary；單篇失敗與描述失敗記在裡面（reports[].error、description_error），由呼叫端決定結束碼。
@@ -845,10 +962,11 @@ def ingest(documents: list[Path]) -> IngestSummary:
         SessionError: 已有開啟中的 Session，或在不允許的環境呼叫（見 Session）。
     """
     _require_supported(documents)
+    _require_valid_sync(source_folder, prune)
     # Session 建構時只檢查 LLM 與 embedding；VLM 在開 Session 之前先檢查，不可達時不建立 WORKING_DIR、不跑 mineru
     models.check_reachable("VLM")
     with Session() as session:
-        return session.ingest(documents)
+        return session.ingest(documents, source_folder=source_folder, prune=prune)
 
 
 # ==============================
@@ -1155,11 +1273,15 @@ class Session:
         """
         return self._closed
 
-    def ingest(self, documents: list[Path]) -> IngestSummary:
+    def ingest(
+        self, documents: list[Path], *, source_folder: Path | None = None, prune: bool = False
+    ) -> IngestSummary:
         """匯入一批文件（見模組函式 ingest）。
 
         Args:
             documents: 要匯入的文件路徑。
+            source_folder: 來源資料夾；見模組函式 ingest。
+            prune: 是否刪除來源已不在的文件；見模組函式 ingest。
 
         Returns:
             這一次匯入的 IngestSummary；VLM 與描述統計只計這一次。
@@ -1171,7 +1293,9 @@ class Session:
         """
         self._check_usable()
         _require_supported(documents)
-        return self._runner.run(_ingest(self._rag, documents, self._settings))
+        _require_valid_sync(source_folder, prune)
+        folder = source_folder.resolve() if source_folder is not None else None
+        return self._runner.run(_ingest(self._rag, documents, self._settings, folder, prune))
 
     def query(self, question: str, mode: str, vlm_enhanced: bool = False) -> str:
         """以指定檢索模式回答問題（見模組函式 query）。
