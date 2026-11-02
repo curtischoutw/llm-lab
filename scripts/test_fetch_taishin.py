@@ -503,6 +503,30 @@ class ScriptTestCase(unittest.TestCase):
         for path, html in details.items():
             self.mkp_routes[path] = (200, html.encode())
 
+    def serve_activities(self, banners: dict[int, str | None], *, periods: dict[int, str] | None = None) -> None:
+        """登記活動 1..N（N 是 banners 的最大編號）都在分類 A 的第 1 頁，各自的主視覺網址是 mkp 前綴加 banners[n]。
+
+        Args:
+            banners: 活動編號對主視覺路徑；None 表示該活動頁沒有 div.banner-image。
+            periods: 活動編號對活動期間；沒有列出的活動期間是 2099 年。
+        """
+        periods = periods or {}
+        self.serve_offers({"A": [[detail_path(n) for n in sorted(banners)]]})
+        self.serve_details(
+            {
+                detail_path(n): offer_detail_html(
+                    f"OFFER{n}",
+                    period=periods.get(n, "2099-01-01~2099-12-31"),
+                    banner=None if path is None else self.mkp_server.base_url + path,
+                )
+                for n, path in banners.items()
+            }
+        )
+
+    def image_requests(self) -> list[str]:
+        """mkp 收到的圖片請求路徑（依時間順序）。"""
+        return [p for p in self.mkp_server.paths() if p.startswith(UPLOAD_PREFIX)]
+
     def run_script(
         self,
         *,
@@ -1365,30 +1389,6 @@ VALID_IMAGE_HEADERS = {
 
 
 class OfferImageTests(ScriptTestCase):
-    def serve_activities(self, banners: dict[int, str | None], *, periods: dict[int, str] | None = None) -> None:
-        """登記活動 1..N（N 是 banners 的最大編號）都在分類 A 的第 1 頁，各自的主視覺網址是 mkp 前綴加 banners[n]。
-
-        Args:
-            banners: 活動編號對主視覺路徑；None 表示該活動頁沒有 div.banner-image。
-            periods: 活動編號對活動期間；沒有列出的活動期間是 2099 年。
-        """
-        periods = periods or {}
-        self.serve_offers({"A": [[detail_path(n) for n in sorted(banners)]]})
-        self.serve_details(
-            {
-                detail_path(n): offer_detail_html(
-                    f"OFFER{n}",
-                    period=periods.get(n, "2099-01-01~2099-12-31"),
-                    banner=None if path is None else self.mkp_server.base_url + path,
-                )
-                for n, path in banners.items()
-            }
-        )
-
-    def image_requests(self) -> list[str]:
-        """mkp 收到的圖片請求路徑（依時間順序）。"""
-        return [p for p in self.mkp_server.paths() if p.startswith(UPLOAD_PREFIX)]
-
     def test_saves_the_banner_of_the_first_8_activities_that_have_one_in_discovery_order(self) -> None:
         # 活動 1 沒有主視覺（頁面只有分享圖示），2–10 有 9 個：只收前 8 個，也就是 2–9
         banners = {1: None, **{n: banner_path(n) for n in range(2, 11)}}
@@ -2441,6 +2441,22 @@ _dt.date = _Date
 """
 
 
+# 子行程的 date.today() 固定回後天（模擬再過兩天才執行更新模式）
+SITECUSTOMIZE_CLOCK_DAY_AFTER_TOMORROW = """
+import datetime as _dt
+_real = _dt.date
+
+
+class _Date(_real):
+    @classmethod
+    def today(cls):
+        return _real.today() + _dt.timedelta(days=2)
+
+
+_dt.date = _Date
+"""
+
+
 class RunDateTests(ScriptTestCase):
     def test_today_is_read_once_per_run_so_crossing_midnight_does_not_change_the_result(self) -> None:
         # 子行程的 date.today() 第一次回真正的今天，之後每次都回明天（模擬執行到一半跨過午夜）
@@ -3141,6 +3157,234 @@ class UpdateModeAttachmentTests(ScriptTestCase):
         self.assertIn(DUAL_PDF, self.server.paths())
         for earlier, later in zip(requests, requests[1:]):
             self.assertGreaterEqual(later[1] - earlier[1], interval - 0.02)
+
+
+class UpdateModeExpiredOfferTests(ScriptTestCase):
+    """更新模式下，已有文件的活動重新判斷是否過期，過期的連同存檔搬到 _meta/removed/<日期>/。"""
+
+    def removed_dir(self) -> Path:
+        """今天的下架資料夾 DIR/_meta/removed/<日期>/。"""
+        return self.out / "_meta" / "removed" / date.today().isoformat()
+
+    def activity_records(self) -> dict[str, dict[str, str]]:
+        """下載清單中活動類別的紀錄，檔名對紀錄。"""
+        return {r["filename"]: r for r in self.manifest() if r["category"] == "活動"}
+
+    def test_activity_that_expired_since_the_first_download_is_moved_and_recorded_as_expired_removed(self) -> None:
+        self.serve_offers({"A": [[detail_path(1), detail_path(2)]]})
+        self.serve_details({detail_path(n): offer_detail_html(f"OFFER{n}") for n in (1, 2)})
+        self.assertEqual(self.run_script().returncode, 0)
+        pdf_before = (self.out / "offers" / f"offer_{wm(1)}.pdf").read_bytes()
+        html_before = (self.out / "_meta" / "html" / f"offer_{wm(1)}.html").read_bytes()
+        print_before = (self.out / "_meta" / "print" / f"offer_{wm(1)}.html").read_bytes()
+        period = period_from_today(-60, -1)
+        self.serve_details({detail_path(1): offer_detail_html("OFFER1", period=period)})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        removed = self.removed_dir()
+        self.assertFalse((self.out / "offers" / f"offer_{wm(1)}.pdf").exists())
+        self.assertFalse((self.out / "_meta" / "html" / f"offer_{wm(1)}.html").exists())
+        self.assertFalse((self.out / "_meta" / "print" / f"offer_{wm(1)}.html").exists())
+        self.assertEqual((removed / "offers" / f"offer_{wm(1)}.pdf").read_bytes(), pdf_before)
+        self.assertEqual((removed / "html" / f"offer_{wm(1)}.html").read_bytes(), html_before)
+        self.assertEqual((removed / "print" / f"offer_{wm(1)}.html").read_bytes(), print_before)
+        self.assertTrue((self.out / "offers" / f"offer_{wm(2)}.pdf").is_file(), "沒過期的活動不動")
+        records = self.activity_records()
+        expired = records[f"offer_{wm(1)}.pdf"]
+        self.assertEqual(expired["result"], "過期移除", "同一次既內容變更又過期的，記過期移除")
+        self.assertEqual(expired["period"], period)
+        self.assertEqual(expired["url"], self.mkp_server.base_url + detail_path(1))
+        self.assertEqual(records[f"offer_{wm(2)}.pdf"]["result"], "未變")
+        self.assertIn("活動：未變 1、過期移除 1", result.stdout)
+
+    def test_activity_that_is_still_listed_is_judged_again_even_when_its_main_content_is_unchanged(self) -> None:
+        # 第一次下載時活動還沒過期；更新模式的子行程把 date.today() 固定在後天，頁面本身一個字都沒變
+        self.serve_offers({"A": [[detail_path(1)]]})
+        self.serve_details({detail_path(1): offer_detail_html("OFFER1", period=period_from_today(-10, 1))})
+        self.assertEqual(self.run_script().returncode, 0)
+        clock = self.tmp / "clock"
+        clock.mkdir()
+        (clock / "sitecustomize.py").write_text(SITECUSTOMIZE_CLOCK_DAY_AFTER_TOMORROW, encoding="utf-8")
+        result = self.run_update(extra_env={"PYTHONPATH": str(clock)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.out / "offers" / f"offer_{wm(1)}.pdf").exists())
+        self.assertEqual(self.activity_records()[f"offer_{wm(1)}.pdf"]["result"], "過期移除")
+
+
+class UpdateModeOfferImageTests(ScriptTestCase):
+    """更新模式下，活動圖片跟著活動走：活動沒了圖片也搬走，名額少於 8 個才補。"""
+
+    PAST = period_from_today(-60, -1)
+
+    def removed_images_dir(self) -> Path:
+        """今天的下架資料夾裡的圖片資料夾。"""
+        return self.out / "_meta" / "removed" / date.today().isoformat() / "offer_images"
+
+    def image_name(self, number: int, extension: str = "png") -> str:
+        """第 number 個假活動主視覺的本地檔名。"""
+        return f"offer_image_{wm(number)}_banner_image.{extension}"
+
+    def first_download(self, banners: dict[int, str | None]) -> None:
+        """第一次下載（不開更新模式）這些活動與它們的主視覺，清掉請求紀錄。
+
+        Args:
+            banners: 活動編號對主視覺路徑（None 表示沒有主視覺），同 serve_activities。
+        """
+        self.serve_activities(banners)
+        self.serve_images({path: PNG_BYTES + path.encode() for path in banners.values() if path is not None})
+        self.assertEqual(self.run_script().returncode, 0)
+        self.mkp_server.requests.clear()
+
+    def image_records(self) -> dict[str, dict[str, str]]:
+        """下載清單中活動圖片類別的紀錄，檔名對紀錄。"""
+        return {r["filename"]: r for r in self.manifest() if r["category"] == "活動圖片"}
+
+    def test_banner_of_an_expired_activity_is_moved_to_the_removed_folder_and_recorded(self) -> None:
+        banners = {1: banner_path(1), 2: banner_path(2)}
+        self.first_download(banners)
+        image_before = (self.out / "offer_images" / self.image_name(1)).read_bytes()
+        self.serve_activities(banners, periods={1: self.PAST})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(sorted(p.name for p in (self.out / "offer_images").iterdir()), [self.image_name(2)])
+        self.assertEqual((self.removed_images_dir() / self.image_name(1)).read_bytes(), image_before)
+        records = self.image_records()
+        self.assertEqual(records[self.image_name(1)]["result"], "下架")
+        self.assertEqual(records[self.image_name(2)]["result"], "已存在略過")
+        self.assertIn("活動圖片：已存在略過 1、下架 1", result.stdout)
+
+    def test_shared_banner_stays_while_one_activity_uses_it_and_moves_when_both_are_gone(self) -> None:
+        banners = {1: banner_path(1), 2: banner_path(1), 3: banner_path(3)}
+        self.first_download(banners)
+        self.serve_activities(banners, periods={1: self.PAST})
+        self.assertEqual(self.run_update().returncode, 0)
+        self.assertEqual(
+            sorted(p.name for p in (self.out / "offer_images").iterdir()), [self.image_name(1), self.image_name(3)]
+        )
+        self.assertFalse(self.removed_images_dir().exists())
+        self.serve_activities(banners, periods={1: self.PAST, 2: self.PAST})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([p.name for p in (self.out / "offer_images").iterdir()], [self.image_name(3)])
+        self.assertEqual([p.name for p in self.removed_images_dir().iterdir()], [self.image_name(1)])
+
+    def test_banner_of_an_activity_missing_from_the_list_is_moved_too(self) -> None:
+        banners = {1: banner_path(1), 2: banner_path(2)}
+        self.first_download(banners)
+        self.serve_offers({"A": [[detail_path(2)]]})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([p.name for p in (self.out / "offer_images").iterdir()], [self.image_name(2)])
+        self.assertEqual([p.name for p in self.removed_images_dir().iterdir()], [self.image_name(1)])
+
+    def test_banner_whose_activity_changed_its_main_visual_url_is_moved_and_the_new_one_is_downloaded(self) -> None:
+        self.first_download({1: banner_path(1)})
+        new_banner = banner_path(1).replace("banner_image", "banner_image_v2")
+        # 主視覺在主內容區外，所以改版時主內容區也要不同，更新模式才會換掉存檔的 HTML
+        self.serve_details(
+            {detail_path(1): offer_detail_html("OFFER1-REVISED", banner=self.mkp_server.base_url + new_banner)}
+        )
+        self.serve_images({new_banner: PNG_BYTES + b"new"})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        new_name = self.image_name(1).replace("banner_image", "banner_image_v2")
+        self.assertEqual([p.name for p in (self.out / "offer_images").iterdir()], [new_name])
+        self.assertEqual((self.out / "offer_images" / new_name).read_bytes(), PNG_BYTES + b"new")
+        self.assertEqual([p.name for p in self.removed_images_dir().iterdir()], [self.image_name(1)])
+        records = self.image_records()
+        self.assertEqual(records[new_name]["result"], "已下載")
+        self.assertEqual(records[self.image_name(1)]["result"], "下架")
+
+    def test_banner_of_a_still_valid_activity_with_the_same_url_is_not_requested_and_not_touched(self) -> None:
+        banners = {1: banner_path(1), 2: banner_path(2)}
+        self.first_download(banners)
+        images = [self.out / "offer_images" / self.image_name(n) for n in (1, 2)]
+        for image in images:
+            os.utime(image, ns=(OLD_MTIME_NS, OLD_MTIME_NS))
+        before = [(image.read_bytes(), image.stat().st_mtime_ns) for image in images]
+        self.serve_images({path: b"\x89PNG\r\n\x1a\nchanged on the server" for path in banners.values()})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.image_requests(), [])
+        self.assertEqual([(image.read_bytes(), image.stat().st_mtime_ns) for image in images], before)
+        self.assertFalse((self.out / "_meta" / "removed").exists() and list((self.out / "_meta" / "removed").rglob("*.png")))
+
+    def test_nothing_about_banners_is_judged_when_the_activity_list_was_not_fetched(self) -> None:
+        banners = {1: banner_path(1), 2: banner_path(2)}
+        self.first_download(banners)
+        self.routes[offer_list_path("A", 1)] = (500, b"boom")
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(
+            sorted(p.name for p in (self.out / "offer_images").iterdir()), [self.image_name(1), self.image_name(2)]
+        )
+        self.assertTrue((self.out / "offers" / f"offer_{wm(1)}.pdf").is_file())
+        self.assertFalse((self.out / "_meta" / "removed").exists())
+
+    def test_activity_that_appears_in_front_does_not_push_out_the_existing_banners(self) -> None:
+        banners = {n: banner_path(n) for n in range(1, 11)}
+        self.first_download(banners)
+        self.assertEqual(len(list((self.out / "offer_images").iterdir())), 8)
+        self.serve_offers({"A": [[detail_path(n) for n in (11, *range(1, 11))]]})
+        self.serve_details({detail_path(11): offer_detail_html("OFFER11", banner=self.mkp_server.base_url + banner_path(11))})
+        self.serve_images({banner_path(11): PNG_BYTES})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.image_requests(), [])
+        self.assertEqual(
+            sorted(p.name for p in (self.out / "offer_images").iterdir()), [self.image_name(n) for n in range(1, 9)]
+        )
+        self.assertFalse((self.out / "_meta" / "removed").exists() and list((self.out / "_meta" / "removed").rglob("*.png")))
+
+    def test_slot_freed_by_an_expired_activity_is_filled_by_the_next_activity_in_discovery_order(self) -> None:
+        banners = {n: banner_path(n) for n in range(1, 11)}
+        self.first_download(banners)
+        self.serve_activities(banners, periods={1: self.PAST})
+        self.serve_images({banner_path(n): PNG_BYTES for n in (9, 10)})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.image_requests(), [banner_path(9)])
+        self.assertEqual(
+            sorted(p.name for p in (self.out / "offer_images").iterdir()), [self.image_name(n) for n in range(2, 10)]
+        )
+
+    def test_activity_with_a_changed_banner_url_is_filled_before_the_others(self) -> None:
+        banners = {n: banner_path(n) for n in range(1, 11)}
+        self.first_download(banners)
+        new_banner = banner_path(10).replace("banner_image", "banner_image_v2")
+        self.serve_activities(banners, periods={1: self.PAST})
+        # 活動 10 還沒有圖片（名額用滿），改版換了主視覺網址：它排在活動 9 前面
+        self.serve_details(
+            {detail_path(10): offer_detail_html("OFFER10-REVISED", banner=self.mkp_server.base_url + new_banner)}
+        )
+        self.serve_images({new_banner: PNG_BYTES, banner_path(9): PNG_BYTES})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.image_requests(), [new_banner])
+        self.assertIn(
+            self.image_name(10).replace("banner_image", "banner_image_v2"),
+            [p.name for p in (self.out / "offer_images").iterdir()],
+        )
+        self.assertNotIn(self.image_name(9), [p.name for p in (self.out / "offer_images").iterdir()])
+
+    def test_report_says_so_when_there_are_not_enough_candidates_to_fill_8_slots(self) -> None:
+        self.first_download({1: banner_path(1), 2: banner_path(2), 3: None})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("活動圖片名額 2/8，沒有更多候選", result.stdout)
+
+    def test_unsupported_format_banner_still_takes_a_slot_and_a_failed_download_does_not(self) -> None:
+        banners = {1: banner_path(1, "svg"), **{n: banner_path(n) for n in range(2, 10)}}
+        self.serve_activities(banners)
+        # 活動 2 的圖片第一次下載失敗，沒有留檔
+        self.serve_images({banner_path(n): PNG_BYTES for n in range(3, 10)})
+        self.assertEqual(self.run_script().returncode, 1)
+        self.assertEqual(len(list((self.out / "offer_images").iterdir())), 6, "活動 1 是 svg 不下載、活動 2 失敗、活動 9 沒有名額")
+        self.mkp_server.requests.clear()
+        self.serve_images({banner_path(2): PNG_BYTES, banner_path(9): PNG_BYTES})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.image_requests(), [banner_path(2)], "svg 佔 1 個、現有 6 張佔 6 個，只剩 1 個名額，補活動 2")
 
 
 if __name__ == "__main__":
