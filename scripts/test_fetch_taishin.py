@@ -5,13 +5,16 @@ stdout／stderr、輸出資料夾的檔案、下載清單的內容、假 server 
 不 import 腳本的函式。
 
 關鍵設計決策：
-- 網址前綴（TAISHIN_WWW_BASE、TAISHIN_MKPCARD_BASE、TAISHIN_MKP_BASE）、Chrome 路徑（TAISHIN_CHROME）與請求間隔
-  （TAISHIN_REQUEST_INTERVAL_SEC）都用環境變數指到假的版本。www 與 mkpcard 指到同一個假 server（self.server），
+- 網址前綴（TAISHIN_WWW_BASE、TAISHIN_MKPCARD_BASE、TAISHIN_MKP_BASE、TAISHIN_RICHART_BASE）、Chrome 路徑（TAISHIN_CHROME）
+  與請求間隔（TAISHIN_REQUEST_INTERVAL_SEC）都用環境變數指到假的版本。www 與 mkpcard 指到同一個假 server（self.server），
   mkp 指到另一個（self.mkp_server），所以測試能看出活動詳情頁與主視覺是向 mkp 的前綴請求，不是向 mkpcard。
+  richart.tw 也是獨立的假 server（self.richart_server），預設登記兩個沒有任何優惠細則連結的卡片頁。
 - 假 Chrome 是 tests/fake_chrome.py；測試在暫存資料夾寫一個 shell wrapper 呼叫它，
   腳本拿到的 Chrome 路徑就是這個 wrapper。
 - 金融卡卡片頁：專區列表頁（payment/）連到群組落地頁（payment/cgXXX/），落地頁只有一段 location.replace 轉址，
   轉址目標是卡片頁（card01/ 或 card001/）；測試用 serve_debit_cards 登記這三層。預設（setUp）專區列表頁沒有任何卡。
+- richart.tw：簽帳金融卡頁、信用卡頁是寫死的兩個網址，兩頁連到 /discount/discount-details?discount=<id> 的優惠細則；
+  測試用 serve_richart 登記這兩頁與各細則頁。
 - 假頁面依官網結構筆記的最小結構製作：主內容區含預設收合的區塊與彈窗，主內容區外有導覽選單，
   頁面裡有 script 與 style。
 - 假 server 記錄每個請求的路徑、收到的時間與 User-Agent。沒有登記的路徑交給 fallback（預設 404）；
@@ -54,6 +57,19 @@ RIGHTS_LIST_PATH = "/TSB/personal/credit/intro/rights/"
 DEBIT_LIST_PATH = "/TSB/personal/credit/intro/payment/"
 DEBIT_GROUP_FORMAT = "/TSB/personal/credit/intro/payment/{cg}/"
 DEBIT_CARD_FORMAT = "/TSB/personal/credit/intro/payment/{cg}/{card}/"
+RICHART_DEBIT_PATH = "/TSDIB_RichartWeb/card/debit-card"
+RICHART_CREDIT_PATH = "/TSDIB_RichartWeb/card/credit-card"
+RICHART_DISCOUNT_FORMAT = "/TSDIB_RichartWeb/discount/discount-details?discount={id}"
+# 預設（setUp）登記的兩個 richart.tw 卡片頁每次執行都會下載，所以下載資料夾裡一定有這些檔案，清單裡一定有這兩份文件
+RICHART_DEFAULT_FILES = [
+    "_meta/html/richart_credit-card.html",
+    "_meta/html/richart_debit-card.html",
+    "_meta/print/richart_credit-card.html",
+    "_meta/print/richart_debit-card.html",
+    "richart/richart_credit-card.pdf",
+    "richart/richart_debit-card.pdf",
+]
+RICHART_DEFAULT_DOCUMENTS = ["richart_debit-card.pdf", "richart_credit-card.pdf"]
 RIGHTS_PATH_FORMAT = "/TSB/personal/credit/intro/rights/{group}/{page}/"
 DOWNLOAD_LIST_PATH = "/TSB/personal/common/download/index.html"
 DOWNLOAD_QUERY = "?nav1=credit&nav2=file-download"
@@ -243,6 +259,36 @@ def debit_landing_html(redirect_target: str | None) -> str:
         f'<div id="centercontainer"><div>卡片群組名稱:某金融卡<br>卡片群組:{script}</div></div>'
         "</body></html>"
     )
+
+
+def discount_href(discount_id: str) -> str:
+    """richart.tw 優惠細則頁的連結（相對路徑，和真實頁面一樣）。"""
+    return RICHART_DISCOUNT_FORMAT.format(id=discount_id)
+
+
+def richart_page_html(label: str, hrefs: list[str]) -> str:
+    """產生 richart.tw 的卡片頁：主內容區是 id="main-container"，含優惠細則連結，導覽與頁尾在主內容區外。
+
+    Args:
+        label: 放進主內容區的文字，讓各頁內容不同。
+        hrefs: 主內容區裡的連結（優惠細則、優惠列表、外部網域的連結等，原樣放進 href）。
+
+    Returns:
+        卡片頁的 HTML。
+    """
+    links = "".join(f'<a class="btn" href="{href}">看優惠詳情</a>' for href in hrefs)
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>Richart</title>
+<script>var RICHART_SCRIPT_TEXT = 1;</script></head>
+<body>
+<div class="main-header"><ul><li>RICHART-NAV-TEXT</li></ul></div>
+<div class="smooth-scroll product" id="main-container">
+  <div class="section"><h1>{label}</h1><img src="data:image/png;base64,AAAA">{links}</div>
+  <script>var RICHART_INNER_SCRIPT_TEXT = 1;</script>
+</div>
+<div class="modal fade" id="modalOutside">RICHART-OUTSIDE-MODAL-TEXT</div>
+<div class="main-footer">RICHART-FOOTER-TEXT</div>
+</body></html>"""
 
 
 def card_html_without_main_content() -> str:
@@ -460,12 +506,18 @@ class ScriptTestCase(unittest.TestCase):
         self.mkp_server = FakeServer(self.mkp_routes)
         self.mkp_server.start()
         self.addCleanup(self.mkp_server.stop)
+        # richart.tw 也是另一個假 server；預設的兩個卡片頁沒有任何優惠細則連結，案例用 serve_richart 覆蓋
+        self.richart_routes: dict[str, tuple[int, bytes]] = {}
+        self.richart_server = FakeServer(self.richart_routes)
+        self.richart_server.start()
+        self.addCleanup(self.richart_server.stop)
         self.list_handlers: dict[str, Callable[[str], tuple[int, bytes] | None]] = {}
         self.server.fallback = self._answer_with_list_handlers
         # 沒有任何子頁的總覽頁與權益頁；案例需要子頁時用 serve_cards、serve_rights 覆蓋
         self.serve_cards({})
         self.serve_rights({})
         self.serve_debit_cards({})
+        self.serve_richart([], [])
         self.serve_downloads([[]])
         self.serve_offers({})
 
@@ -499,6 +551,24 @@ class ScriptTestCase(unittest.TestCase):
             self.routes[path] = (200, debit_landing_html(target).encode())
         for path, html in (cards or {}).items():
             self.routes[path] = (200, html.encode())
+
+    def serve_richart(
+        self, debit_hrefs: list[str], credit_hrefs: list[str], discounts: dict[str, str] | None = None
+    ) -> None:
+        """登記 richart.tw 的簽帳金融卡頁、信用卡頁與各優惠細則頁。
+
+        Args:
+            debit_hrefs: 簽帳金融卡頁主內容區裡的連結（原樣放進 href）。
+            credit_hrefs: 信用卡頁主內容區裡的連結。
+            discounts: 優惠細則的 id 對放進該頁的文字；沒有列出的 id 不登記（請求會得到 404）。
+        """
+        self.richart_routes[RICHART_DEBIT_PATH] = (200, richart_page_html("RICHART-DEBIT", debit_hrefs).encode())
+        self.richart_routes[RICHART_CREDIT_PATH] = (200, richart_page_html("RICHART-CREDIT", credit_hrefs).encode())
+        for discount_id, label in (discounts or {}).items():
+            self.richart_routes[RICHART_DISCOUNT_FORMAT.format(id=discount_id)] = (
+                200,
+                richart_page_html(label, []).encode(),
+            )
 
     def serve_rights(self, pages: dict[str, str]) -> None:
         """登記權益頁與各權益子頁。
@@ -617,6 +687,7 @@ class ScriptTestCase(unittest.TestCase):
             "TAISHIN_WWW_BASE": self.server.base_url,
             "TAISHIN_MKPCARD_BASE": self.server.base_url,
             "TAISHIN_MKP_BASE": self.mkp_server.base_url,
+            "TAISHIN_RICHART_BASE": self.richart_server.base_url,
             "TAISHIN_CHROME": chrome if chrome is not None else str(self.chrome),
             "TAISHIN_REQUEST_INTERVAL_SEC": interval,
             "PATH": path if path is not None else f"{self.office_bin}{os.pathsep}{os.environ['PATH']}",
@@ -909,18 +980,21 @@ class CardPageTests(ScriptTestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(
             self.files_under_out(),
-            [
-                "_meta/html/card_cg010_card001.html",
-                "_meta/html/card_cg010_card002.html",
-                "_meta/html/card_cg047_card001.html",
-                "_meta/manifest.jsonl",
-                "_meta/print/card_cg010_card001.html",
-                "_meta/print/card_cg010_card002.html",
-                "_meta/print/card_cg047_card001.html",
-                "cards/card_cg010_card001.pdf",
-                "cards/card_cg010_card002.pdf",
-                "cards/card_cg047_card001.pdf",
-            ],
+            sorted(
+                [
+                    "_meta/html/card_cg010_card001.html",
+                    "_meta/html/card_cg010_card002.html",
+                    "_meta/html/card_cg047_card001.html",
+                    "_meta/manifest.jsonl",
+                    "_meta/print/card_cg010_card001.html",
+                    "_meta/print/card_cg010_card002.html",
+                    "_meta/print/card_cg047_card001.html",
+                    "cards/card_cg010_card001.pdf",
+                    "cards/card_cg010_card002.pdf",
+                    "cards/card_cg047_card001.pdf",
+                    *RICHART_DEFAULT_FILES,
+                ]
+            ),
         )
         self.assertTrue((self.out / "cards" / "card_cg047_card001.pdf").read_bytes().startswith(b"%PDF-"))
         self.assertEqual(
@@ -944,15 +1018,18 @@ class DebitCardPageTests(ScriptTestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(
             self.files_under_out(),
-            [
-                "_meta/html/debit_card_cg001_card01.html",
-                "_meta/html/debit_card_cg006_card001.html",
-                "_meta/manifest.jsonl",
-                "_meta/print/debit_card_cg001_card01.html",
-                "_meta/print/debit_card_cg006_card001.html",
-                "debit_cards/debit_card_cg001_card01.pdf",
-                "debit_cards/debit_card_cg006_card001.pdf",
-            ],
+            sorted(
+                [
+                    "_meta/html/debit_card_cg001_card01.html",
+                    "_meta/html/debit_card_cg006_card001.html",
+                    "_meta/manifest.jsonl",
+                    "_meta/print/debit_card_cg001_card01.html",
+                    "_meta/print/debit_card_cg006_card001.html",
+                    "debit_cards/debit_card_cg001_card01.pdf",
+                    "debit_cards/debit_card_cg006_card001.pdf",
+                    *RICHART_DEFAULT_FILES,
+                ]
+            ),
         )
         self.assertTrue((self.out / "debit_cards" / "debit_card_cg001_card01.pdf").read_bytes().startswith(b"%PDF-"))
         self.assertEqual(
@@ -1098,15 +1175,18 @@ class DebitCardNamingTests(ScriptTestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(
             self.files_under_out(),
-            [
-                "_meta/html/card_cg001_card01.html",
-                "_meta/html/debit_card_cg001_card01.html",
-                "_meta/manifest.jsonl",
-                "_meta/print/card_cg001_card01.html",
-                "_meta/print/debit_card_cg001_card01.html",
-                "cards/card_cg001_card01.pdf",
-                "debit_cards/debit_card_cg001_card01.pdf",
-            ],
+            sorted(
+                [
+                    "_meta/html/card_cg001_card01.html",
+                    "_meta/html/debit_card_cg001_card01.html",
+                    "_meta/manifest.jsonl",
+                    "_meta/print/card_cg001_card01.html",
+                    "_meta/print/debit_card_cg001_card01.html",
+                    "cards/card_cg001_card01.pdf",
+                    "debit_cards/debit_card_cg001_card01.pdf",
+                    *RICHART_DEFAULT_FILES,
+                ]
+            ),
         )
         credit_raw = (self.out / "_meta" / "html" / "card_cg001_card01.html").read_text(encoding="utf-8")
         debit_raw = (self.out / "_meta" / "html" / "debit_card_cg001_card01.html").read_text(encoding="utf-8")
@@ -1274,6 +1354,330 @@ class DebitCardUpdateModeTests(ScriptTestCase):
         self.assertEqual(results, {"debit_card_cg001_card001.pdf": "已下載", "debit_card_cg001_card01.pdf": "下架"})
 
 
+class RichartCardPageTests(ScriptTestCase):
+    def test_prints_the_debit_card_page_and_the_credit_card_page_under_fixed_names(self) -> None:
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            self.files_under_out(),
+            [
+                "_meta/html/richart_credit-card.html",
+                "_meta/html/richart_debit-card.html",
+                "_meta/manifest.jsonl",
+                "_meta/print/richart_credit-card.html",
+                "_meta/print/richart_debit-card.html",
+                "richart/richart_credit-card.pdf",
+                "richart/richart_debit-card.pdf",
+            ],
+        )
+        self.assertTrue((self.out / "richart" / "richart_debit-card.pdf").read_bytes().startswith(b"%PDF-"))
+        self.assertEqual(
+            (self.out / "_meta" / "html" / "richart_credit-card.html").read_bytes(),
+            self.richart_routes[RICHART_CREDIT_PATH][1],
+        )
+
+    def test_chrome_gets_the_main_container_only_with_the_page_url_as_base(self) -> None:
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # 假 Chrome 的輸出檔 = 假 PDF 檔頭 + 收到的 HTML
+        received = (self.out / "richart" / "richart_debit-card.pdf").read_text(encoding="utf-8", errors="replace")
+        self.assertIn("RICHART-DEBIT", received)
+        self.assertIn('<img src="data:image/png;base64,AAAA">', received)
+        for text in ("RICHART_SCRIPT_TEXT", "RICHART_INNER_SCRIPT_TEXT", "RICHART-NAV-TEXT", "RICHART-OUTSIDE-MODAL-TEXT", "RICHART-FOOTER-TEXT"):
+            self.assertNotIn(text, received)
+        self.assertIn(f'<base href="{self.richart_server.base_url}{RICHART_DEBIT_PATH}">', received)
+
+    def test_page_without_the_main_container_is_a_failure_and_the_other_page_is_still_downloaded(self) -> None:
+        self.richart_routes[RICHART_CREDIT_PATH] = (200, card_html_without_main_content().encode())
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        records = {r["filename"]: r for r in self.manifest() if r["category"] == "Richart 卡片頁"}
+        self.assertEqual(records["richart_credit-card.pdf"]["result"], "失敗")
+        self.assertIn("找不到主內容區", records["richart_credit-card.pdf"]["detail"])
+        self.assertEqual(records["richart_debit-card.pdf"]["result"], "已下載")
+        self.assertFalse((self.out / "richart" / "richart_credit-card.pdf").exists())
+
+    def test_requests_go_to_the_richart_base_and_not_to_the_taishin_servers(self) -> None:
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            self.richart_server.paths(), [RICHART_DEBIT_PATH, RICHART_CREDIT_PATH, RICHART_DEBIT_PATH, RICHART_CREDIT_PATH]
+        )
+        self.assertFalse([p for p in self.server.paths() if "RichartWeb" in p])
+        self.assertFalse([p for p in self.mkp_server.paths() if "RichartWeb" in p])
+        for _path, _time, user_agent in self.richart_server.requests:
+            self.assertTrue(user_agent.startswith("llm-lab-fetch-taishin/"), user_agent)
+
+    def test_richart_requests_are_spaced_by_at_least_the_configured_interval(self) -> None:
+        self.serve_richart([discount_href("277")], [], {"277": "D277"})
+        interval = 0.3
+        self.assertEqual(self.run_script(interval=str(interval)).returncode, 0)
+        times = [t for _path, t, _ua in self.richart_server.requests]
+        self.assertEqual(len(times), 5)
+        for earlier, later in zip(times, times[1:]):
+            self.assertGreaterEqual(later - earlier, interval - 0.02)
+
+    def test_redirect_to_another_domain_is_not_followed_and_fails_that_page(self) -> None:
+        outside = urlparse(self.mkp_server.base_url).netloc
+        self.richart_server.redirects[RICHART_CREDIT_PATH] = self.mkp_server.base_url + "/outside/page"
+        self.mkp_routes["/outside/page"] = (200, richart_page_html("OUTSIDE", []).encode())
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.mkp_server.paths(), [], "外部網域不該收到請求")
+        failed = [r for r in self.manifest() if r["result"] == "失敗"]
+        self.assertTrue(failed)
+        for record in failed:
+            self.assertIn(f"轉址到外部網域 {outside}", record["detail"])
+        self.assertFalse((self.out / "richart" / "richart_credit-card.pdf").exists())
+        self.assertTrue((self.out / "richart" / "richart_debit-card.pdf").is_file())
+
+    def test_rerun_without_update_skips_existing_card_pages_without_requesting_them_for_download(self) -> None:
+        self.assertEqual(self.run_script().returncode, 0)
+        pdf = self.out / "richart" / "richart_debit-card.pdf"
+        os.utime(pdf, ns=(OLD_MTIME_NS, OLD_MTIME_NS))
+        self.richart_server.requests.clear()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(pdf.stat().st_mtime_ns, OLD_MTIME_NS)
+        # 只剩收集優惠細則連結的那兩次請求
+        self.assertEqual(self.richart_server.paths(), [RICHART_DEBIT_PATH, RICHART_CREDIT_PATH])
+        results = {r["filename"]: r["result"] for r in self.manifest() if r["category"] == "Richart 卡片頁"}
+        self.assertEqual(results, {"richart_debit-card.pdf": "已存在略過", "richart_credit-card.pdf": "已存在略過"})
+
+    def test_card_page_that_cannot_be_fetched_leaves_the_local_file_alone_in_update_mode(self) -> None:
+        self.assertEqual(self.run_script().returncode, 0)
+        pdf = self.out / "richart" / "richart_debit-card.pdf"
+        before = (pdf.read_bytes(), pdf.stat().st_mtime_ns)
+        del self.richart_routes[RICHART_DEBIT_PATH]
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual((pdf.read_bytes(), pdf.stat().st_mtime_ns), before)
+        self.assertTrue((self.out / "_meta" / "html" / "richart_debit-card.html").is_file())
+        self.assertFalse((self.out / "_meta" / "removed").exists())
+        card = {r["filename"]: r["result"] for r in self.manifest() if r["category"] == "Richart 卡片頁"}
+        self.assertEqual(card["richart_debit-card.pdf"], "失敗")
+
+    def test_card_page_with_the_same_main_content_is_unchanged_and_with_new_content_is_converted_again(self) -> None:
+        self.assertEqual(self.run_script().returncode, 0)
+        for file in (self.out / "richart").iterdir():
+            os.utime(file, ns=(OLD_MTIME_NS, OLD_MTIME_NS))
+        self.richart_routes[RICHART_DEBIT_PATH] = (
+            200,
+            richart_page_html("RICHART-DEBIT", []).replace("RICHART-NAV-TEXT", "NAV-CHANGED").encode(),
+        )
+        self.richart_routes[RICHART_CREDIT_PATH] = (200, richart_page_html("RICHART-CREDIT-NEW", []).encode())
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        records = {r["filename"]: r["result"] for r in self.manifest() if r["category"] == "Richart 卡片頁"}
+        self.assertEqual(records, {"richart_debit-card.pdf": "未變", "richart_credit-card.pdf": "內容變更"})
+        self.assertEqual((self.out / "richart" / "richart_debit-card.pdf").stat().st_mtime_ns, OLD_MTIME_NS)
+        self.assertIn("RICHART-CREDIT-NEW", (self.out / "_meta" / "html" / "richart_credit-card.html").read_text(encoding="utf-8"))
+        self.assertIn("Richart 卡片頁：內容變更 1、未變 1", result.stdout)
+
+
+class RichartDiscountTests(ScriptTestCase):
+    def test_discounts_linked_from_either_page_are_downloaded_once_each_and_named_by_id(self) -> None:
+        # 277 在兩頁都有、278 在同一頁連兩次（第二次帶 fragment 與別的 query）；/discount 是優惠列表，不是細則
+        debit = [
+            discount_href("277"),
+            discount_href("278"),
+            discount_href("278") + "&utm=x#notes",
+            "/TSDIB_RichartWeb/discount",
+        ]
+        credit = [discount_href("277"), discount_href("350")]
+        self.serve_richart(debit, credit, {"277": "D277", "278": "D278", "350": "D350"})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            sorted(p.name for p in (self.out / "richart_discounts").iterdir()),
+            ["richart_discount_277.pdf", "richart_discount_278.pdf", "richart_discount_350.pdf"],
+        )
+        paths = self.richart_server.paths()
+        for discount_id in ("277", "278", "350"):
+            self.assertEqual(paths.count(RICHART_DISCOUNT_FORMAT.format(id=discount_id)), 1, discount_id)
+        self.assertEqual(len(paths), 4 + 3, "兩個卡片頁各 2 次（下載、收集細則連結）加 3 則細則各 1 次")
+        records = {r["filename"]: r for r in self.manifest() if r["category"] == "Richart 優惠細則"}
+        self.assertEqual(sorted(records), ["richart_discount_277.pdf", "richart_discount_278.pdf", "richart_discount_350.pdf"])
+        record = records["richart_discount_278.pdf"]
+        self.assertEqual(record["url"], self.richart_server.base_url + RICHART_DISCOUNT_FORMAT.format(id="278"))
+        self.assertEqual((record["result"], record["format"]), ("已下載", "PDF"))
+        self.assertEqual(
+            (self.out / "_meta" / "html" / "richart_discount_278.html").read_bytes(),
+            self.richart_routes[RICHART_DISCOUNT_FORMAT.format(id="278")][1],
+        )
+        self.assertIn(
+            "D278", (self.out / "richart_discounts" / "richart_discount_278.pdf").read_text(encoding="utf-8", errors="replace")
+        )
+
+    def test_links_to_other_domains_are_skipped_without_a_request_a_failure_or_a_manifest_row(self) -> None:
+        outside = self.mkp_server.base_url + RICHART_DISCOUNT_FORMAT.format(id="999")
+        hrefs = [discount_href("277"), outside, "http://example.invalid" + discount_href("998"), BAD_HREF, discount_href("abc")]
+        self.serve_richart(hrefs, [], {"277": "D277"})
+        self.mkp_routes[RICHART_DISCOUNT_FORMAT.format(id="999")] = (200, richart_page_html("D999", []).encode())
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([p.name for p in (self.out / "richart_discounts").iterdir()], ["richart_discount_277.pdf"])
+        self.assertEqual(self.mkp_server.paths(), [])
+        self.assertFalse([p for p in self.richart_server.paths() if "998" in p or "999" in p or "abc" in p])
+        self.assertEqual(
+            [r["filename"] for r in self.manifest() if r["category"] == "Richart 優惠細則"], ["richart_discount_277.pdf"]
+        )
+
+    def test_absolute_links_on_the_richart_domain_are_collected(self) -> None:
+        absolute = self.richart_server.base_url + discount_href("277")
+        self.serve_richart([absolute], [], {"277": "D277"})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([p.name for p in (self.out / "richart_discounts").iterdir()], ["richart_discount_277.pdf"])
+
+    def test_existing_discount_names_do_not_change_when_the_list_grows(self) -> None:
+        self.serve_richart([discount_href("277")], [], {"277": "D277"})
+        self.assertEqual(self.run_script().returncode, 0)
+        first = self.out / "richart_discounts" / "richart_discount_277.pdf"
+        os.utime(first, ns=(OLD_MTIME_NS, OLD_MTIME_NS))
+        self.serve_richart(
+            [discount_href("277"), discount_href("278")], [discount_href("350")], {"277": "D277", "278": "D278", "350": "D350"}
+        )
+        self.richart_server.requests.clear()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            sorted(p.name for p in (self.out / "richart_discounts").iterdir()),
+            ["richart_discount_277.pdf", "richart_discount_278.pdf", "richart_discount_350.pdf"],
+        )
+        self.assertEqual(first.stat().st_mtime_ns, OLD_MTIME_NS)
+        self.assertNotIn(RICHART_DISCOUNT_FORMAT.format(id="277"), self.richart_server.paths(), "已存在的細則不重新請求")
+
+    def test_discount_page_failure_is_recorded_for_that_page_only(self) -> None:
+        self.serve_richart([discount_href("277"), discount_href("278")], [], {"277": "D277"})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        records = {r["filename"]: r for r in self.manifest() if r["category"] == "Richart 優惠細則"}
+        self.assertEqual(records["richart_discount_277.pdf"]["result"], "已下載")
+        self.assertEqual(records["richart_discount_278.pdf"]["result"], "失敗")
+        self.assertIn(f"FAILED {self.richart_server.base_url + discount_href('278')}", result.stderr)
+
+    def test_discount_main_content_is_what_chrome_receives(self) -> None:
+        self.serve_richart([discount_href("277")], [], {"277": "D277"})
+        self.assertEqual(self.run_script().returncode, 0)
+        received = (self.out / "richart_discounts" / "richart_discount_277.pdf").read_text(encoding="utf-8", errors="replace")
+        self.assertIn("D277", received)
+        self.assertNotIn("RICHART-NAV-TEXT", received)
+        self.assertIn(f'<base href="{self.richart_server.base_url}{discount_href("277")}">', received)
+
+
+class RichartDiscountUpdateModeTests(ScriptTestCase):
+    def first_download(self, debit: list[str], credit: list[str], discounts: dict[str, str]) -> None:
+        """第一次下載（不開更新模式），把細則文件的修改時間設成很久以前，清掉請求紀錄。"""
+        self.serve_richart(debit, credit, discounts)
+        self.assertEqual(self.run_script().returncode, 0)
+        for file in (self.out / "richart_discounts").iterdir():
+            os.utime(file, ns=(OLD_MTIME_NS, OLD_MTIME_NS))
+        self.richart_server.requests.clear()
+
+    def removed_dir(self) -> Path:
+        """今天的下架資料夾 DIR/_meta/removed/<日期>/。"""
+        return self.out / "_meta" / "removed" / date.today().isoformat()
+
+    def records(self) -> dict[str, dict[str, str]]:
+        """下載清單中 Richart 優惠細則的紀錄，檔名對紀錄。"""
+        return {r["filename"]: r for r in self.manifest() if r["category"] == "Richart 優惠細則"}
+
+    def local_discounts(self) -> list[str]:
+        """richart_discounts/ 裡的檔名（排序）。"""
+        return sorted(p.name for p in (self.out / "richart_discounts").iterdir())
+
+    def test_discount_with_the_same_main_content_is_unchanged_and_with_new_content_is_converted_again(self) -> None:
+        self.first_download([discount_href("277"), discount_href("278")], [], {"277": "D277", "278": "D278-OLD"})
+        self.serve_richart([discount_href("277"), discount_href("278")], [], {"277": "D277", "278": "D278-NEW"})
+        self.richart_routes[discount_href("277")] = (
+            200,
+            richart_page_html("D277", []).replace("RICHART-NAV-TEXT", "NAV-CHANGED").encode(),
+        )
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        records = self.records()
+        self.assertEqual(records["richart_discount_277.pdf"]["result"], "未變")
+        self.assertEqual(records["richart_discount_278.pdf"]["result"], "內容變更")
+        self.assertEqual((self.out / "richart_discounts" / "richart_discount_277.pdf").stat().st_mtime_ns, OLD_MTIME_NS)
+        self.assertIn("D278-NEW", (self.out / "_meta" / "html" / "richart_discount_278.html").read_text(encoding="utf-8"))
+        self.assertIn("Richart 優惠細則：內容變更 1、未變 1", result.stdout)
+
+    def test_discount_no_longer_linked_from_either_page_is_moved_with_its_html_and_recorded_as_removed(self) -> None:
+        self.first_download(
+            [discount_href("277"), discount_href("278")], [discount_href("350")], {"277": "D277", "278": "D278", "350": "D350"}
+        )
+        pdf_before = (self.out / "richart_discounts" / "richart_discount_278.pdf").read_bytes()
+        self.serve_richart([discount_href("277")], [discount_href("350")], {"277": "D277", "350": "D350"})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        removed = self.removed_dir()
+        self.assertEqual(self.local_discounts(), ["richart_discount_277.pdf", "richart_discount_350.pdf"])
+        self.assertFalse((self.out / "_meta" / "html" / "richart_discount_278.html").exists())
+        self.assertEqual((removed / "richart_discounts" / "richart_discount_278.pdf").read_bytes(), pdf_before)
+        self.assertTrue((removed / "html" / "richart_discount_278.html").is_file())
+        self.assertTrue((removed / "print" / "richart_discount_278.html").is_file())
+        self.assertEqual(self.records()["richart_discount_278.pdf"]["result"], "下架")
+        self.assertIn("Richart 優惠細則：未變 2、下架 1", result.stdout)
+
+    def test_discount_still_linked_from_one_of_the_pages_is_not_removed(self) -> None:
+        self.first_download([discount_href("277")], [discount_href("277")], {"277": "D277"})
+        self.serve_richart([], [discount_href("277")], {"277": "D277"})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.local_discounts(), ["richart_discount_277.pdf"])
+        self.assertFalse((self.out / "_meta" / "removed").exists())
+
+    def test_card_page_that_cannot_be_fetched_blocks_discount_removal_but_new_discounts_are_still_downloaded(self) -> None:
+        self.first_download(
+            [discount_href("277")], [discount_href("278")], {"277": "D277", "278": "D278"}
+        )
+        # 信用卡頁取不到（連結看不到 278）；簽帳金融卡頁成功，連到 277 與新的 350
+        self.serve_richart([discount_href("277"), discount_href("350")], [], {"277": "D277", "278": "D278", "350": "D350"})
+        del self.richart_routes[RICHART_CREDIT_PATH]
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(
+            self.local_discounts(), ["richart_discount_277.pdf", "richart_discount_278.pdf", "richart_discount_350.pdf"]
+        )
+        self.assertFalse((self.out / "_meta" / "removed").exists())
+        for text in ("Richart 優惠細則", "不搬任何檔案", self.richart_server.base_url + RICHART_CREDIT_PATH):
+            self.assertIn(text, result.stderr)
+        self.assertNotIn("下架", [r["result"] for r in self.manifest()])
+
+    def assert_removal_blocked_when_only_this_page_fails(self, failing: str) -> None:
+        """兩頁都不再連到 278，但 failing 那一頁這次取不到：278 不能算下架。"""
+        self.first_download([discount_href("277")], [discount_href("278")], {"277": "D277", "278": "D278"})
+        self.serve_richart([discount_href("277")], [discount_href("277")], {"277": "D277", "278": "D278"})
+        del self.richart_routes[failing]
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.local_discounts(), ["richart_discount_277.pdf", "richart_discount_278.pdf"])
+        self.assertFalse((self.out / "_meta" / "removed").exists())
+
+    def test_debit_card_page_failing_alone_blocks_discount_removal(self) -> None:
+        self.assert_removal_blocked_when_only_this_page_fails(RICHART_DEBIT_PATH)
+
+    def test_credit_card_page_failing_alone_blocks_discount_removal(self) -> None:
+        self.assert_removal_blocked_when_only_this_page_fails(RICHART_CREDIT_PATH)
+
+    def test_both_pages_fetched_but_no_discount_links_while_local_has_discounts_does_not_judge_removal(self) -> None:
+        self.first_download([discount_href("277")], [discount_href("278")], {"277": "D277", "278": "D278"})
+        self.serve_richart([], [])
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        for text in ("Richart 優惠細則", "0 筆", "不搬任何檔案"):
+            self.assertIn(text, result.stderr)
+        self.assertEqual(self.local_discounts(), ["richart_discount_277.pdf", "richart_discount_278.pdf"])
+        self.assertFalse((self.out / "_meta" / "removed").exists())
+
+    def test_no_discount_links_and_no_local_discounts_is_not_a_failure(self) -> None:
+        self.assertEqual(self.run_script().returncode, 0)
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.out / "_meta" / "removed").exists())
+
+
 class RightsPageTests(ScriptTestCase):
     def test_converts_each_rights_subpage_to_docx_with_unique_names_and_keeps_raw_html(self) -> None:
         self.serve_rights({INSURANCE: card_html("INSURANCE"), PARKING: card_html("PARKING"), NOTICE_DASH: card_html("NOTICE")})
@@ -1281,18 +1685,21 @@ class RightsPageTests(ScriptTestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(
             self.files_under_out(),
-            [
-                "_meta/html/rights_insurance_right0201.html",
-                "_meta/html/rights_notice_-00001.html",
-                "_meta/html/rights_parking_right0301.html",
-                "_meta/manifest.jsonl",
-                "_meta/print/rights_insurance_right0201.html",
-                "_meta/print/rights_notice_-00001.html",
-                "_meta/print/rights_parking_right0301.html",
-                "rights/rights_insurance_right0201.docx",
-                "rights/rights_notice_-00001.docx",
-                "rights/rights_parking_right0301.docx",
-            ],
+            sorted(
+                [
+                    "_meta/html/rights_insurance_right0201.html",
+                    "_meta/html/rights_notice_-00001.html",
+                    "_meta/html/rights_parking_right0301.html",
+                    "_meta/manifest.jsonl",
+                    "_meta/print/rights_insurance_right0201.html",
+                    "_meta/print/rights_notice_-00001.html",
+                    "_meta/print/rights_parking_right0301.html",
+                    "rights/rights_insurance_right0201.docx",
+                    "rights/rights_notice_-00001.docx",
+                    "rights/rights_parking_right0301.docx",
+                    *RICHART_DEFAULT_FILES,
+                ]
+            ),
         )
         self.assertTrue((self.out / "rights" / "rights_insurance_right0201.docx").read_bytes().startswith(b"PK"))
         self.assertEqual(
@@ -1311,7 +1718,7 @@ class RightsPageTests(ScriptTestCase):
         self.assertEqual(self.run_script().returncode, 0)
         self.assertTrue((self.out / "cards" / "card_cg047_card001.pdf").is_file())
         self.assertTrue((self.out / "rights" / "rights_insurance_right0201.docx").is_file())
-        self.assertEqual(len(self.manifest()), 2)
+        self.assertEqual(len(self.manifest()), 2 + len(RICHART_DEFAULT_DOCUMENTS))
 
     def test_prints_actual_subpage_count_and_continues_when_it_is_not_46(self) -> None:
         self.serve_rights({INSURANCE: card_html("INSURANCE"), PARKING: card_html("PARKING")})
@@ -1325,7 +1732,7 @@ class RightsPageTests(ScriptTestCase):
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("找到 46 個權益子頁（預期 46）", result.stdout)
-        self.assertEqual(len(self.manifest()), 46)
+        self.assertEqual(len(self.manifest()), 46 + len(RICHART_DEFAULT_DOCUMENTS))
 
 
 class DownloadAreaTests(ScriptTestCase):
@@ -1408,7 +1815,7 @@ class DownloadAreaManifestTests(ScriptTestCase):
         self.serve_downloads([[TERMS]])
         self.assertEqual(self.run_script().returncode, 0)
         records = {r["filename"]: r for r in self.manifest()}
-        self.assertEqual(sorted(records), ["card_cg047_card001.pdf", "download_terms_1150.pdf"])
+        self.assertEqual(sorted(records), sorted(["card_cg047_card001.pdf", "download_terms_1150.pdf", *RICHART_DEFAULT_DOCUMENTS]))
         record = records["download_terms_1150.pdf"]
         pdf = (self.out / "downloads" / "download_terms_1150.pdf").read_bytes()
         self.assertEqual(record["url"], self.server.base_url + TERMS)
@@ -1451,7 +1858,7 @@ class DownloadAreaFailureTests(ScriptTestCase):
         self.assertIn("不是 PDF", result.stderr)
         self.assertEqual(
             [f for f in self.files_under_out() if f != "_meta/manifest.jsonl"],
-            ["downloads/download_word_CR04131_1150B.pdf"],
+            sorted(["downloads/download_word_CR04131_1150B.pdf", *RICHART_DEFAULT_FILES]),
         )
 
     def test_first_page_failure_exits_nonzero_names_the_list_and_keeps_the_other_categories(self) -> None:
@@ -1506,7 +1913,12 @@ class DownloadAreaRerunTests(ScriptTestCase):
         for name, record in second.items():
             self.assertEqual(record["result"], "已存在略過")
             self.assertEqual(record["sha256"], first[name]["sha256"])
-            self.assertEqual(record["html_sha256"], "")
+            if name in RICHART_DEFAULT_DOCUMENTS:
+                # richart.tw 的卡片頁是網頁，清單有原始 HTML 的雜湊
+                self.assertNotEqual(first[name]["html_sha256"], "")
+                self.assertEqual(record["html_sha256"], first[name]["html_sha256"])
+            else:
+                self.assertEqual(record["html_sha256"], "")
 
     def test_failed_pdf_is_fetched_again_on_the_next_run(self) -> None:
         self.serve_downloads([[APPLICATION]])
@@ -1697,15 +2109,18 @@ class OfferListTests(ScriptTestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(
             self.files_under_out(),
-            [
-                f"_meta/html/offer_{wm(1)}.html",
-                f"_meta/html/offer_{wm(2)}.html",
-                "_meta/manifest.jsonl",
-                f"_meta/print/offer_{wm(1)}.html",
-                f"_meta/print/offer_{wm(2)}.html",
-                f"offers/offer_{wm(1)}.pdf",
-                f"offers/offer_{wm(2)}.pdf",
-            ],
+            sorted(
+                [
+                    f"_meta/html/offer_{wm(1)}.html",
+                    f"_meta/html/offer_{wm(2)}.html",
+                    "_meta/manifest.jsonl",
+                    f"_meta/print/offer_{wm(1)}.html",
+                    f"_meta/print/offer_{wm(2)}.html",
+                    f"offers/offer_{wm(1)}.pdf",
+                    f"offers/offer_{wm(2)}.pdf",
+                    *RICHART_DEFAULT_FILES,
+                ]
+            ),
         )
         self.assertTrue((self.out / "offers" / f"offer_{wm(1)}.pdf").read_bytes().startswith(b"%PDF-"))
         self.assertEqual((self.out / "_meta" / "html" / f"offer_{wm(1)}.html").read_bytes(), self.mkp_routes[detail_path(1)][1])
@@ -1725,7 +2140,8 @@ class OfferPeriodTests(ScriptTestCase):
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         records = self.manifest()
-        self.assertEqual(len(records), 1)
+        # 活動排在 richart.tw 的類別前面，所以第一筆是活動
+        self.assertEqual(len(records), 1 + len(RICHART_DEFAULT_DOCUMENTS))
         return records[0]
 
     def test_activity_that_ended_before_today_is_skipped_and_recorded_as_expired(self) -> None:
@@ -1734,7 +2150,9 @@ class OfferPeriodTests(ScriptTestCase):
         self.assertEqual(record["result"], "過期略過")
         self.assertEqual(record["period"], period)
         self.assertEqual(record["category"], "活動")
-        self.assertEqual(self.files_under_out(), ["_meta/html/offer_%s.html" % wm(1), "_meta/manifest.jsonl"])
+        self.assertEqual(
+            self.files_under_out(), sorted(["_meta/html/offer_%s.html" % wm(1), "_meta/manifest.jsonl", *RICHART_DEFAULT_FILES])
+        )
 
     def test_activity_that_ends_today_is_downloaded(self) -> None:
         period = period_from_today(-10, 0)
@@ -2152,7 +2570,7 @@ class ManifestTests(ScriptTestCase):
         self.serve_cards({RICHART: card_html("RICHART"), DAQUANLIAN: card_html("DAQUANLIAN")})
         self.assertEqual(self.run_script().returncode, 0)
         records = {r["filename"]: r for r in self.manifest()}
-        self.assertEqual(sorted(records), ["card_cg010_card001.pdf", "card_cg047_card001.pdf"])
+        self.assertEqual(sorted(records), sorted(["card_cg010_card001.pdf", "card_cg047_card001.pdf", *RICHART_DEFAULT_DOCUMENTS]))
         richart = records["card_cg047_card001.pdf"]
         pdf = (self.out / "cards" / "card_cg047_card001.pdf").read_bytes()
         raw = self.routes[RICHART][1]
@@ -2171,7 +2589,9 @@ class RightsManifestTests(ScriptTestCase):
         self.serve_rights({INSURANCE: card_html("INSURANCE")})
         self.assertEqual(self.run_script().returncode, 0)
         records = {r["filename"]: r for r in self.manifest()}
-        self.assertEqual(sorted(records), ["card_cg047_card001.pdf", "rights_insurance_right0201.docx"])
+        self.assertEqual(
+            sorted(records), sorted(["card_cg047_card001.pdf", "rights_insurance_right0201.docx", *RICHART_DEFAULT_DOCUMENTS])
+        )
         rights = records["rights_insurance_right0201.docx"]
         docx = (self.out / "rights" / "rights_insurance_right0201.docx").read_bytes()
         self.assertEqual(rights["url"], self.server.base_url + INSURANCE)
@@ -2190,7 +2610,7 @@ class OverviewTests(ScriptTestCase):
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("找到 2 張卡片頁（預期 16）", result.stdout)
-        self.assertEqual(len(self.manifest()), 2)
+        self.assertEqual(len(self.manifest()), 2 + len(RICHART_DEFAULT_DOCUMENTS))
 
     def test_prints_count_16_when_there_are_16_cards(self) -> None:
         cards = {CARD_PATH_FORMAT.format(cg=f"cg{n:03d}", card="card001"): card_html(f"CARD{n}") for n in range(16)}
@@ -2198,7 +2618,7 @@ class OverviewTests(ScriptTestCase):
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("找到 16 張卡片頁（預期 16）", result.stdout)
-        self.assertEqual(len(self.manifest()), 16)
+        self.assertEqual(len(self.manifest()), 16 + len(RICHART_DEFAULT_DOCUMENTS))
 
     def test_overview_failure_exits_nonzero_and_names_the_list(self) -> None:
         del self.routes[OVERVIEW_PATH]  # 假 server 對沒有登記的路徑回 404
@@ -2228,13 +2648,15 @@ class OverviewTests(ScriptTestCase):
 
 
 class FailureTests(ScriptTestCase):
-    def assert_failed_page_is_reported(self, result: subprocess.CompletedProcess, filename: str, reason: str) -> None:
+    def assert_failed_page_is_reported(
+        self, result: subprocess.CompletedProcess, filename: str, reason: str, also_failed: tuple[str, ...] = ()
+    ) -> None:
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertIn(filename, result.stderr)
         self.assertIn(reason, result.stderr)
         failed = [r for r in self.manifest() if r["result"] == "失敗"]
-        self.assertEqual([r["filename"] for r in failed], [filename])
+        self.assertEqual([r["filename"] for r in failed], [filename, *also_failed])
         self.assertIn(reason, failed[0]["detail"])
         self.assertEqual(failed[0]["sha256"], "")
 
@@ -2266,7 +2688,10 @@ class FailureTests(ScriptTestCase):
     def test_missing_chrome_names_the_environment_variable(self) -> None:
         self.serve_cards({RICHART: card_html("RICHART")})
         result = self.run_script(chrome=str(self.tmp / "no-such-chrome"))
-        self.assert_failed_page_is_reported(result, "card_cg047_card001.pdf", "TAISHIN_CHROME")
+        # Chrome 不存在時，richart.tw 的兩個卡片頁也印不出來
+        self.assert_failed_page_is_reported(
+            result, "card_cg047_card001.pdf", "TAISHIN_CHROME", also_failed=tuple(RICHART_DEFAULT_DOCUMENTS)
+        )
 
     def test_all_failures_are_listed_at_the_end(self) -> None:
         self.serve_cards({RICHART: card_html("RICHART"), DAQUANLIAN: card_html("DAQUANLIAN")})
@@ -2413,7 +2838,7 @@ class RerunTests(ScriptTestCase):
         self.routes[RICHART] = (200, card_html("RICHART").encode())
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual([r["result"] for r in self.manifest()], ["已下載"])
+        self.assertEqual([r["result"] for r in self.manifest()], ["已下載", "已存在略過", "已存在略過"])
 
 
 class RequestPolicyTests(ScriptTestCase):
@@ -2443,6 +2868,7 @@ class RequestPolicyTests(ScriptTestCase):
         self.assertIn("TAISHIN_REQUEST_INTERVAL_SEC", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(self.server.paths(), [])
+        self.assertEqual(self.richart_server.paths(), [])
 
     def test_out_that_is_a_regular_file_is_rejected_before_any_request(self) -> None:
         self.serve_cards({RICHART: card_html("RICHART")})
@@ -2452,6 +2878,7 @@ class RequestPolicyTests(ScriptTestCase):
         self.assertIn("--out", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(self.server.paths(), [])
+        self.assertEqual(self.richart_server.paths(), [])
 
 
 # ==============================
@@ -2491,7 +2918,7 @@ class UrlHandlingTests(ScriptTestCase):
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
-        self.assertEqual([r["filename"] for r in self.manifest()], ["card_cg047_card001.pdf"])
+        self.assertEqual([r["filename"] for r in self.manifest()], ["card_cg047_card001.pdf", *RICHART_DEFAULT_DOCUMENTS])
 
     def test_a_malformed_href_in_the_download_list_is_skipped_and_the_other_pdfs_are_downloaded(self) -> None:
         self.serve_downloads([[APPLICATION]])
@@ -2508,7 +2935,9 @@ class UrlHandlingTests(ScriptTestCase):
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
-        self.assertEqual([r["filename"] for r in self.manifest()], ["download_word_CR04131_1150B.pdf"])
+        self.assertEqual(
+            [r["filename"] for r in self.manifest()], ["download_word_CR04131_1150B.pdf", *RICHART_DEFAULT_DOCUMENTS]
+        )
 
     def test_a_malformed_href_in_the_offer_list_is_skipped_and_the_other_activities_are_downloaded(self) -> None:
         self.serve_offers({"A": [[BAD_HREF, detail_path(1)]]})
@@ -2524,7 +2953,7 @@ class UrlHandlingTests(ScriptTestCase):
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.server.paths().count(RICHART), 1)
-        self.assertEqual([r["filename"] for r in self.manifest()], ["card_cg047_card001.pdf"])
+        self.assertEqual([r["filename"] for r in self.manifest()], ["card_cg047_card001.pdf", *RICHART_DEFAULT_DOCUMENTS])
         self.assertIn("找到 1 張卡片頁", result.stdout)
 
 
@@ -2909,7 +3338,12 @@ class LibreOfficeProfileTests(ScriptTestCase):
             self.assertFalse(profile.parent.exists(), "轉檔完要移除暫時資料夾")
         self.assertEqual(
             [f for f in self.files_under_out() if not f.startswith("_meta/")],
-            ["rights/rights_insurance_right0201.docx", "rights/rights_parking_right0301.docx"],
+            [
+                "richart/richart_credit-card.pdf",
+                "richart/richart_debit-card.pdf",
+                "rights/rights_insurance_right0201.docx",
+                "rights/rights_parking_right0301.docx",
+            ],
         )
         self.assertEqual([f for f in self.files_under_out() if "profile" in f or "user" in f], [])
 
@@ -3026,7 +3460,14 @@ class RightsAttachmentTests(ScriptTestCase):
         self.assertEqual(self.server.paths().count(DUAL_PDF), 1)
         self.assertEqual(
             [f for f in self.files_under_out() if f.endswith(".pdf")],
-            ["downloads/download_dual-card_01.pdf", "rights_attachments/attachment_dual-card_02.pdf"],
+            sorted(
+                [
+                    "downloads/download_dual-card_01.pdf",
+                    "rights_attachments/attachment_dual-card_02.pdf",
+                    "richart/richart_credit-card.pdf",
+                    "richart/richart_debit-card.pdf",
+                ]
+            ),
         )
         duplicates = [r for r in self.manifest() if r["result"] == "重複略過"]
         self.assertEqual(len(duplicates), 1)
@@ -3397,7 +3838,7 @@ class UpdateModeRemovedFromListTests(ScriptTestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(all(file.is_file() for file in stray))
         self.assertFalse((self.out / "_meta" / "removed").exists())
-        self.assertEqual([r["filename"] for r in self.manifest()], ["card_cg047_card001.pdf"])
+        self.assertEqual([r["filename"] for r in self.manifest()], ["card_cg047_card001.pdf", *RICHART_DEFAULT_DOCUMENTS])
 
     def test_empty_list_is_fine_when_the_local_folder_has_only_files_that_are_not_documents(self) -> None:
         (self.out / "cards").mkdir(parents=True)
