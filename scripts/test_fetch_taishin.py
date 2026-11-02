@@ -2816,5 +2816,177 @@ class RightsAttachmentRequestPolicyTests(ScriptTestCase):
         self.assertTrue(all(user_agent.startswith("llm-lab-fetch-taishin/") for _p, _t, user_agent in requests))
 
 
+class UpdateModeRemovedFromListTests(ScriptTestCase):
+    def download_cards(self, cards: dict[str, str]) -> None:
+        """第一次下載（不開更新模式）這些卡片，清掉請求紀錄。
+
+        Args:
+            cards: 卡片頁路徑對頁面 HTML。
+        """
+        self.serve_cards(cards)
+        self.assertEqual(self.run_script().returncode, 0)
+        self.server.requests.clear()
+
+    def removed_dir(self) -> Path:
+        """今天的下架資料夾 DIR/_meta/removed/<日期>/。"""
+        return self.out / "_meta" / "removed" / date.today().isoformat()
+
+    def test_card_missing_from_the_list_is_moved_with_its_html_and_recorded_as_removed(self) -> None:
+        self.download_cards({RICHART: card_html("RICHART"), DAQUANLIAN: card_html("DQL")})
+        pdf_before = (self.out / "cards" / "card_cg010_card001.pdf").read_bytes()
+        html_before = (self.out / "_meta" / "html" / "card_cg010_card001.html").read_bytes()
+        print_before = (self.out / "_meta" / "print" / "card_cg010_card001.html").read_bytes()
+        self.serve_cards({RICHART: card_html("RICHART")})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        removed = self.removed_dir()
+        self.assertFalse((self.out / "cards" / "card_cg010_card001.pdf").exists())
+        self.assertFalse((self.out / "_meta" / "html" / "card_cg010_card001.html").exists())
+        self.assertFalse((self.out / "_meta" / "print" / "card_cg010_card001.html").exists())
+        self.assertEqual((removed / "cards" / "card_cg010_card001.pdf").read_bytes(), pdf_before)
+        self.assertEqual((removed / "html" / "card_cg010_card001.html").read_bytes(), html_before)
+        self.assertEqual((removed / "print" / "card_cg010_card001.html").read_bytes(), print_before)
+        self.assertTrue((self.out / "cards" / "card_cg047_card001.pdf").is_file(), "還在列表裡的卡片不動")
+        self.assertTrue((self.out / "_meta" / "html" / "card_cg047_card001.html").is_file())
+        records = {r["filename"]: r for r in self.manifest() if r["category"] == "卡片"}
+        self.assertEqual(records["card_cg010_card001.pdf"]["result"], "下架")
+        self.assertEqual(records["card_cg047_card001.pdf"]["result"], "已存在略過")
+        self.assertIn("卡片：已存在略過 1、下架 1", result.stdout)
+
+    def test_rights_downloads_and_activities_missing_from_their_lists_are_moved_too(self) -> None:
+        self.serve_rights({INSURANCE: card_html("INSURANCE"), PARKING: card_html("PARKING")})
+        self.serve_downloads([[APPLICATION, TERMS]])
+        self.serve_offers({"A": [[detail_path(1), detail_path(2)]]})
+        self.serve_details({detail_path(n): offer_detail_html(f"OFFER{n}", period="2099-01-01~2099-12-31") for n in (1, 2)})
+        self.assertEqual(self.run_script().returncode, 0)
+        self.serve_rights({INSURANCE: card_html("INSURANCE")})
+        self.serve_downloads([[APPLICATION]])
+        self.serve_offers({"A": [[detail_path(1)]]})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        removed = self.removed_dir()
+        moved = sorted(str(p.relative_to(removed)) for p in removed.rglob("*") if p.is_file())
+        self.assertEqual(
+            moved,
+            [
+                "downloads/download_terms_1150.pdf",
+                f"html/offer_{wm(2)}.html",
+                "html/rights_parking_right0301.html",
+                f"offers/offer_{wm(2)}.pdf",
+                f"print/offer_{wm(2)}.html",
+                "print/rights_parking_right0301.html",
+                "rights/rights_parking_right0301.docx",
+            ],
+        )
+        results = {(r["category"], r["filename"]): r for r in self.manifest() if r["result"] == "下架"}
+        self.assertEqual(
+            sorted(results),
+            [("下載", "download_terms_1150.pdf"), ("權益", "rights_parking_right0301.docx"), ("活動", f"offer_{wm(2)}.pdf")],
+        )
+        offer = results[("活動", f"offer_{wm(2)}.pdf")]
+        self.assertEqual(offer["period"], "2099-01-01~2099-12-31")
+        self.assertEqual(offer["html_sha256"], hashlib.sha256(self.mkp_routes[detail_path(2)][1]).hexdigest())
+        self.assertEqual(offer["sha256"], hashlib.sha256((removed / "offers" / f"offer_{wm(2)}.pdf").read_bytes()).hexdigest())
+        self.assertEqual(results[("下載", "download_terms_1150.pdf")]["html_sha256"], "")
+        self.assertIn("下載：未變 1、下架 1", result.stdout)
+        self.assertTrue((self.out / "offers" / f"offer_{wm(1)}.pdf").is_file())
+
+    def test_no_move_without_update_mode(self) -> None:
+        self.download_cards({RICHART: card_html("RICHART"), DAQUANLIAN: card_html("DQL")})
+        self.serve_cards({RICHART: card_html("RICHART")})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.out / "cards" / "card_cg010_card001.pdf").is_file())
+        self.assertFalse((self.out / "_meta" / "removed").exists())
+        self.assertNotIn("下架", [r["result"] for r in self.manifest()])
+
+    def test_every_card_missing_from_a_non_empty_list_is_moved_because_there_is_no_ratio_threshold(self) -> None:
+        self.download_cards({RICHART: card_html("RICHART"), DAQUANLIAN: card_html("DQL")})
+        self.serve_cards({DAQUANLIAN_2: card_html("DQL2")})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            sorted(p.name for p in (self.out / "cards").iterdir()), ["card_cg010_card002.pdf"]
+        )
+        self.assertEqual(
+            sorted(p.name for p in (self.removed_dir() / "cards").iterdir()),
+            ["card_cg010_card001.pdf", "card_cg047_card001.pdf"],
+        )
+
+    def test_destination_with_the_same_name_is_not_overwritten_and_the_moved_file_gets_a_time_suffix(self) -> None:
+        self.download_cards({RICHART: card_html("RICHART"), DAQUANLIAN: card_html("DQL")})
+        moved_pdf = self.out / "cards" / "card_cg010_card001.pdf"
+        moved_bytes = moved_pdf.read_bytes()
+        occupied = self.removed_dir() / "cards" / "card_cg010_card001.pdf"
+        occupied.parent.mkdir(parents=True)
+        occupied.write_bytes(b"earlier removal")
+        self.serve_cards({RICHART: card_html("RICHART")})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(occupied.read_bytes(), b"earlier removal")
+        suffixed = [p for p in occupied.parent.iterdir() if p != occupied]
+        self.assertEqual(len(suffixed), 1)
+        self.assertRegex(suffixed[0].name, r"^card_cg010_card001_\d{6,}\.pdf$")
+        self.assertEqual(suffixed[0].read_bytes(), moved_bytes)
+        self.assertFalse(moved_pdf.exists())
+
+    def test_list_request_failure_moves_nothing_in_that_category_and_names_the_reason_but_other_categories_proceed(self) -> None:
+        self.download_cards({RICHART: card_html("RICHART"), DAQUANLIAN: card_html("DQL")})
+        self.serve_downloads([[APPLICATION, TERMS]])
+        self.assertEqual(self.run_script().returncode, 0)
+        self.routes[OVERVIEW_PATH] = (500, b"boom")
+        self.serve_downloads([[APPLICATION]])
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        for text in ("信用卡總覽", "500", "不搬任何檔案"):
+            self.assertIn(text, result.stderr)
+        self.assertEqual(
+            sorted(p.name for p in (self.out / "cards").iterdir()), ["card_cg010_card001.pdf", "card_cg047_card001.pdf"]
+        )
+        self.assertTrue((self.out / "_meta" / "html" / "card_cg010_card001.html").is_file())
+        self.assertFalse((self.removed_dir() / "cards").exists())
+        self.assertTrue((self.removed_dir() / "downloads" / "download_terms_1150.pdf").is_file())
+
+    def test_list_that_parses_to_zero_entries_while_local_has_documents_is_treated_as_a_failed_list(self) -> None:
+        self.download_cards({RICHART: card_html("RICHART"), DAQUANLIAN: card_html("DQL")})
+        self.serve_cards({})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        for text in ("信用卡總覽", "0 筆", "不搬任何檔案"):
+            self.assertIn(text, result.stderr)
+        self.assertEqual(
+            sorted(p.name for p in (self.out / "cards").iterdir()), ["card_cg010_card001.pdf", "card_cg047_card001.pdf"]
+        )
+        self.assertFalse((self.out / "_meta" / "removed").exists())
+
+    def test_empty_activity_list_moves_no_activity_but_empty_list_for_a_category_without_local_documents_is_fine(self) -> None:
+        self.serve_offers({"A": [[detail_path(1)]]})
+        self.serve_details({detail_path(1): offer_detail_html("OFFER1")})
+        self.assertEqual(self.run_script().returncode, 0)
+        self.serve_offers({})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("刷卡優惠", result.stderr)
+        self.assertTrue((self.out / "offers" / f"offer_{wm(1)}.pdf").is_file())
+        self.assertFalse((self.out / "_meta" / "removed").exists())
+        # 卡片、權益、下載本來就沒有本地文件，列表是空的不算失敗；結束碼 1 只來自活動
+        self.assertEqual(result.stderr.count("ERROR 列表"), 1)
+
+    def test_failure_to_move_is_recorded_as_failed_and_exits_nonzero(self) -> None:
+        self.download_cards({RICHART: card_html("RICHART"), DAQUANLIAN: card_html("DQL")})
+        self.serve_cards({RICHART: card_html("RICHART")})
+        # 今天的下架資料夾位置被一個檔案佔住，所以建不出資料夾
+        (self.out / "_meta" / "removed").write_bytes(b"not a folder")
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        record = {r["filename"]: r for r in self.manifest()}["card_cg010_card001.pdf"]
+        self.assertEqual(record["result"], "失敗")
+        self.assertIn("搬移失敗", record["detail"])
+        self.assertTrue((self.out / "cards" / "card_cg010_card001.pdf").is_file(), "沒搬成功，原檔留著")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -23,9 +23,9 @@
 - DIR/_meta/manifest.jsonl：下載清單，一行一份文件。_meta 不會被匯入。欄位 period 是活動的活動期間
   （YYYY-MM-DD~YYYY-MM-DD，讀不出來是「期間不明」），其他類別為空字串。result 除了已下載、已存在略過、失敗，
   還有「過期略過」（活動）、「格式不支援略過」（活動圖片）、「外部網域略過」與「重複略過」（權益附件）。
-  更新模式另有「內容變更」與「未變」（見下面「更新模式」）。
+  更新模式另有「內容變更」、「未變」與「下架」（見下面「更新模式」）。
 
-更新模式（--update，增量更新 spec 的下載端；目前涵蓋文件下載區的 PDF 與網頁類，其他類別還沒有）：
+更新模式（--update，增量更新 spec 的下載端；目前涵蓋文件下載區 PDF 與網頁類的比對，以及卡片、權益、下載、活動四個列表類別的下架）：
 - 文件下載區的 PDF：本地已有的檔案重新下載一次並比對 SHA-256。內容不同才換掉原檔，清單記「內容變更」；相同就不碰原檔
   （位元組與修改時間都不變，清單記「未變」），這樣之後匯入時沒變的文件可以走 RAG-Anything 的解析快取（快取鍵含修改時間與內容雜湊）。
   新出現的 PDF 沿用「已下載」。下載失敗（HTTP、網路、內容不是 PDF）時原檔不動，清單記「失敗」，結束碼 1。
@@ -38,8 +38,21 @@
   文件不存在（存檔的原始 HTML 在，第一次下載時轉檔失敗留下的狀態）時不比對，照新增處理：用這次取得的原始 HTML 轉檔，成功記「已下載」；
   活動的存檔 HTML 讀出的期間已過期時除外，不請求、不轉檔，記「過期略過」。
   文件在但存檔的原始 HTML 不在（無法比對）時視為變更（ASSUMPTION）。
+- 下架（卡片、權益、下載、活動；權益附件與活動圖片的下架判斷還沒做）：這次官網列表裡沒有、本地類別資料夾（第一層）裡有的文件，
+  連同它在 DIR/_meta/html/、DIR/_meta/print/ 的檔案（有才搬），搬到 DIR/_meta/removed/<下載當天>/，底下保留原本的相對路徑：
+  文件到 <類別資料夾>/<檔名>，原始 HTML 到 html/<名稱>.html，列印用 HTML 到 print/<名稱>.html。清單記「下架」。
+  _meta 在資料根目錄，不在類別資料夾底下，所以匯入時不會挑到搬走的檔案。這樣之後匯入端才看得到這份文件已經不在。
+  - 目的地已有同名檔時，在檔名後加時間（_HHMMSS 加微秒），不覆寫（ASSUMPTION，見增量更新 spec）。
+  - 下架清單紀錄的網址是空字串：本地只有檔案，沒有它的網址，不去翻上一次的清單（ASSUMPTION）。
+  - 搬移時的檔案系統錯誤，那一份記「失敗」並寫出原因（結束碼 1），其餘文件照常處理。
+  - 不設下架數量的比例門檻：列表有 1 筆以上時，其餘本地文件全部算下架。
+  - 某個類別的列表頁沒有成功取得（請求失敗、逾時、翻頁失敗），那個類別這次不搬任何檔案，stderr 寫明列表與原因，結束碼 1，其他類別照常。
+    列表頁回應成功、卻解析出 0 筆，而本地這個類別資料夾有文件時，也當成列表頁沒有成功取得（官網改版讓解析失效的可能高於整類下架），
+    不搬任何檔案，stderr 寫明，結束碼 1；本地沒有文件時，0 筆不算失敗。
+  - 判斷只看類別資料夾裡的檔名是否在這次列表算出的檔名之內（檔名規則見下面「本地檔名」）。同一類別兩個網址組出同一個檔名而加了網址雜湊後綴的
+    情況，列表增減會改變後綴，舊檔名會被當成下架、新檔名當成新增。
 - 其他類別（權益附件、活動圖片）在更新模式下和不加 --update 時一樣：本地已有就略過。
-  權益附件的比對、下架（本地有、官網列表沒有）、活動過期與圖片的處理都還沒做。
+  權益附件的比對與下架、活動過期與圖片的處理都還沒做。
 - 結束時多印一段「各類別統計」：每個類別每種結果的數量。不加 --update 時不印。
 - 請求間隔、網域限制與轉址規則和不加 --update 時相同。
 
@@ -141,10 +154,7 @@
 - 刷卡優惠每個分類的翻頁上限 OFFER_MAX_PAGES（ASSUMPTION：20，2026-10-30 實測 A=5、B=4、I=2 頁，C–H 未實測）。
   翻滿上限仍有新連結時，視為刷卡優惠列表失敗。
 - 圖片只檢查檔頭和副檔名一致，不檢查圖片是否完整、能不能解碼。沒有大小上限（ASSUMPTION）。
-- 活動已存在而再次執行時（不論有沒有加 --update，更新模式還沒做活動過期），不重新判斷是否過期：已下載的活動 PDF 與圖片留著
-  （加 --update 時活動頁仍會比對主內容區，內容變了就重新轉檔，期間過期了也一樣）；不加 --update 時清單記為已存在略過。
-- 已過期的活動，再次執行時依上次存下的原始 HTML 判斷，不再請求；官網之後延長該活動的期間，要刪除 `_meta/html` 裡那個檔案才會重新下載
-  （更新模式還沒做活動過期，加 --update 也一樣）。
+        help="更新模式：已存在的下載區 PDF 與網頁類重新取得並比對內容，不同才換掉；官網列表已沒有的文件搬到 _meta/removed/<日期>/；結束時印出各類別、各結果的數量",
 - 更新模式的 PDF 比對把整份回應讀進記憶體再算雜湊（ASSUMPTION：2026-10-30 下載區最大的 PDF 約 6.7 MB，不另外做串流；現有的下載本來就是整份讀進記憶體）。
 - 行內 `style="display:none"` 沒有處理：2026-10-30 實測轉出率 0.93–1.01，沒有因此漏字。
 - 列印前拿掉註解與 <iframe>、樣式表連結，所以 iframe 裡的內容與外部樣式表不會出現在 PDF／.docx；<object>、<embed> 沒有處理
@@ -170,7 +180,7 @@ import urllib.request
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from datetime import date
+from datetime import date, datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import IO
@@ -247,12 +257,14 @@ RESULT_EXTERNAL = "外部網域略過"
 RESULT_DUPLICATE = "重複略過"
 RESULT_CHANGED = "內容變更"
 RESULT_UNCHANGED = "未變"
+RESULT_REMOVED = "下架"
 # 結束時統計的顯示順序
 RESULT_ORDER = (
     RESULT_DOWNLOADED,
     RESULT_CHANGED,
     RESULT_UNCHANGED,
     RESULT_SKIPPED,
+    RESULT_REMOVED,
     RESULT_EXPIRED,
     RESULT_UNSUPPORTED,
     RESULT_EXTERNAL,
@@ -1775,6 +1787,23 @@ IMAGES = Category(
     refresh=None,
 )
 CATEGORIES = (CARDS, RIGHTS, DOWNLOADS, ATTACHMENTS, ACTIVITIES, IMAGES)
+# 更新模式下，列表裡沒有的文件會被搬走的類別（權益附件與活動圖片的下架判斷不依列表，另外處理）
+REMOVAL_CATEGORIES = (CARDS, RIGHTS, DOWNLOADS, ACTIVITIES)
+
+
+def document_filename(category: Category, url: str, name: str) -> str:
+    """文件在類別資料夾裡的檔名。
+
+    Args:
+        category: 文件所屬的類別。
+        url: 文件完整網址。
+        name: 本地名稱（不含副檔名）。
+
+    Returns:
+        name 加上副檔名；沒有副檔名時就是 name。
+    """
+    extension = category.extension_of(url)
+    return f"{name}.{extension}" if extension else name
 
 
 def fetch_document(run: Run, category: Category, url: str, name: str) -> Record:
@@ -1789,8 +1818,7 @@ def fetch_document(run: Run, category: Category, url: str, name: str) -> Record:
     Returns:
         下載清單的一筆紀錄；失敗時 result 是「失敗」，detail 是原因。
     """
-    extension = category.extension_of(url)
-    filename = f"{name}.{extension}" if extension else name
+    filename = document_filename(category, url, name)
     record = Record(url, category.name, filename, category.fmt, run.today.isoformat(), "", "", RESULT_FAILED, "")
     target = run.out / category.folder / filename
     raw_path = run.out / "_meta" / "html" / f"{name}.html"
@@ -1826,6 +1854,109 @@ def fetch_document(run: Run, category: Category, url: str, name: str) -> Record:
     except OSError as exc:
         record.detail = f"檔案系統錯誤（{type(exc).__name__}: {exc}）"
     return record
+
+
+# ==============================
+# 更新模式：官網列表已沒有的文件
+# ==============================
+
+
+def local_documents(run: Run, category: Category) -> list[str]:
+    """類別資料夾裡現有的文件檔名（ingest 不遞迴，所以只看資料夾第一層的檔案）。
+
+    Args:
+        run: 一次執行共用的設定。
+        category: 要看哪個類別的資料夾。
+
+    Returns:
+        排序後的檔名；資料夾不存在時為空。
+    """
+    folder = run.out / category.folder
+    if not folder.is_dir():
+        return []
+    return sorted(p.name for p in folder.iterdir() if p.is_file())
+
+
+def free_destination(destination: Path) -> Path:
+    """目的地已有同名檔時，在檔名後加時間（ASSUMPTION：時分秒加微秒，不覆寫）。
+
+    Args:
+        destination: 想搬到的路徑。
+
+    Returns:
+        沒有檔案佔用的路徑：destination 本身，或副檔名前加上 _<HHMMSSffffff> 的路徑。
+    """
+    if not destination.exists():
+        return destination
+    stamp = datetime.now().strftime("%H%M%S%f")
+    return destination.with_name(f"{destination.stem}_{stamp}{destination.suffix}")
+
+
+def move_removed(run: Run, category: Category, filename: str) -> Record:
+    """把一份官網列表已沒有的文件，連同它的原始 HTML 與列印用 HTML，搬到 DIR/_meta/removed/<日期>/。
+
+    底下保留原本的相對路徑：文件到 <類別資料夾>/<檔名>，原始 HTML 到 html/<名稱>.html，列印用 HTML 到 print/<名稱>.html。
+    清單紀錄的網址是空字串（ASSUMPTION：本地只有檔案，沒有它的網址；不去翻上一次的清單）。
+
+    Args:
+        run: 一次執行共用的設定。
+        category: 文件所屬的類別。
+        filename: 文件在類別資料夾裡的檔名。
+
+    Returns:
+        結果是「下架」的清單紀錄；搬移時發生檔案系統錯誤則是「失敗」，detail 寫出原因。
+    """
+    name = Path(filename).stem
+    meta = run.out / "_meta"
+    destination_root = meta / "removed" / run.today.isoformat()
+    document = run.out / category.folder / filename
+    raw_html = meta / "html" / f"{name}.html"
+    print_html = meta / "print" / f"{name}.html"
+    record = Record(
+        "",
+        category.name,
+        filename,
+        category.fmt,
+        date.fromtimestamp(document.stat().st_mtime).isoformat(),
+        sha256_of(document),
+        sha256_of(raw_html) if category.keeps_html and raw_html.is_file() else "",
+        RESULT_FAILED,
+        "",
+    )
+    if category.reads_period and raw_html.is_file():
+        record.period = period_label(read_offer_period(saved_html(raw_html)))
+    moves = [
+        (document, destination_root / category.folder / filename),
+        *(
+            (source, destination_root / source.parent.name / source.name)
+            for source in (raw_html, print_html)
+            if source.is_file()
+        ),
+    ]
+    try:
+        for source, destination in moves:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            source.rename(free_destination(destination))
+    except OSError as exc:
+        record.detail = f"搬移失敗（{type(exc).__name__}: {exc}）"
+        return record
+    record.result = RESULT_REMOVED
+    record.detail = f"官網列表已沒有，搬到 _meta/removed/{run.today.isoformat()}/"
+    return record
+
+
+def remove_missing(run: Run, category: Category, filenames: set[str]) -> list[Record]:
+    """本地有、這次官網列表沒有的文件算下架，逐份搬走。
+
+    Args:
+        run: 一次執行共用的設定。
+        category: 要判斷的類別；它的列表這次必須成功取得。
+        filenames: 這次列表裡所有文件的檔名。
+
+    Returns:
+        每一份下架（或搬移失敗）文件的清單紀錄。
+    """
+    return [move_removed(run, category, name) for name in local_documents(run, category) if name not in filenames]
 
 
 # ==============================
@@ -1875,7 +2006,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--update",
         action="store_true",
-        help="更新模式：已存在的下載區 PDF 與網頁類重新取得並比對內容，不同才換掉；結束時印出各類別、各結果的數量",
+- 活動已存在而再次執行時（不論有沒有加 --update，更新模式還沒涵蓋活動的過期判斷），不重新判斷是否過期：已下載的活動 PDF 與圖片留著
+  （加 --update 時活動頁仍會比對主內容區，內容變了就重新轉檔，期間過期了也一樣）；不加 --update 時清單記為已存在略過。
+- 已過期的活動，再次執行時依上次存下的原始 HTML 判斷，不再請求；官網之後延長該活動的期間，要刪除 `_meta/html` 裡那個檔案才會重新下載
+  （更新模式還沒涵蓋活動的過期判斷，加 --update 也一樣）。
     )
     return parser.parse_args(argv)
 
@@ -1911,10 +2045,22 @@ def main(argv: list[str]) -> int:
     failed_lists: list[str] = []
     for category in CATEGORIES:
         list_url = run.base(category.list_site) + category.list_path
+        removable = run.update and category in REMOVAL_CATEGORIES
         try:
             urls = category.collect(run, category)
         except FetchError as exc:
-            print(f"ERROR 列表「{category.list_name}」（{list_url}）失敗：{exc}", file=sys.stderr)
+            note = "；這個類別這次不搬任何檔案" if removable else ""
+            print(f"ERROR 列表「{category.list_name}」（{list_url}）失敗：{exc}{note}", file=sys.stderr)
+            failed_lists.append(category.list_name)
+            continue
+        if removable and not urls and local_documents(run, category):
+            # 回應成功卻解析出 0 筆，而本地有文件：官網改版讓解析失效的可能高於整類下架，當成列表沒有取得
+            print(
+                f"ERROR 列表「{category.list_name}」（{list_url}）回應成功但解析出 0 筆，"
+                f"本地 {category.folder}/ 有 {len(local_documents(run, category))} 份文件；"
+                "當成列表沒有成功取得，這個類別這次不搬任何檔案",
+                file=sys.stderr,
+            )
             failed_lists.append(category.list_name)
             continue
         run.found[category.name] = urls
@@ -1922,6 +2068,9 @@ def main(argv: list[str]) -> int:
         print(f"{category.list_label}找到 {len(urls)} {category.unit}{expected}")
         names = category.local_names(urls)
         records.extend(fetch_document(run, category, url, names[url]) for url in urls)
+        if removable:
+            listed = {document_filename(category, url, names[url]) for url in urls}
+            records.extend(remove_missing(run, category, listed))
 
     write_manifest(args.out, records)
     for r in records:
