@@ -33,3 +33,12 @@ ASSUMPTION：
 範圍外發現：
 
 - 無。
+
+### code-review 修正 1：轉址到外部網域的子頁不阻擋附件下架（2026-11-02）
+
+真實官網的 Visa、Mastercard、JCB 權益子頁每次都記「失敗：轉址到外部網域…，不跟隨」（主 checkout 的 `data/taishin_credit_card/_meta/manifest.jsonl`），原本會讓 `attachment_removal_blocker` 永遠回傳原因，附件下架因此永遠不會執行。
+
+- `attachment_removal_blocker` 不再把失敗原因是「轉址到外部網域」的權益子頁算進去：這類子頁從來沒有內容，也不提供附件連結。請求失敗、轉檔失敗、搬移失敗照樣阻擋。失敗原因開頭的字串抽成常數 `EXTERNAL_REDIRECT`，轉址處理與判斷共用。
+- 測試：`test_subpage_that_always_redirects_to_another_domain_does_not_block_the_removal_judgement`（先紅：stderr 出現「權益附件這次不判斷下架」；修後綠）。
+
+範圍外發現：這三個子頁讓每次執行的結束碼都是 1，是既有行為，沒有改。

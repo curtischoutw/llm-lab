@@ -60,6 +60,8 @@
     只要還有一頁連到就不算；子頁本身下架（搬走、不在權益列表）時，它不再貢獻候選。搬移方式與上面的下架相同，清單記「下架」。
   - 權益列表沒有成功取得，或任何一個權益子頁處理失敗（請求失敗，或內容變了但轉檔失敗而存檔沒換）時，這次不判斷附件下架，
     不搬任何附件，stderr 寫「權益附件這次不判斷下架」與原因；原因本身已讓結束碼是 1，下次子頁都成功時再判斷。
+    例外：失敗原因是「轉址到外部網域」的子頁不算（真實官網的 Visa、Mastercard、JCB 子頁每次都是）：它從來沒有內容，
+    也不會提供附件連結。其他失敗（請求、轉檔、搬移）照樣阻擋。
   - ASSUMPTION：權益子頁都成功取得、但連到的 PDF 一個也沒有時，本地的附件全部算下架（不像列表類別有 0 筆的防護，因為規格只對列表頁定了這條）。
     附件下架紀錄的網址是空字串，沿用列表類別下架的做法。
 - 活動過期與活動圖片（更新模式；活動列表沒有成功取得時，這次不判斷活動過期，也不判斷活動圖片，見上面的列表失敗規則）：
@@ -278,6 +280,9 @@ CHROME_PREFERENCES = {"profile": {"default_content_setting_values": {"javascript
 # 固定的列印用 CSS：圖片不超出頁寬，表格有框線
 PRINT_CSS = "img{max-width:100%;height:auto}table{border-collapse:collapse}td,th{border:1px solid #999;padding:2px}"
 
+# 轉址到外部網域的失敗原因開頭（_SameDomainRedirectHandler 寫入；attachment_removal_blocker 靠它辨認這類失敗）
+EXTERNAL_REDIRECT = "轉址到外部網域"
+
 RESULT_DOWNLOADED = "已下載"
 RESULT_SKIPPED = "已存在略過"
 RESULT_FAILED = "失敗"
@@ -383,7 +388,7 @@ class _SameDomainRedirectHandler(urllib.request.HTTPRedirectHandler):
         target = urlparse(newurl).netloc
         if target.lower() != self.domain:
             fp.close()
-            raise FetchError(f"轉址到外部網域 {target}，不跟隨")
+            raise FetchError(f"{EXTERNAL_REDIRECT} {target}，不跟隨")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -2113,6 +2118,8 @@ def attachment_removal_blocker(records: list[Record], failed_lists: list[str]) -
     """權益附件這次能不能判斷下架：權益列表與每個權益子頁都要成功取得。
 
     子頁內容變了但轉檔失敗時存檔的原始 HTML 不換，附件的候選讀的是舊的連結，所以請求失敗與轉檔失敗都算沒有成功取得。
+    例外：失敗原因是轉址到外部網域的子頁（真實官網的 Visa、Mastercard、JCB 權益子頁每次都是）不算：它從來沒有內容，
+    也不會提供附件連結，不影響附件候選。
 
     Args:
         records: 目前為止這次執行的紀錄（權益類別已處理完）。
@@ -2123,7 +2130,11 @@ def attachment_removal_blocker(records: list[Record], failed_lists: list[str]) -
     """
     if RIGHTS.list_name in failed_lists:
         return f"權益列表「{RIGHTS.list_name}」沒有成功取得"
-    failed = [r.filename for r in records if r.category == RIGHTS.name and r.result == RESULT_FAILED]
+    failed = [
+        r.filename
+        for r in records
+        if r.category == RIGHTS.name and r.result == RESULT_FAILED and not r.detail.startswith(EXTERNAL_REDIRECT)
+    ]
     if failed:
         return f"{len(failed)} 個權益子頁請求、轉檔或搬移失敗（{'、'.join(failed)}）"
     return None

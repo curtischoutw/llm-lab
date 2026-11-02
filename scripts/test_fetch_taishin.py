@@ -3116,6 +3116,20 @@ class UpdateModeAttachmentTests(ScriptTestCase):
         self.assertIn("權益附件這次不判斷下架", result.stderr)
         self.assertIn("rights_right_right0704.docx", result.stderr)
 
+    def test_subpage_that_always_redirects_to_another_domain_does_not_block_the_removal_judgement(self) -> None:
+        # 真實官網的 Visa、Mastercard、JCB 權益子頁每次都轉址到國際組織網站：它從來沒有內容，也不提供附件連結
+        pages = {DUAL_PAGE: [DUAL_PDF, DUAL_PDF_2], INSURANCE: []}
+        self.serve_pages(pages)
+        self.server.redirects[INSURANCE] = self.mkp_server.base_url + "/outside/page/"
+        self.assertEqual(self.run_script().returncode, 1, "轉址到外部網域的子頁讓結束碼是 1，是既有行為")
+        self.serve_pages({DUAL_PAGE: [DUAL_PDF], INSURANCE: []})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("權益附件這次不判斷下架", result.stderr)
+        self.assertFalse((self.out / "rights_attachments" / "attachment_dual-card_02.pdf").exists())
+        self.assertTrue((self.removed_dir() / "rights_attachments" / "attachment_dual-card_02.pdf").is_file())
+        self.assertEqual(self.attachment_records()["attachment_dual-card_02.pdf"]["result"], "下架")
+
     def test_removal_is_not_judged_when_a_subpage_conversion_failed_and_is_judged_on_the_next_successful_run(self) -> None:
         self.first_download({DUAL_PAGE: [DUAL_PDF, DUAL_PDF_2]})
         self.serve_pages({DUAL_PAGE: [DUAL_PDF]})
