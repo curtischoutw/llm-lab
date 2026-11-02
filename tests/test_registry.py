@@ -248,12 +248,13 @@ class RegistryPythonApiTest(RegistryApiCase):
         """解析 driver 的 classify 行。
 
         Args:
-            line: `classify added=<路徑|路徑> unchanged=<路徑>`。
+            line: `classify added=<路徑|路徑> replaced=<路徑> unchanged=<路徑>`。
 
         Returns:
-            (新增的路徑, 沒變的路徑)。
+            (新增的路徑, 沒變的路徑)；替換的路徑不回傳（ticket 02 的測試在 tests/test_replace.py）。
         """
-        added, unchanged = line.removeprefix("classify added=").split(" unchanged=")
+        added, rest = line.removeprefix("classify added=").split(" replaced=")
+        _, unchanged = rest.split(" unchanged=")
         return [p for p in added.split("|") if p], [p for p in unchanged.split("|") if p]
 
     def test_summary_lists_new_then_unchanged_documents_across_calls_in_one_process(self):

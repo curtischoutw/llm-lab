@@ -196,7 +196,7 @@ def _run_ingest(raw_path: str) -> int:
         f"（其中 RAG-Anything 加的 belongs_to 邊 {summary.belongs_to}，其餘 {summary.relations - summary.belongs_to}）"
     )
     print("文件狀態：" + "，".join(f"{status}={count}" for status, count in sorted(summary.status_counts.items())))
-    for label, paths in (("新增", summary.added), ("沒變", summary.unchanged)):
+    for label, paths in (("新增", summary.added), ("替換", summary.replaced), ("沒變", summary.unchanged)):
         print(f"{label} {len(paths)} 份")
         for path in paths:
             print(f"  {path}")
