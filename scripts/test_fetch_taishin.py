@@ -2988,5 +2988,160 @@ class UpdateModeRemovedFromListTests(ScriptTestCase):
         self.assertTrue((self.out / "cards" / "card_cg010_card001.pdf").is_file(), "沒搬成功，原檔留著")
 
 
+class UpdateModeAttachmentTests(ScriptTestCase):
+    """更新模式下，權益附件跟著權益子頁上的連結走：沒有任何子頁還連到的搬走，內容變了的換掉。"""
+
+    def serve_pages(self, pages: dict[str, list[str]]) -> None:
+        """登記這些權益子頁（主內容區連到 hrefs）與它們連到的 PDF。
+
+        Args:
+            pages: 權益子頁路徑對它連到的 PDF 路徑清單；頁面內容隨 PDF 清單而異，所以換連結會被判成內容變更。
+        """
+        self.serve_rights({page: rights_page_with_pdfs(f"{page}-{hrefs}", hrefs) for page, hrefs in pages.items()})
+        for href in {href for hrefs in pages.values() for href in hrefs}:
+            self.routes[href] = (200, pdf_bytes(href))
+
+    def first_download(self, pages: dict[str, list[str]]) -> None:
+        """第一次下載（不開更新模式）這些權益子頁與它們連到的附件，清掉請求紀錄。
+
+        Args:
+            pages: 權益子頁路徑對它連到的 PDF 路徑清單。
+        """
+        self.serve_pages(pages)
+        self.assertEqual(self.run_script().returncode, 0)
+        self.server.requests.clear()
+
+    def removed_dir(self) -> Path:
+        """今天的下架資料夾 DIR/_meta/removed/<日期>/。"""
+        return self.out / "_meta" / "removed" / date.today().isoformat()
+
+    def attachment_records(self) -> dict[str, dict[str, str]]:
+        """下載清單中權益附件的紀錄，檔名對紀錄。"""
+        return {r["filename"]: r for r in self.manifest() if r["category"] == "權益附件"}
+
+    def test_attachment_that_no_subpage_links_to_any_more_is_moved_and_recorded_as_removed(self) -> None:
+        self.first_download({DUAL_PAGE: [DUAL_PDF, DUAL_PDF_2]})
+        before = (self.out / "rights_attachments" / "attachment_dual-card_02.pdf").read_bytes()
+        self.serve_pages({DUAL_PAGE: [DUAL_PDF]})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.out / "rights_attachments" / "attachment_dual-card_02.pdf").exists())
+        self.assertEqual(
+            (self.removed_dir() / "rights_attachments" / "attachment_dual-card_02.pdf").read_bytes(), before
+        )
+        self.assertTrue((self.out / "rights_attachments" / "attachment_dual-card_01.pdf").is_file())
+        records = self.attachment_records()
+        self.assertEqual(records["attachment_dual-card_02.pdf"]["result"], "下架")
+        self.assertEqual(records["attachment_dual-card_01.pdf"]["result"], "未變")
+        self.assertIn("權益附件：未變 1、下架 1", result.stdout)
+
+    def test_attachment_with_the_same_content_keeps_its_bytes_and_modification_time_and_new_content_replaces_it(self) -> None:
+        self.first_download({DUAL_PAGE: [DUAL_PDF, DUAL_PDF_2]})
+        folder = self.out / "rights_attachments"
+        for file in folder.iterdir():
+            os.utime(file, ns=(OLD_MTIME_NS, OLD_MTIME_NS))
+        unchanged = folder / "attachment_dual-card_01.pdf"
+        before = (unchanged.read_bytes(), unchanged.stat().st_mtime_ns)
+        new_content = pdf_bytes(DUAL_PDF_2) + b"%revised\n"
+        self.routes[DUAL_PDF_2] = (200, new_content)
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((unchanged.read_bytes(), unchanged.stat().st_mtime_ns), before)
+        self.assertEqual((folder / "attachment_dual-card_02.pdf").read_bytes(), new_content)
+        records = self.attachment_records()
+        self.assertEqual(records["attachment_dual-card_01.pdf"]["result"], "未變")
+        self.assertEqual(records["attachment_dual-card_02.pdf"]["result"], "內容變更")
+        self.assertEqual(records["attachment_dual-card_02.pdf"]["sha256"], hashlib.sha256(new_content).hexdigest())
+
+    def test_failed_download_of_an_existing_attachment_keeps_the_file_and_is_recorded_as_failed(self) -> None:
+        self.first_download({DUAL_PAGE: [DUAL_PDF]})
+        attachment = self.out / "rights_attachments" / "attachment_dual-card_01.pdf"
+        before = attachment.read_bytes()
+        self.routes[DUAL_PDF] = (500, b"boom")
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(attachment.read_bytes(), before)
+        self.assertEqual(self.attachment_records()["attachment_dual-card_01.pdf"]["result"], "失敗")
+
+    def test_attachment_linked_from_several_subpages_stays_while_one_of_them_still_links_to_it(self) -> None:
+        self.first_download({CO_BRAND_PAGE: [DUAL_PDF, CO_BRAND_PDF], DUAL_PAGE: [DUAL_PDF]})
+        self.serve_pages({CO_BRAND_PAGE: [CO_BRAND_PDF], DUAL_PAGE: [DUAL_PDF]})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.out / "rights_attachments" / "attachment_dual-card_01.pdf").is_file())
+        self.assertEqual(self.attachment_records()["attachment_dual-card_01.pdf"]["result"], "未變")
+        self.assertFalse(self.removed_dir().exists())
+        self.serve_pages({CO_BRAND_PAGE: [CO_BRAND_PDF], DUAL_PAGE: []})
+        again = self.run_update()
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertFalse((self.out / "rights_attachments" / "attachment_dual-card_01.pdf").exists())
+        self.assertTrue((self.removed_dir() / "rights_attachments" / "attachment_dual-card_01.pdf").is_file())
+
+    def test_attachment_of_a_subpage_that_left_the_rights_list_is_removed(self) -> None:
+        self.first_download({CO_BRAND_PAGE: [CO_BRAND_PDF], DUAL_PAGE: [DUAL_PDF]})
+        self.serve_pages({DUAL_PAGE: [DUAL_PDF]})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        records = self.attachment_records()
+        self.assertEqual(records["attachment_TSCC-11312.pdf"]["result"], "下架")
+        self.assertEqual(records["attachment_dual-card_01.pdf"]["result"], "未變")
+        self.assertTrue((self.removed_dir() / "rights_attachments" / "attachment_TSCC-11312.pdf").is_file())
+
+    def test_removal_is_not_judged_when_a_subpage_request_failed_and_the_report_names_the_reason(self) -> None:
+        self.first_download({CO_BRAND_PAGE: [CO_BRAND_PDF], DUAL_PAGE: [DUAL_PDF]})
+        self.serve_pages({CO_BRAND_PAGE: [], DUAL_PAGE: [DUAL_PDF]})
+        self.routes[DUAL_PAGE] = (500, b"boom")
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertTrue((self.out / "rights_attachments" / "attachment_TSCC-11312.pdf").is_file())
+        self.assertNotIn("下架", {r["result"] for r in self.attachment_records().values()})
+        self.assertFalse(self.removed_dir().exists())
+        self.assertIn("權益附件這次不判斷下架", result.stderr)
+        self.assertIn("rights_right_right0704.docx", result.stderr)
+
+    def test_removal_is_not_judged_when_a_subpage_conversion_failed_and_is_judged_on_the_next_successful_run(self) -> None:
+        self.first_download({DUAL_PAGE: [DUAL_PDF, DUAL_PDF_2]})
+        self.serve_pages({DUAL_PAGE: [DUAL_PDF]})
+        empty_path = self.tmp / "empty_path"
+        empty_path.mkdir()
+        result = self.run_update(path=str(empty_path))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue((self.out / "rights_attachments" / "attachment_dual-card_02.pdf").is_file())
+        self.assertIn("權益附件這次不判斷下架", result.stderr)
+        self.assertEqual(self.attachment_records()["attachment_dual-card_02.pdf"]["result"], "未變")
+        retry = self.run_update()
+        self.assertEqual(retry.returncode, 0, retry.stdout + retry.stderr)
+        self.assertEqual(self.attachment_records()["attachment_dual-card_02.pdf"]["result"], "下架")
+        self.assertFalse((self.out / "rights_attachments" / "attachment_dual-card_02.pdf").exists())
+
+    def test_removal_is_not_judged_when_the_rights_list_failed(self) -> None:
+        self.first_download({DUAL_PAGE: [DUAL_PDF]})
+        self.routes[RIGHTS_LIST_PATH] = (500, b"boom")
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue((self.out / "rights_attachments" / "attachment_dual-card_01.pdf").is_file())
+        self.assertIn("列表「信用卡權益」", result.stderr)
+        self.assertIn("權益附件這次不判斷下架", result.stderr)
+        self.assertFalse(self.removed_dir().exists())
+
+    def test_no_removal_without_update_mode(self) -> None:
+        self.first_download({DUAL_PAGE: [DUAL_PDF, DUAL_PDF_2]})
+        self.serve_pages({DUAL_PAGE: [DUAL_PDF]})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.out / "rights_attachments" / "attachment_dual-card_02.pdf").is_file())
+        self.assertFalse((self.out / "_meta" / "removed").exists())
+
+    def test_requests_for_attachments_in_update_mode_are_spaced_by_the_configured_interval(self) -> None:
+        self.first_download({DUAL_PAGE: [DUAL_PDF, DUAL_PDF_2]})
+        interval = 0.3
+        self.assertEqual(self.run_update(interval=str(interval)).returncode, 0)
+        requests = self.server.requests
+        self.assertIn(DUAL_PDF, self.server.paths())
+        for earlier, later in zip(requests, requests[1:]):
+            self.assertGreaterEqual(later[1] - earlier[1], interval - 0.02)
+
+
 if __name__ == "__main__":
     unittest.main()
