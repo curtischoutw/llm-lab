@@ -19,3 +19,12 @@
 - ASSUMPTION：「已完成」以 `rag.is_document_fully_processed` 判斷（文字與多模態都處理完），不只看 status 是 processed。
 - ASSUMPTION：比對的檔名是 `document.name`；RAG-Anything 預設（`use_full_path` 關）把原檔的檔名（Office 也是原檔名，不是轉出的 PDF）記進文件狀態，測試以 PDF 驗證，沒有另外用 Office 文件驗證。
 - ASSUMPTION：多份候選時整篇記成失敗，不順便處理後面「這次的 ID 已有失敗紀錄」的清除；下次修正後重跑即可。
+
+### code-review 修正 8：已處理文件的狀態每批只載入一次（2026-11-02）
+
+`_find_legacy_version` 每份新文件都重新載入全部 PROCESSED 文件的狀態，整批總工作量是 O(N²)。
+
+- 新增 `_ProcessedByFileName`：每批 `_ingest` 第一次需要時載入一次，依檔名建索引（文件 ID 排序）；`_find_legacy_version` 查索引。候選仍逐一用 `is_document_fully_processed` 查現況，所以批次途中被刪掉的舊版本不會被選中。對外行為不變。
+- 唯一的差異（極端情況）：同一批裡，前一份文件匯入後描述失敗（文件狀態暫時還是 processed、沒進對照表），後一份同檔名但不同資料夾的文件，舊做法會把前者當候選，新做法（索引是批次開始時的狀態）不會。舊做法在這種情況算對到一份舊版本去替換，不是設計過的行為。
+- 夾具：`tests/delete_failure/sitecustomize.py` 多支援 `COUNT_STATUS_LOADS_FILE`（每次呼叫 `get_docs_by_status` 記一行狀態）。
+- 測試：`MigrateStatusLoadsCliTest`，4 份新文件的整批載入次數要等於 1 份新文件的整批（先紅：4 對 1）。

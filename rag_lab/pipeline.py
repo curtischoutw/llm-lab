@@ -26,7 +26,8 @@ CLI 只負責參數與輸出格式，這裡負責行為。
 - 用檔名遷移（_find_legacy_version，spec「匯入端：對照表」規則 3）：對照表沒有這個路徑、這次的 ID 也沒完整匯入時，用檔名
   到文件狀態找已完整處理、而且沒對照到任何路徑的文件：剛好一份當作舊版本替換，0 份記「新增」，多份拋 PipelineError 列出候選
   （該篇記成失敗，不替換也不新增，知識庫與對照表都沒動）。文件狀態只記檔名，同名的別份文件也會對到，所以對照表的排除是這條規則的
-  安全網。
+  安全網。已處理文件的狀態每批 _ingest 只載入一次、依檔名建索引（_ProcessedByFileName），不是每份新文件載入一次；索引是批次開始時的
+  狀態，候選仍逐一用 is_document_fully_processed 查現況，所以批次途中被刪掉的舊版本不會被選中。
 - 答案快取（_clear_answer_cache，spec「匯入端：答案快取」）：每份文件處理完（成功或失敗），只要那份文件的處理對 LightRAG
   的儲存做了寫入或刪除，就立刻清掉 LLM 快取裡 cache_type 為 query 的項目，保留 keywords（查詢關鍵字）與 extract／summary
   （匯入用的抽取快取），之後同一題用新的知識庫重新回答；不等整批結束，行程中途被停掉時已經改動的部分也已經清過。「有改動」
@@ -609,7 +610,38 @@ async def _discard_new_version(
     )
 
 
-async def _find_legacy_version(rag: RAGAnything, document: Path, known: dict[str, dict[str, str]]) -> str | None:
+class _ProcessedByFileName:
+    """已處理（PROCESSED）文件的文件 ID，依檔名建的索引；每批 _ingest 第一次需要時載入一次，不是每份文件載入一次。
+
+    每份新文件都重新載入全部已處理文件的狀態，整批的工作量是 O(N²)；索引只在批次開始時的狀態上建立。批次途中被刪掉的
+    舊版本仍在索引裡，但 `_find_legacy_version` 對每個候選都再用 `is_document_fully_processed` 查現況，已不在知識庫的會被排除。
+    """
+
+    def __init__(self) -> None:
+        """_ProcessedByFileName 的建構；還沒有載入。"""
+        self._ids_by_name: dict[str, list[str]] | None = None
+
+    async def doc_ids(self, rag: RAGAnything, file_name: str) -> list[str]:
+        """檔名相同的已處理文件的文件 ID。
+
+        Args:
+            rag: 已初始化的 RAGAnything。
+            file_name: 檔名（文件狀態記的 file_path）。
+
+        Returns:
+            依文件 ID 排序的清單；沒有同名文件時為空。第一次呼叫時載入全部已處理文件的狀態。
+        """
+        if self._ids_by_name is None:
+            processed = await rag.lightrag.doc_status.get_docs_by_status(DocStatus.PROCESSED)
+            self._ids_by_name = {}
+            for doc_id, status in sorted(processed.items()):
+                self._ids_by_name.setdefault(status.file_path, []).append(doc_id)
+        return self._ids_by_name.get(file_name, [])
+
+
+async def _find_legacy_version(
+    rag: RAGAnything, document: Path, known: dict[str, dict[str, str]], processed: _ProcessedByFileName
+) -> str | None:
     """對照表沒有這個路徑時，用檔名到文件狀態找已完成的舊版本（spec「匯入端：對照表」規則 3 的最後一步）。
 
     文件狀態只記檔名（RAG-Anything 預設不記完整路徑），所以同名的別份文件也會對到；已經對照到別的路徑的文件 ID
@@ -619,6 +651,7 @@ async def _find_legacy_version(rag: RAGAnything, document: Path, known: dict[str
         rag: 已初始化的 RAGAnything。
         document: 要匯入的文件（比對它的檔名）。
         known: 對照表（路徑 → 紀錄），只讀。
+        processed: 這批的已處理文件索引（依檔名）。
 
     Returns:
         剛好一份候選時是它的文件 ID（當作舊版本）；沒有候選時是 None（新增）。
@@ -627,10 +660,9 @@ async def _find_legacy_version(rag: RAGAnything, document: Path, known: dict[str
         PipelineError: 對到多份候選；訊息列出候選的文件 ID。不替換也不新增，知識庫與對照表都沒動。
     """
     registered = {entry["doc_id"] for entry in known.values()}
-    processed = await rag.lightrag.doc_status.get_docs_by_status(DocStatus.PROCESSED)
     candidates = []
-    for doc_id, status in sorted(processed.items()):
-        if status.file_path == document.name and doc_id not in registered and await rag.is_document_fully_processed(doc_id):
+    for doc_id in await processed.doc_ids(rag, document.name):
+        if doc_id not in registered and await rag.is_document_fully_processed(doc_id):
             candidates.append(doc_id)
     if len(candidates) > 1:
         raise PipelineError(
@@ -641,7 +673,11 @@ async def _find_legacy_version(rag: RAGAnything, document: Path, known: dict[str
 
 
 async def _ingest_one(
-    rag: RAGAnything, document: Path, known: dict[str, dict[str, str]], change: _KnowledgeBaseChange
+    rag: RAGAnything,
+    document: Path,
+    known: dict[str, dict[str, str]],
+    change: _KnowledgeBaseChange,
+    processed: _ProcessedByFileName,
 ) -> IngestReport:
     """匯入單篇文件；已完整處理就略過，先前未完成的先清掉舊紀錄再重匯，內容變了的先匯入新版本再刪舊版本。
 
@@ -650,6 +686,7 @@ async def _ingest_one(
         document: 文件路徑。
         known: 對照表（路徑 → 紀錄），只讀。
         change: 這份文件的處理對知識庫做過寫入或刪除時，在呼叫之前標記（成功或失敗都保留標記，由呼叫端據此清答案快取）。
+        processed: 這批的已處理文件索引（依檔名），用檔名遷移時用；整批共用一份。
 
     Returns:
         這一篇的 IngestReport（total_seconds、description_failed、write_failed 由呼叫端填入）。成功時 outcome 是分類；
@@ -685,7 +722,7 @@ async def _ingest_one(
             )
         if entry is None:
             # 對照表沒有這個路徑（建立對照表之前匯入的文件，或新的路徑）：用檔名找舊版本，可能拋 PipelineError（對到多份）
-            old_id = await _find_legacy_version(rag, document, known)
+            old_id = await _find_legacy_version(rag, document, known, processed)
         elif old_id is not None and await rag.lightrag.doc_status.get_by_id(old_id) is None:
             # 對照表記的舊版本已不在知識庫：照一般匯入新版本，不刪任何東西
             old_id = None
@@ -996,13 +1033,14 @@ async def _ingest(
     summary = IngestSummary()
     folder = str(source_folder) if source_folder is not None else None
     registry_error: registry.RegistryError | None = None
+    processed = _ProcessedByFileName()
     try:
         for document in documents:
             description_before, write_before = models.failure_counts()
             started = time.perf_counter()
             change = _KnowledgeBaseChange()
             try:
-                report = await _ingest_one(rag, document, known, change)
+                report = await _ingest_one(rag, document, known, change, processed)
             except Exception as exc:
                 # 單篇失敗不中斷整批：記下是哪一篇、為什麼，CLI 據此印出並以非零碼結束
                 report = IngestReport(document, skipped=False, parse_seconds=0.0, error=f"{type(exc).__name__}: {exc}")
