@@ -352,6 +352,70 @@ class EvalRunTest(IngestedEvalCase):
 
 
 # ==============================
+# 指定檢索模式
+# ==============================
+
+
+class EvalModesOptionTest(IngestedEvalCase):
+    def test_a_single_mode_gives_one_column_one_answer_request_per_question_and_matching_counts(self):
+        path = self.write_questions(
+            question_line(id="q1", question="What is Fake Entity Alpha?"),
+            question_line(id="q2", question="Which entity works together with Fake Entity Beta?"),
+        )
+        result = self.run_eval(path, "--modes", "mix")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        markdown = self.result_files()[0].read_text(encoding="utf-8")
+        header = table_header(markdown)
+        self.assertEqual(header[-2:], ["reference", "mix"])
+        self.assertEqual(len(header), 6)
+        rows = table_rows(markdown)
+        self.assertEqual([row[-1] for row in rows], [CHAT_REPLY] * 2)
+        self.assertIn("結果：2 格，失敗 0 格", markdown)
+        self.assertIn("完成：2 格，失敗 0 格", result.stdout)
+        self.assertEqual(len(self.answer_requests()), 2, "每題只有 mix 一個答案請求")
+        self.assertEqual(len(self.keyword_requests()), 2, "mix 每題一次關鍵字抽取")
+
+    def test_several_modes_keep_the_fixed_column_order_and_count_a_repeated_name_once(self):
+        result = self.run_eval(self.write_questions(question_line()), "--modes", "mix", "naive", "mix")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        markdown = self.result_files()[0].read_text(encoding="utf-8")
+        self.assertEqual(table_header(markdown)[-2:], ["naive", "mix"])
+        (row,) = table_rows(markdown)
+        self.assertEqual(row[-2:], [CHAT_REPLY] * 2)
+        self.assertIn("完成：2 格，失敗 0 格", result.stdout)
+        self.assertEqual(len(self.answer_requests()), 2)
+        self.assertEqual(len(self.keyword_requests()), 1, "naive 不做關鍵字抽取，只有 mix 一次")
+
+    def test_a_failure_is_counted_only_among_the_chosen_modes(self):
+        # 關鍵字抽取失敗只影響 local、global、hybrid、mix；只跑 naive 時沒有任何失敗
+        self.server.fail_keywords = True
+        path = self.write_questions(question_line())
+        result = self.run_eval(path, "--modes", "naive")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("完成：1 格，失敗 0 格", result.stdout)
+
+        result = self.run_eval(path, "--modes", "naive", "mix")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("完成：2 格，失敗 1 格", result.stdout)
+        self.assertRegex(result.stderr, r"失敗：q1 / mix：")
+        reports = [file.read_text(encoding="utf-8") for file in self.result_files()]
+        self.assertEqual(len(reports), 2)
+        self.assertTrue(any("結果：2 格，失敗 1 格" in report for report in reports))
+
+    def test_an_unknown_mode_is_a_usage_error_listing_the_available_modes_before_anything_is_queried(self):
+        path = self.write_questions(question_line())
+        result = self.run_eval(path, "--modes", "mix", "bypass")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        for mode in MODES:
+            self.assertIn(mode, result.stderr)
+        self.assertIn("bypass", result.stderr)
+        self.assertEqual(self.eval_requests(), [])
+        self.assertEqual(self.result_files(), [])
+
+
+# ==============================
 # 結果檔
 # ==============================
 

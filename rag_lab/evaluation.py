@@ -1,6 +1,6 @@
 """eval 的題目檔讀取與 Markdown 對照表產生。
 
-為什麼存在：eval 要把使用者寫的 JSONL 題目檔跑過五種檢索模式，再輸出一張讓人工比較的表。
+為什麼存在：eval 要把使用者寫的 JSONL 題目檔跑過檢索模式（預設五種，可指定其中幾種），再輸出一張讓人工比較的表。
 讀檔驗證與排版不需要任何模型或 lightrag，獨立成輕量模組，CLI 才能在 import 重量級模組、
 連任何端點之前就拒絕格式錯誤的題目檔。查詢本身在 rag_lab.pipeline.evaluate。
 
@@ -10,7 +10,7 @@
 - 只以 \n 分行（不用 splitlines，它也會在 JSON 字串裡合法的 U+2028 等字元斷行），並以 utf-8-sig 讀檔略過 BOM。
 - 欄位固定為 id、question、reference、type、source，皆為非空字串；type 限 text、figure、
   table、cross-paper；id 不可重複。多出來的欄位視為錯誤（ASSUMPTION：避免欄名拼錯被默默忽略）。
-- 對照表每題一列：id、type、source、question、reference 與五種模式各一欄。儲存格內的 `|`
+- 對照表每題一列：id、type、source、question、reference 與所跑的每種模式各一欄（模式順序固定依 RETRIEVAL_MODES，與指定順序無關）。儲存格內的 `|`
   跳脫、換行換成 `<br>`，確保一題永遠只佔一行。失敗的格寫「失敗」與原因，不留空白。
 - 表頭註明固定的查詢設定（vlm_enhanced=False、enable_rerank=True）與 reranker 模型名稱（RERANK_MODEL），
   讓日後翻結果檔時知道檢索模式是當時唯一的變因、比較不同次 eval 時知道用了哪個 reranker。
@@ -21,6 +21,7 @@ Dependencies: 僅標準函式庫。
 """
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +33,29 @@ from pathlib import Path
 RETRIEVAL_MODES = ("naive", "local", "global", "hybrid", "mix")
 QUESTION_TYPES = ("text", "figure", "table", "cross-paper")
 QUESTION_FIELDS = ("id", "question", "reference", "type", "source")
+
+
+def resolve_modes(modes: Sequence[str] | None) -> tuple[str, ...]:
+    """把使用者指定的檢索模式整理成固定順序、不重複的清單。
+
+    Args:
+        modes: 要跑的檢索模式；None 表示全部五種。
+
+    Returns:
+        依 RETRIEVAL_MODES 的順序排列、去除重複的模式（與使用者給的順序無關，讓不同次 eval 的欄位順序一致）。
+
+    Raises:
+        ValueError: modes 是空的，或含有不在 RETRIEVAL_MODES 的名稱（訊息列出可用的模式）。
+    """
+    if modes is None:
+        return RETRIEVAL_MODES
+    if isinstance(modes, str):
+        raise ValueError(f"modes 必須是模式名稱的序列，收到字串 {modes!r}")
+    unknown = [mode for mode in modes if mode not in RETRIEVAL_MODES]
+    if unknown or not modes:
+        problem = f"不認得的模式 {'、'.join(repr(m) for m in unknown)}" if unknown else "沒有指定任何模式"
+        raise ValueError(f"{problem}；可用的模式：{'、'.join(RETRIEVAL_MODES)}")
+    return tuple(mode for mode in RETRIEVAL_MODES if mode in modes)
 
 
 class QuestionFileError(ValueError):
@@ -184,6 +208,7 @@ def _cell_text(cell: Cell) -> str:
 def render_report(
     questions: list[Question],
     cells: list[list[Cell]],
+    modes: Sequence[str],
     meta: list[tuple[str, str]],
     generated_at: datetime,
 ) -> str:
@@ -191,7 +216,8 @@ def render_report(
 
     Args:
         questions: 題目清單。
-        cells: cells[i][j] 是第 i 題在 RETRIEVAL_MODES[j] 的結果。
+        cells: cells[i][j] 是第 i 題在 modes[j] 的結果。
+        modes: 表格的模式欄，順序與 cells 的欄對應。
         meta: 表頭要列的（名稱, 值）設定說明，依序輸出。
         generated_at: 產生時間。
 
@@ -205,7 +231,7 @@ def render_report(
     lines.extend(f"- {name}：{value}" for name, value in meta)
     lines.append(f"- 結果：{total} 格，失敗 {failed} 格")
     lines.append("")
-    header = ["id", "type", "source", "question", "reference", *RETRIEVAL_MODES]
+    header = ["id", "type", "source", "question", "reference", *modes]
     lines.append("| " + " | ".join(header) + " |")
     lines.append("|" + "|".join(" --- " for _ in header) + "|")
     for question, row in zip(questions, cells, strict=True):
