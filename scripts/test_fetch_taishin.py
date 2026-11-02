@@ -10,6 +10,8 @@ stdout／stderr、輸出資料夾的檔案、下載清單的內容、假 server 
   mkp 指到另一個（self.mkp_server），所以測試能看出活動詳情頁與主視覺是向 mkp 的前綴請求，不是向 mkpcard。
 - 假 Chrome 是 tests/fake_chrome.py；測試在暫存資料夾寫一個 shell wrapper 呼叫它，
   腳本拿到的 Chrome 路徑就是這個 wrapper。
+- 金融卡卡片頁：專區列表頁（payment/）連到群組落地頁（payment/cgXXX/），落地頁只有一段 location.replace 轉址，
+  轉址目標是卡片頁（card01/ 或 card001/）；測試用 serve_debit_cards 登記這三層。預設（setUp）專區列表頁沒有任何卡。
 - 假頁面依官網結構筆記的最小結構製作：主內容區含預設收合的區塊與彈窗，主內容區外有導覽選單，
   頁面裡有 script 與 style。
 - 假 server 記錄每個請求的路徑、收到的時間與 User-Agent。沒有登記的路徑交給 fallback（預設 404）；
@@ -49,6 +51,9 @@ FAKE_LIBREOFFICE = REPO_ROOT / "tests" / "fake_libreoffice.py"
 OVERVIEW_PATH = "/TSB/personal/credit/intro/overview/"
 CARD_PATH_FORMAT = "/TSB/personal/credit/intro/overview/{cg}/{card}/"
 RIGHTS_LIST_PATH = "/TSB/personal/credit/intro/rights/"
+DEBIT_LIST_PATH = "/TSB/personal/credit/intro/payment/"
+DEBIT_GROUP_FORMAT = "/TSB/personal/credit/intro/payment/{cg}/"
+DEBIT_CARD_FORMAT = "/TSB/personal/credit/intro/payment/{cg}/{card}/"
 RIGHTS_PATH_FORMAT = "/TSB/personal/credit/intro/rights/{group}/{page}/"
 DOWNLOAD_LIST_PATH = "/TSB/personal/common/download/index.html"
 DOWNLOAD_QUERY = "?nav1=credit&nav2=file-download"
@@ -193,6 +198,51 @@ def card_html(label: str) -> str:
 <div id="leftcontainer">LEFT-MENU-TEXT</div>
 <footer>FOOTER-TEXT</footer>
 </body></html>"""
+
+
+def debit_list_html(group_paths: list[str]) -> str:
+    """產生簽帳金融卡專區列表頁：每張卡一個「瞭解更多」連結到群組落地頁，外加不是落地頁的干擾連結。
+
+    Args:
+        group_paths: 群組落地頁（payment/cgXXX/）的路徑清單。
+
+    Returns:
+        專區列表頁的 HTML。
+    """
+    items = "".join(
+        f'<div class="card"><a itemprop="url" href="{path}" class="oval-style">瞭解更多</a></div>'
+        for path in group_paths
+    )
+    return (
+        "<html><body>"
+        '<a href="/TSB/personal/credit/intro/payment/">簽帳金融卡</a>'
+        '<a href="/TSB/personal/credit/intro/overview/cg047/card001/">信用卡</a>'
+        '<a href="/TSB/personal/credit/intro/payment/notice/TSBankGridPage-000003/">約定條款</a>'
+        f'<div id="centercontainer">{items}</div>'
+        "</body></html>"
+    )
+
+
+def debit_landing_html(redirect_target: str | None) -> str:
+    """產生群組落地頁：主內容區只有卡片群組名稱和一段 location.replace 轉址（真實官網的落地頁就是這樣）。
+
+    Args:
+        redirect_target: location.replace 的參數；None 表示沒有轉址那段 JS。
+
+    Returns:
+        落地頁的 HTML。
+    """
+    script = (
+        ""
+        if redirect_target is None
+        else f'<script>$(document).ready(function(){{location.replace("{redirect_target}");}})</script>'
+    )
+    return (
+        "<html><body>"
+        '<script>if (old) { window.location.href = "/TSB/ie_no_support/index.html"; }</script>'
+        f'<div id="centercontainer"><div>卡片群組名稱:某金融卡<br>卡片群組:{script}</div></div>'
+        "</body></html>"
+    )
 
 
 def card_html_without_main_content() -> str:
@@ -415,6 +465,7 @@ class ScriptTestCase(unittest.TestCase):
         # 沒有任何子頁的總覽頁與權益頁；案例需要子頁時用 serve_cards、serve_rights 覆蓋
         self.serve_cards({})
         self.serve_rights({})
+        self.serve_debit_cards({})
         self.serve_downloads([[]])
         self.serve_offers({})
 
@@ -434,6 +485,19 @@ class ScriptTestCase(unittest.TestCase):
         """
         self.routes[OVERVIEW_PATH] = (200, overview_html(list(cards)).encode())
         for path, html in cards.items():
+            self.routes[path] = (200, html.encode())
+
+    def serve_debit_cards(self, groups: dict[str, str | None], cards: dict[str, str] | None = None) -> None:
+        """登記簽帳金融卡專區列表頁、各群組落地頁與各卡片頁。
+
+        Args:
+            groups: 群組落地頁路徑對轉址目標（location.replace 的參數）；None 表示落地頁沒有轉址那段 JS。
+            cards: 卡片頁路徑對頁面 HTML。
+        """
+        self.routes[DEBIT_LIST_PATH] = (200, debit_list_html(list(groups)).encode())
+        for path, target in groups.items():
+            self.routes[path] = (200, debit_landing_html(target).encode())
+        for path, html in (cards or {}).items():
             self.routes[path] = (200, html.encode())
 
     def serve_rights(self, pages: dict[str, str]) -> None:
@@ -586,6 +650,12 @@ RICHART = CARD_PATH_FORMAT.format(cg="cg047", card="card001")
 DAQUANLIAN = CARD_PATH_FORMAT.format(cg="cg010", card="card001")
 # 同一個 cg 底下的第二張卡：本地檔名不能只用 cgNNN
 DAQUANLIAN_2 = CARD_PATH_FORMAT.format(cg="cg010", card="card002")
+
+# 金融卡的群組編號和信用卡卡片頁重複（官網的信用卡也有 cg003、cg008），本地名稱靠 debit_ 前綴區分
+DEBIT_VISA_GROUP = DEBIT_GROUP_FORMAT.format(cg="cg001")
+DEBIT_VISA = DEBIT_CARD_FORMAT.format(cg="cg001", card="card01")
+DEBIT_LABOR_GROUP = DEBIT_GROUP_FORMAT.format(cg="cg006")
+DEBIT_LABOR = DEBIT_CARD_FORMAT.format(cg="cg006", card="card001")
 
 INSURANCE = RIGHTS_PATH_FORMAT.format(group="insurance", page="right0201")
 PARKING = RIGHTS_PATH_FORMAT.format(group="parking", page="right0301")
@@ -861,7 +931,347 @@ class CardPageTests(ScriptTestCase):
         self.serve_cards({RICHART: card_html("RICHART")})
         self.run_script()
         # 總覽頁 1 次；卡片頁 1 次（3 個錨點指向同一頁）；權益連結、申辦連結、總覽頁自己的連結都不下載；權益頁 1 次；下載頁 1 次
-        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RICHART, RIGHTS_LIST_PATH, DOWNLOAD_PAGE_1, *EMPTY_OFFER_REQUESTS])
+        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RICHART, RIGHTS_LIST_PATH, DOWNLOAD_PAGE_1, *EMPTY_OFFER_REQUESTS, DEBIT_LIST_PATH])
+
+
+class DebitCardPageTests(ScriptTestCase):
+    def test_follows_the_landing_page_redirect_to_card01_and_card001_and_prints_each_card(self) -> None:
+        self.serve_debit_cards(
+            {DEBIT_VISA_GROUP: DEBIT_VISA, DEBIT_LABOR_GROUP: DEBIT_LABOR},
+            {DEBIT_VISA: card_html("VISA金融卡"), DEBIT_LABOR: card_html("勞動保障卡")},
+        )
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            self.files_under_out(),
+            [
+                "_meta/html/debit_card_cg001_card01.html",
+                "_meta/html/debit_card_cg006_card001.html",
+                "_meta/manifest.jsonl",
+                "_meta/print/debit_card_cg001_card01.html",
+                "_meta/print/debit_card_cg006_card001.html",
+                "debit_cards/debit_card_cg001_card01.pdf",
+                "debit_cards/debit_card_cg006_card001.pdf",
+            ],
+        )
+        self.assertTrue((self.out / "debit_cards" / "debit_card_cg001_card01.pdf").read_bytes().startswith(b"%PDF-"))
+        self.assertEqual(
+            (self.out / "_meta" / "html" / "debit_card_cg001_card01.html").read_bytes(), self.routes[DEBIT_VISA][1]
+        )
+
+
+class DebitCardRedirectTests(ScriptTestCase):
+    def test_relative_and_absolute_redirect_targets_are_resolved_against_the_landing_page(self) -> None:
+        group_2 = DEBIT_GROUP_FORMAT.format(cg="cg002")
+        group_3 = DEBIT_GROUP_FORMAT.format(cg="cg003")
+        card_2 = DEBIT_CARD_FORMAT.format(cg="cg002", card="card01")
+        card_3 = DEBIT_CARD_FORMAT.format(cg="cg003", card="card01")
+        self.serve_debit_cards(
+            {
+                DEBIT_VISA_GROUP: "card01/",
+                DEBIT_LABOR_GROUP: self.server.base_url + DEBIT_LABOR,
+                group_2: card_2,
+                group_3: f"{self.server.base_url}{card_3}#tab2",
+            },
+            {
+                DEBIT_VISA: card_html("VISA"),
+                DEBIT_LABOR: card_html("LABOR"),
+                card_2: card_html("GENKI"),
+                card_3: card_html("WEALTH"),
+            },
+        )
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            sorted(p.name for p in (self.out / "debit_cards").iterdir()),
+            [
+                "debit_card_cg001_card01.pdf",
+                "debit_card_cg002_card01.pdf",
+                "debit_card_cg003_card01.pdf",
+                "debit_card_cg006_card001.pdf",
+            ],
+        )
+        self.assertEqual(self.server.paths().count(card_3), 1, "fragment 不送出，而且只請求一次")
+
+    def test_redirect_target_outside_the_official_domain_is_a_failed_card_and_is_not_requested(self) -> None:
+        self.serve_debit_cards(
+            {DEBIT_VISA_GROUP: DEBIT_VISA, DEBIT_LABOR_GROUP: "http://example.invalid" + DEBIT_LABOR},
+            {DEBIT_VISA: card_html("VISA"), DEBIT_LABOR: card_html("LABOR")},
+        )
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual([p.name for p in (self.out / "debit_cards").iterdir()], ["debit_card_cg001_card01.pdf"])
+        failed = [r for r in self.manifest() if r["result"] == "失敗"]
+        self.assertEqual([r["url"] for r in failed], [self.server.base_url + DEBIT_LABOR_GROUP])
+        self.assertIn("找不到轉址目標", failed[0]["detail"])
+        self.assertIn("example.invalid", failed[0]["detail"])
+        self.assertIn(self.server.base_url + DEBIT_LABOR_GROUP, result.stderr)
+        self.assertNotIn(DEBIT_LABOR, self.server.paths())
+
+    def test_redirect_target_outside_the_same_group_is_a_failed_card_and_is_not_requested(self) -> None:
+        other_group_card = DEBIT_CARD_FORMAT.format(cg="cg002", card="card01")
+        not_a_card = "/TSB/personal/credit/intro/payment/notice/TSBankGridPage-000003/"
+        too_deep = DEBIT_VISA + "tab/"
+        group_2 = DEBIT_GROUP_FORMAT.format(cg="cg002")
+        group_3 = DEBIT_GROUP_FORMAT.format(cg="cg003")
+        group_4 = DEBIT_GROUP_FORMAT.format(cg="cg004")
+        group_5 = DEBIT_GROUP_FORMAT.format(cg="cg005")
+        self.serve_debit_cards(
+            {
+                DEBIT_VISA_GROUP: other_group_card,
+                group_2: not_a_card,
+                group_3: "../../overview/cg003/card01/",
+                group_4: "javascript:void(0)",
+                group_5: too_deep,
+            },
+            {
+                other_group_card: card_html("OTHER"),
+                not_a_card: card_html("NOTICE"),
+                "/TSB/personal/credit/intro/overview/cg003/card01/": card_html("CREDIT"),
+                too_deep: card_html("DEEP"),
+            },
+        )
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertFalse((self.out / "debit_cards").exists() and list((self.out / "debit_cards").iterdir()))
+        failed = [r for r in self.manifest() if r["result"] == "失敗"]
+        self.assertEqual(len(failed), 5)
+        for record in failed:
+            self.assertIn("找不到轉址目標", record["detail"])
+        for path in (other_group_card, not_a_card, "/TSB/personal/credit/intro/overview/cg003/card01/", too_deep):
+            self.assertNotIn(path, self.server.paths())
+
+    def test_landing_page_without_a_redirect_is_a_failed_card_and_the_other_cards_continue(self) -> None:
+        self.serve_debit_cards(
+            {DEBIT_VISA_GROUP: None, DEBIT_LABOR_GROUP: DEBIT_LABOR},
+            {DEBIT_LABOR: card_html("LABOR")},
+        )
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual([p.name for p in (self.out / "debit_cards").iterdir()], ["debit_card_cg006_card001.pdf"])
+        records = {r["filename"]: r for r in self.manifest() if r["category"] == "金融卡卡片頁"}
+        failed = records["debit_card_cg001"]
+        self.assertEqual(failed["result"], "失敗")
+        self.assertEqual(failed["url"], self.server.base_url + DEBIT_VISA_GROUP)
+        self.assertIn("找不到轉址目標", failed["detail"])
+        self.assertEqual(records["debit_card_cg006_card001.pdf"]["result"], "已下載")
+        self.assertIn(f"FAILED {self.server.base_url + DEBIT_VISA_GROUP}", result.stderr)
+
+    def test_landing_page_request_failure_is_a_failed_card_and_the_other_cards_continue(self) -> None:
+        self.serve_debit_cards(
+            {DEBIT_VISA_GROUP: DEBIT_VISA, DEBIT_LABOR_GROUP: DEBIT_LABOR},
+            {DEBIT_VISA: card_html("VISA"), DEBIT_LABOR: card_html("LABOR")},
+        )
+        del self.routes[DEBIT_LABOR_GROUP]
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual([p.name for p in (self.out / "debit_cards").iterdir()], ["debit_card_cg001_card01.pdf"])
+        failed = [r for r in self.manifest() if r["result"] == "失敗"]
+        self.assertEqual([r["filename"] for r in failed], ["debit_card_cg006"])
+        self.assertIn("404", failed[0]["detail"])
+
+    def test_list_page_failure_exits_nonzero_names_the_list_and_keeps_the_other_categories(self) -> None:
+        self.serve_cards({RICHART: card_html("RICHART")})
+        del self.routes[DEBIT_LIST_PATH]
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("簽帳金融卡專區", result.stderr)
+        self.assertTrue((self.out / "cards" / "card_cg047_card001.pdf").is_file())
+
+    def test_chrome_receives_the_card_page_main_content_only(self) -> None:
+        self.serve_debit_cards({DEBIT_VISA_GROUP: DEBIT_VISA}, {DEBIT_VISA: card_html("VISA金融卡")})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        printed = (self.out / "_meta" / "print" / "debit_card_cg001_card01.html").read_text(encoding="utf-8")
+        self.assertIn("VISA金融卡", printed)
+        self.assertIn("COLLAPSED-TEXT", printed)
+        self.assertNotIn("NAV-MENU-TEXT", printed)
+        self.assertNotIn("INNER_SCRIPT_TEXT", printed)
+
+
+class DebitCardNamingTests(ScriptTestCase):
+    def test_debit_and_credit_card_pages_with_the_same_group_and_card_number_do_not_overwrite_each_other(self) -> None:
+        credit = CARD_PATH_FORMAT.format(cg="cg001", card="card01")
+        self.serve_cards({credit: card_html("CREDIT-CG001")})
+        self.serve_debit_cards({DEBIT_VISA_GROUP: DEBIT_VISA}, {DEBIT_VISA: card_html("DEBIT-CG001")})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            self.files_under_out(),
+            [
+                "_meta/html/card_cg001_card01.html",
+                "_meta/html/debit_card_cg001_card01.html",
+                "_meta/manifest.jsonl",
+                "_meta/print/card_cg001_card01.html",
+                "_meta/print/debit_card_cg001_card01.html",
+                "cards/card_cg001_card01.pdf",
+                "debit_cards/debit_card_cg001_card01.pdf",
+            ],
+        )
+        credit_raw = (self.out / "_meta" / "html" / "card_cg001_card01.html").read_text(encoding="utf-8")
+        debit_raw = (self.out / "_meta" / "html" / "debit_card_cg001_card01.html").read_text(encoding="utf-8")
+        self.assertIn("CREDIT-CG001", credit_raw)
+        self.assertIn("DEBIT-CG001", debit_raw)
+
+    def test_manifest_records_url_category_format_hashes_and_date_like_the_credit_card_pages(self) -> None:
+        self.serve_debit_cards({DEBIT_LABOR_GROUP: DEBIT_LABOR}, {DEBIT_LABOR: card_html("LABOR")})
+        self.assertEqual(self.run_script().returncode, 0)
+        [record] = [r for r in self.manifest() if r["category"] == "金融卡卡片頁"]
+        pdf = (self.out / "debit_cards" / "debit_card_cg006_card001.pdf").read_bytes()
+        self.assertEqual(record["url"], self.server.base_url + DEBIT_LABOR)
+        self.assertEqual(record["filename"], "debit_card_cg006_card001.pdf")
+        self.assertEqual(record["format"], "PDF")
+        self.assertEqual(record["downloaded_at"], time.strftime("%Y-%m-%d"))
+        self.assertEqual(record["sha256"], hashlib.sha256(pdf).hexdigest())
+        self.assertEqual(record["html_sha256"], hashlib.sha256(self.routes[DEBIT_LABOR][1]).hexdigest())
+        self.assertEqual(record["result"], "已下載")
+        self.assertEqual(record["period"], "")
+
+    def test_rerun_without_update_skips_existing_cards_and_does_not_request_the_card_pages(self) -> None:
+        self.serve_debit_cards({DEBIT_VISA_GROUP: DEBIT_VISA}, {DEBIT_VISA: card_html("VISA")})
+        self.assertEqual(self.run_script().returncode, 0)
+        self.server.requests.clear()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.server.paths().count(DEBIT_VISA), 0)
+        [record] = [r for r in self.manifest() if r["category"] == "金融卡卡片頁"]
+        self.assertEqual(record["result"], "已存在略過")
+
+    def test_requests_keep_the_minimum_interval(self) -> None:
+        self.serve_debit_cards(
+            {DEBIT_VISA_GROUP: DEBIT_VISA, DEBIT_LABOR_GROUP: DEBIT_LABOR},
+            {DEBIT_VISA: card_html("VISA"), DEBIT_LABOR: card_html("LABOR")},
+        )
+        result = self.run_script(interval="0.3")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        times = [t for path, t, _ua in self.server.requests if path.startswith(DEBIT_LIST_PATH)]
+        self.assertEqual(len(times), 5, "專區列表頁 1 次、落地頁 2 次、卡片頁 2 次")
+        self.assertTrue(all(b - a >= 0.28 for a, b in zip(times, times[1:])), times)
+
+
+class DebitCardUpdateModeTests(ScriptTestCase):
+    def first_download(self, cards: dict[str, str | None], pages: dict[str, str]) -> None:
+        """第一次下載（不開更新模式），把每份金融卡文件的修改時間設成很久以前，清掉請求紀錄。"""
+        self.serve_debit_cards(cards, pages)
+        self.assertEqual(self.run_script().returncode, 0)
+        for file in (self.out / "debit_cards").iterdir():
+            os.utime(file, ns=(OLD_MTIME_NS, OLD_MTIME_NS))
+        self.server.requests.clear()
+
+    def removed_dir(self) -> Path:
+        """今天的下架資料夾 DIR/_meta/removed/<日期>/。"""
+        return self.out / "_meta" / "removed" / date.today().isoformat()
+
+    def records(self) -> dict[str, dict[str, str]]:
+        """下載清單中金融卡卡片頁的紀錄，檔名對紀錄。"""
+        return {r["filename"]: r for r in self.manifest() if r["category"] == "金融卡卡片頁"}
+
+    def test_card_page_whose_main_content_is_the_same_is_not_converted_and_nothing_is_touched(self) -> None:
+        self.first_download({DEBIT_VISA_GROUP: DEBIT_VISA}, {DEBIT_VISA: with_csrf(card_html("VISA"), "token-1")})
+        document = self.out / "debit_cards" / "debit_card_cg001_card01.pdf"
+        raw_path = self.out / "_meta" / "html" / "debit_card_cg001_card01.html"
+        print_path = self.out / "_meta" / "print" / "debit_card_cg001_card01.html"
+        before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in (document, raw_path, print_path)}
+        self.serve_debit_cards({DEBIT_VISA_GROUP: DEBIT_VISA}, {DEBIT_VISA: with_csrf(card_html("VISA"), "token-2")})
+        empty_path = self.tmp / "empty_path"
+        empty_path.mkdir()
+        result = self.run_update(chrome=str(self.tmp / "no-such-chrome"), path=str(empty_path))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(DEBIT_VISA, self.server.paths(), "更新模式要重新取得原始 HTML 來比對")
+        for path, state in before.items():
+            self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), state, path.name)
+        self.assertEqual(self.records()["debit_card_cg001_card01.pdf"]["result"], "未變")
+        self.assertIn("金融卡卡片頁：未變 1", result.stdout)
+
+    def test_card_page_whose_main_content_changed_is_converted_again(self) -> None:
+        self.first_download({DEBIT_VISA_GROUP: DEBIT_VISA}, {DEBIT_VISA: card_html("VISA-OLD")})
+        before = (self.out / "debit_cards" / "debit_card_cg001_card01.pdf").read_bytes()
+        self.serve_debit_cards({DEBIT_VISA_GROUP: DEBIT_VISA}, {DEBIT_VISA: card_html("VISA-NEW")})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotEqual((self.out / "debit_cards" / "debit_card_cg001_card01.pdf").read_bytes(), before)
+        raw = (self.out / "_meta" / "html" / "debit_card_cg001_card01.html").read_text(encoding="utf-8")
+        self.assertIn("VISA-NEW", raw)
+        self.assertEqual(self.records()["debit_card_cg001_card01.pdf"]["result"], "內容變更")
+
+    def test_card_missing_from_the_list_is_moved_with_its_html_and_recorded_as_removed(self) -> None:
+        self.first_download(
+            {DEBIT_VISA_GROUP: DEBIT_VISA, DEBIT_LABOR_GROUP: DEBIT_LABOR},
+            {DEBIT_VISA: card_html("VISA"), DEBIT_LABOR: card_html("LABOR")},
+        )
+        pdf_before = (self.out / "debit_cards" / "debit_card_cg006_card001.pdf").read_bytes()
+        self.serve_debit_cards({DEBIT_VISA_GROUP: DEBIT_VISA}, {DEBIT_VISA: card_html("VISA")})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        removed = self.removed_dir()
+        self.assertFalse((self.out / "debit_cards" / "debit_card_cg006_card001.pdf").exists())
+        self.assertFalse((self.out / "_meta" / "html" / "debit_card_cg006_card001.html").exists())
+        self.assertEqual((removed / "debit_cards" / "debit_card_cg006_card001.pdf").read_bytes(), pdf_before)
+        self.assertTrue((removed / "html" / "debit_card_cg006_card001.html").is_file())
+        self.assertTrue((removed / "print" / "debit_card_cg006_card001.html").is_file())
+        self.assertTrue((self.out / "debit_cards" / "debit_card_cg001_card01.pdf").is_file())
+        self.assertEqual(self.records()["debit_card_cg006_card001.pdf"]["result"], "下架")
+        self.assertIn("金融卡卡片頁：未變 1、下架 1", result.stdout)
+
+    def test_credit_card_pages_are_not_judged_against_the_debit_list(self) -> None:
+        credit = CARD_PATH_FORMAT.format(cg="cg001", card="card01")
+        self.serve_cards({credit: card_html("CREDIT")})
+        self.first_download({DEBIT_VISA_GROUP: DEBIT_VISA}, {DEBIT_VISA: card_html("VISA")})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.out / "cards" / "card_cg001_card01.pdf").is_file())
+        self.assertTrue((self.out / "debit_cards" / "debit_card_cg001_card01.pdf").is_file())
+        self.assertFalse((self.out / "_meta" / "removed").exists())
+
+    def test_list_that_parses_to_zero_cards_while_local_has_documents_does_not_judge_removal(self) -> None:
+        self.first_download({DEBIT_VISA_GROUP: DEBIT_VISA}, {DEBIT_VISA: card_html("VISA")})
+        self.serve_debit_cards({})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        for text in ("簽帳金融卡專區", "0 筆", "不搬任何檔案"):
+            self.assertIn(text, result.stderr)
+        self.assertTrue((self.out / "debit_cards" / "debit_card_cg001_card01.pdf").is_file())
+        self.assertFalse((self.out / "_meta" / "removed").exists())
+
+    def test_card_without_a_redirect_target_blocks_removal_for_the_whole_category(self) -> None:
+        group_2 = DEBIT_GROUP_FORMAT.format(cg="cg002")
+        card_2 = DEBIT_CARD_FORMAT.format(cg="cg002", card="card01")
+        pages = {DEBIT_VISA: card_html("VISA"), card_2: card_html("GENKI"), DEBIT_LABOR: card_html("LABOR")}
+        self.first_download({DEBIT_VISA_GROUP: DEBIT_VISA, group_2: card_2, DEBIT_LABOR_GROUP: DEBIT_LABOR}, pages)
+        # cg001 的落地頁這次沒有轉址；cg006 從列表消失（本來會被當成下架）；cg002 正常，所以列表不是 0 筆
+        self.serve_debit_cards({DEBIT_VISA_GROUP: None, group_2: card_2}, pages)
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(
+            sorted(p.name for p in (self.out / "debit_cards").iterdir()),
+            ["debit_card_cg001_card01.pdf", "debit_card_cg002_card01.pdf", "debit_card_cg006_card001.pdf"],
+        )
+        self.assertFalse((self.out / "_meta" / "removed").exists())
+        self.assertIn("不搬任何檔案", result.stderr)
+        self.assertIn(self.server.base_url + DEBIT_VISA_GROUP, result.stderr)
+        self.assertNotIn("下架", [r["result"] for r in self.manifest()])
+
+    def test_card_whose_landing_page_request_failed_is_not_moved(self) -> None:
+        self.first_download(
+            {DEBIT_VISA_GROUP: DEBIT_VISA, DEBIT_LABOR_GROUP: DEBIT_LABOR},
+            {DEBIT_VISA: card_html("VISA"), DEBIT_LABOR: card_html("LABOR")},
+        )
+        del self.routes[DEBIT_VISA_GROUP]
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue((self.out / "debit_cards" / "debit_card_cg001_card01.pdf").is_file())
+        self.assertFalse((self.out / "_meta" / "removed").exists())
+
+    def test_redirect_target_changing_from_card01_to_card001_moves_the_old_name_and_adds_the_new_one(self) -> None:
+        self.first_download({DEBIT_VISA_GROUP: DEBIT_VISA}, {DEBIT_VISA: card_html("VISA")})
+        new_target = DEBIT_CARD_FORMAT.format(cg="cg001", card="card001")
+        self.serve_debit_cards({DEBIT_VISA_GROUP: new_target}, {new_target: card_html("VISA")})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([p.name for p in (self.out / "debit_cards").iterdir()], ["debit_card_cg001_card001.pdf"])
+        self.assertTrue((self.removed_dir() / "debit_cards" / "debit_card_cg001_card01.pdf").is_file())
+        results = {name: r["result"] for name, r in self.records().items()}
+        self.assertEqual(results, {"debit_card_cg001_card001.pdf": "已下載", "debit_card_cg001_card01.pdf": "下架"})
 
 
 class RightsPageTests(ScriptTestCase):
@@ -893,7 +1303,7 @@ class RightsPageTests(ScriptTestCase):
         self.serve_rights({INSURANCE: card_html("INSURANCE")})
         self.run_script()
         # 權益頁的選單連結（權益頁自己、總覽、繳費）、PDF 連結、卡片頁連結都不下載；重複的錨點只抓一次
-        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, INSURANCE, DOWNLOAD_PAGE_1, *EMPTY_OFFER_REQUESTS])
+        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, INSURANCE, DOWNLOAD_PAGE_1, *EMPTY_OFFER_REQUESTS, DEBIT_LIST_PATH])
 
     def test_cards_and_rights_are_downloaded_in_one_run_into_separate_folders(self) -> None:
         self.serve_cards({RICHART: card_html("RICHART")})
@@ -986,8 +1396,8 @@ class DownloadAreaTests(ScriptTestCase):
         interval = 0.3
         self.assertEqual(self.run_script(interval=str(interval)).returncode, 0)
         times = [t for _path, t, _ua in self.server.requests]
-        # 總覽頁、權益頁、下載頁 3 頁、PDF 2 份、刷卡優惠列表 9 個分類各 1 頁
-        self.assertEqual(len(times), 16)
+        # 總覽頁、權益頁、下載頁 3 頁、PDF 2 份、刷卡優惠列表 9 個分類各 1 頁、簽帳金融卡專區列表頁 1 頁
+        self.assertEqual(len(times), 17)
         for earlier, later in zip(times, times[1:]):
             self.assertGreaterEqual(later - earlier, interval - 0.02)
 
@@ -1205,8 +1615,8 @@ class UpdateModeDownloadAreaTests(ScriptTestCase):
         result = self.run_update(interval=str(interval))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         times = [t for _path, t, _ua in self.server.requests]
-        # 總覽頁、權益頁、下載頁 2 頁（第 2 頁重複第 1 頁而停止）、重新下載 PDF 2 份、刷卡優惠列表 9 個分類各 1 頁
-        self.assertEqual(len(times), 15)
+        # 總覽頁、權益頁、下載頁 2 頁（第 2 頁重複第 1 頁而停止）、重新下載 PDF 2 份、刷卡優惠列表 9 個分類各 1 頁、簽帳金融卡專區列表頁 1 頁
+        self.assertEqual(len(times), 16)
         for earlier, later in zip(times, times[1:]):
             self.assertGreaterEqual(later - earlier, interval - 0.02)
 
@@ -1803,7 +2213,7 @@ class OverviewTests(ScriptTestCase):
         self.serve_rights({INSURANCE: card_html("INSURANCE")})
         result = self.run_script()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, INSURANCE, DOWNLOAD_PAGE_1, *EMPTY_OFFER_REQUESTS])
+        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, INSURANCE, DOWNLOAD_PAGE_1, *EMPTY_OFFER_REQUESTS, DEBIT_LIST_PATH])
         self.assertTrue((self.out / "rights" / "rights_insurance_right0201.docx").is_file())
 
     def test_rights_list_failure_exits_nonzero_names_the_list_and_keeps_the_cards(self) -> None:
@@ -1968,7 +2378,7 @@ class RerunTests(ScriptTestCase):
 
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, DOWNLOAD_PAGE_1, *EMPTY_OFFER_REQUESTS], "第二次只該請求列表頁")
+        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, DOWNLOAD_PAGE_1, *EMPTY_OFFER_REQUESTS, DEBIT_LIST_PATH], "第二次只該請求列表頁")
         self.assertEqual(pdf.read_bytes(), before)
         second = {r["filename"]: r for r in self.manifest()}
         self.assertEqual(sorted(second), sorted(first))
@@ -1989,7 +2399,7 @@ class RerunTests(ScriptTestCase):
         empty.mkdir()
         result = self.run_script(path=str(empty))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, DOWNLOAD_PAGE_1, *EMPTY_OFFER_REQUESTS])
+        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, DOWNLOAD_PAGE_1, *EMPTY_OFFER_REQUESTS, DEBIT_LIST_PATH])
         self.assertEqual(docx.read_bytes(), before)
         second = self.manifest()[0]
         self.assertEqual(second["result"], "已存在略過")
@@ -2010,8 +2420,8 @@ class RequestPolicyTests(ScriptTestCase):
     def test_every_request_carries_an_identifiable_user_agent(self) -> None:
         self.serve_cards({RICHART: card_html("RICHART")})
         self.run_script()
-        # 總覽頁、卡片頁、權益頁、下載頁各 1 個，加刷卡優惠列表 9 個分類各 1 頁
-        self.assertEqual(len(self.server.requests), 13)
+        # 總覽頁、卡片頁、權益頁、下載頁各 1 個，加刷卡優惠列表 9 個分類各 1 頁、簽帳金融卡專區列表頁 1 頁
+        self.assertEqual(len(self.server.requests), 14)
         for _path, _time, user_agent in self.server.requests:
             self.assertTrue(user_agent.startswith("llm-lab-fetch-taishin/"), user_agent)
 
@@ -2022,7 +2432,7 @@ class RequestPolicyTests(ScriptTestCase):
         interval = 0.3
         self.assertEqual(self.run_script(interval=str(interval)).returncode, 0)
         times = [t for _path, t, _ua in self.server.requests]
-        self.assertEqual(len(times), 15)
+        self.assertEqual(len(times), 16)
         for earlier, later in zip(times, times[1:]):
             self.assertGreaterEqual(later - earlier, interval - 0.02)
 
@@ -2381,8 +2791,8 @@ class UpdateModeWebPageTests(ScriptTestCase):
         result = self.run_update(interval=str(interval))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         times = sorted(t for server in (self.server, self.mkp_server) for _path, t, _ua in server.requests)
-        # 總覽頁、卡片頁、權益頁、權益子頁、下載頁、刷卡優惠列表 A 的 2 頁（第 2 頁沒有新連結而停止）與 B–I 各 1 頁、mkp 的活動頁
-        self.assertEqual(len(times), 16)
+        # 總覽頁、卡片頁、權益頁、權益子頁、下載頁、刷卡優惠列表 A 的 2 頁（第 2 頁沒有新連結而停止）與 B–I 各 1 頁、mkp 的活動頁、簽帳金融卡專區列表頁
+        self.assertEqual(len(times), 17)
         for earlier, later in zip(times, times[1:]):
             self.assertGreaterEqual(later - earlier, interval - 0.02)
 
@@ -2634,7 +3044,7 @@ class RightsAttachmentTests(ScriptTestCase):
         self.server.requests.clear()
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, DOWNLOAD_PAGE_1, *EMPTY_OFFER_REQUESTS])
+        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, DOWNLOAD_PAGE_1, *EMPTY_OFFER_REQUESTS, DEBIT_LIST_PATH])
         second = {r["filename"]: r for r in self.manifest() if r["category"] == "權益附件"}
         self.assertEqual(sorted(second), sorted(first))
         for name, record in second.items():
@@ -2651,7 +3061,7 @@ class RightsAttachmentTests(ScriptTestCase):
         self.server.requests.clear()
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, DOWNLOAD_PAGE_1, DUAL_PDF, *EMPTY_OFFER_REQUESTS])
+        self.assertEqual(self.server.paths(), [OVERVIEW_PATH, RIGHTS_LIST_PATH, DOWNLOAD_PAGE_1, DUAL_PDF, *EMPTY_OFFER_REQUESTS, DEBIT_LIST_PATH])
         self.assertEqual(
             (self.out / "rights_attachments" / "attachment_dual-card_01.pdf").read_bytes(), pdf_bytes(DUAL_PDF)
         )
@@ -2825,8 +3235,8 @@ class RightsAttachmentRequestPolicyTests(ScriptTestCase):
         interval = 0.3
         self.assertEqual(self.run_script(interval=str(interval)).returncode, 0)
         requests = self.server.requests
-        # 總覽頁 1、權益頁 1、子頁 1、下載頁 1、PDF 2 份、刷卡優惠列表 9 個分類各 1 頁，共 15 個請求
-        self.assertEqual(len(requests), 15)
+        # 總覽頁 1、權益頁 1、子頁 1、下載頁 1、PDF 2 份、刷卡優惠列表 9 個分類各 1 頁、簽帳金融卡專區列表頁 1 頁，共 16 個請求
+        self.assertEqual(len(requests), 16)
         for earlier, later in zip(requests, requests[1:]):
             self.assertGreaterEqual(later[1] - earlier[1], interval - 0.02)
         self.assertTrue(all(user_agent.startswith("llm-lab-fetch-taishin/") for _p, _t, user_agent in requests))

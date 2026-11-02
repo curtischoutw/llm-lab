@@ -1,6 +1,6 @@
-"""下載台新銀行信用卡的官網內容到本地資料夾，作為知識庫的來源文件。
+"""下載台新銀行信用卡與金融卡的官網內容到本地資料夾，作為知識庫的來源文件。
 
-為什麼存在：知識庫要用台新信用卡的卡片頁、權益說明、文件下載區與刷卡優惠活動頁（約 140 份）。
+為什麼存在：知識庫要用台新信用卡的卡片頁、權益說明、文件下載區與刷卡優惠活動頁（約 140 份），以及簽帳金融卡專區的卡片頁。
 這些內容不進版本控管，所以用這支腳本讓任何機器都能用一個指令重建同一批內容。
 
 用法：
@@ -15,6 +15,12 @@
 - 權益附件：權益子頁連到的 PDF（聯名卡、雙幣卡、企業卡的約定條款等），不轉檔、原樣存檔，放在 DIR/rights_attachments/。
 - 活動：刷卡優惠列表（分類 A–I）列出、下載當天還沒結束的活動頁，取主內容區後列印成 PDF，放在 DIR/offers/。
 - 活動圖片：依發現順序，前 IMAGE_LIMIT（8）個有主視覺的活動頁的主視覺，原樣存檔，放在 DIR/offer_images/。
+- 金融卡卡片頁：官網簽帳金融卡專區列表頁（payment/）上的群組落地頁（payment/cgXXX/）轉址到的卡片頁（card01/ 或 card001/），
+  處理方式同卡片（取主內容區、Chrome 列印成 PDF），放在 DIR/debit_cards/，本地名稱 debit_card_cgXXX_card01（或 card001）。
+  資料夾叫 taishin_credit_card，裡面也有金融卡：金融卡是新類別資料夾，不改既有資料夾名稱，已匯入文件的對照表路徑才不變。
+  金融卡的其他類別（約定條款 PDF、說明頁、richart.tw）由後續 ticket 加入，命名照這個類別：資料夾與本地名稱以 debit_ 開頭
+  （richart.tw 的文件以 richart_ 開頭），因為 _meta/html、_meta/print 是所有類別共用的平面目錄，名稱必須全域唯一，
+  而官網金融卡的群組編號（cg003、cg008）和信用卡卡片頁重複。
 
 輸出結構：
 - DIR/<類別資料夾>/：匯入知識庫的文件，每個類別一個資料夾（ingest 不遞迴，一次匯入一個資料夾）。
@@ -25,7 +31,7 @@
   還有「過期略過」（活動）、「格式不支援略過」（活動圖片）、「外部網域略過」與「重複略過」（權益附件）。
   更新模式另有「內容變更」、「未變」、「下架」與「過期移除」（見下面「更新模式」）。
 
-更新模式（--update，增量更新 spec 的下載端；目前涵蓋文件下載區 PDF 與網頁類的比對，卡片、權益、下載、活動四個列表類別的下架，
+更新模式（--update，增量更新 spec 的下載端；目前涵蓋文件下載區 PDF 與網頁類的比對，卡片、權益、下載、活動、金融卡卡片頁五個列表類別的下架，
 權益附件的比對與下架，活動的過期判斷與活動圖片跟著活動走）：
 - 文件下載區的 PDF：本地已有的檔案重新下載一次並比對 SHA-256。內容不同才換掉原檔，清單記「內容變更」；相同就不碰原檔
   （位元組與修改時間都不變，清單記「未變」），這樣之後匯入時沒變的文件可以走 RAG-Anything 的解析快取（快取鍵含修改時間與內容雜湊）。
@@ -40,7 +46,7 @@
   文件不存在（存檔的原始 HTML 在，第一次下載時轉檔失敗留下的狀態）時不比對，照新增處理：用這次取得的原始 HTML 轉檔，成功記「已下載」；
   活動的存檔 HTML 讀出的期間已過期時除外，不請求、不轉檔，記「過期略過」。
   文件在但存檔的原始 HTML 不在（無法比對）時視為變更（ASSUMPTION）。
-- 下架（卡片、權益、下載、活動；權益附件的下架另見下一項，活動圖片的去留見下面「活動過期與活動圖片」）：這次官網列表裡沒有、本地類別資料夾（第一層）裡有的文件，
+- 下架（卡片、權益、下載、活動、金融卡卡片頁；權益附件的下架另見下一項，活動圖片的去留見下面「活動過期與活動圖片」）：這次官網列表裡沒有、本地類別資料夾（第一層）裡有的文件，
   連同它在 DIR/_meta/html/、DIR/_meta/print/ 的檔案（有才搬），搬到 DIR/_meta/removed/<下載當天>/，底下保留原本的相對路徑：
   文件到 <類別資料夾>/<檔名>，原始 HTML 到 html/<名稱>.html，列印用 HTML 到 print/<名稱>.html。清單記「下架」。
   _meta 在資料根目錄，不在類別資料夾底下，所以匯入時不會挑到搬走的檔案。這樣之後匯入端才看得到這份文件已經不在。
@@ -53,6 +59,9 @@
   - 某個類別的列表頁沒有成功取得（請求失敗、逾時、翻頁失敗），那個類別這次不搬任何檔案，stderr 寫明列表與原因，結束碼 1，其他類別照常。
     列表頁回應成功、卻解析出 0 筆，而本地這個類別資料夾有文件時，也當成列表頁沒有成功取得（官網改版讓解析失效的可能高於整類下架），
     不搬任何檔案，stderr 寫明，結束碼 1；本地沒有文件時，0 筆不算失敗。
+  - 金融卡卡片頁的列表是兩層：專區列表頁找群組落地頁，落地頁再轉址到卡片頁。列表頁沒有成功取得、列表頁解析出 0 張而本地有檔案時，
+    規則同上。另外，任何一個落地頁請求失敗或找不到轉址目標時，那一張記「失敗」（url 是落地頁網址，檔名 debit_card_cgXXX，沒有卡片編號與副檔名），
+    其他卡照常，這次整個金融卡卡片頁類別不判斷下架（stderr 寫明，結束碼 1），已下載的那張不會被當成下架搬走。
   - 判斷只看類別資料夾裡的檔名是否在這次列表算出的檔名之內（檔名規則見下面「本地檔名」）。同一類別兩個網址組出同一個檔名而加了網址雜湊後綴的
     情況，列表增減會改變後綴，舊檔名會被當成下架、新檔名當成新增。
 - 權益附件跟著權益子頁上的連結走：
@@ -155,6 +164,13 @@
   原因寫出它在下載區的檔名（例如 right0701 連到的 _115_001final.pdf，下載區的 download__115_001final.pdf）；
   其餘照 save_pdf：確認以 %PDF- 開頭後原樣存檔、再次執行時已存在就略過、失敗只記那一份。
   下載區的列表失敗（沒有下載區的網址）時，無法判斷重複，這些 PDF 照常下載到權益附件資料夾。
+- 金融卡卡片頁的轉址：群組落地頁 payment/cgXXX/ 的主內容區只有一段 location.replace("…") 轉址，內容在 card01/ 或 card001/
+  （勞動保障卡與蝴蝶悠遊Debit卡是 card001/）。腳本用正規表示式讀出落地頁裡第一個 location.replace 的參數，不執行 JS；相對網址以落地頁網址為基準解析，
+  fragment 與 query 去掉。目標的協定與網域必須和落地頁相同，路徑必須是同一個 payment/cgXXX/ 底下的一層（payment/cgXXX/<一段>/），
+  否則當成找不到轉址目標，那一張失敗，目標不請求。本地名稱取目標的最後一段，所以轉址目標從 card01/ 改成 card001/ 時，
+  舊名稱算下架、新名稱算新增（ASSUMPTION：官網很少改，接受重新匯入一份）。
+  每次執行都要請求每個落地頁（名稱取決於轉址目標），包括本地已有文件、不加 --update 而略過的卡，所以略過的卡仍有 1 個落地頁請求，卡片頁本身不請求。
+  ASSUMPTION：location.replace 取整頁第一個，不限定在主內容區內（2026-11-02 盤點的 5 個落地頁只有主內容區裡那一個）。
 - 單頁失敗（HTTP、網路、轉址到外部網域、網址無法送出請求、轉檔、檔案系統）時記下原因，其他頁照常處理；最後列出所有失敗的頁面並以非零碼結束。
   列表頁（總覽頁、權益頁、文件下載頁與刷卡優惠列表的任何一頁）本身失敗時，那一類沒有任何網址，指出是哪一個列表；
   其他類別照常處理，最後以非零碼結束。
@@ -182,7 +198,7 @@
   ticket 11 預期 7 份，只對應 right07xx；其餘 11 份（SKinsurance_20260626.pdf 等）依同一條規則也會收，使用者 2026-10-31 決定 18 份全收、不限縮。
   數量沒有預期值，只印出找到的連結數（含外部網域與重複的）。
 - 官網改版時，列表頁的連結格式、id="centercontainer" 或 class page-content 可能失效；總覽頁找到的卡片數不是 16、
-  權益頁找到的子頁數不是 46、下載區找到的 PDF 數不是 19 時，腳本會印出實際數量提醒，但不中止。
+  權益頁找到的子頁數不是 46、下載區找到的 PDF 數不是 19、金融卡卡片頁數不是 5 時，腳本會印出實際數量提醒，但不中止。
 - 翻頁上限 DOWNLOAD_MAX_PAGES（ASSUMPTION：20，目前實際只有 2 頁）。翻滿上限仍有新的 PDF 時，
   視為下載頁失敗（官網改版或不再重複最後一頁的徵兆），而不是無限翻頁。
 - 只確認 PDF 以 `%PDF-` 開頭，不檢查檔案是否完整、能不能開啟（ASSUMPTION）。
@@ -1030,6 +1046,9 @@ class Run:
 
     previous_banners 只在更新模式用：活動詳情頁網址對「這次重新取得之前，存檔的原始 HTML 裡的主視覺網址」
     （沒有主視覺為 None），fetch_document 在比對每個已有文件的活動之前填入，讓活動圖片找出主視覺網址變了的活動。
+
+    collect_failures 是類別名稱對「找文件的過程中，單一項目失敗」的清單紀錄（金融卡卡片頁：某個群組落地頁找不到轉址目標或請求失敗）：
+    collect 不拋出 FetchError（列表頁本身沒問題），其餘項目照常回傳；main 把這些紀錄加進清單，而且該類別這次不判斷下架。
     """
 
     out: Path
@@ -1042,6 +1061,7 @@ class Run:
     update: bool
     found: dict[str, list[str]] = field(default_factory=dict)
     previous_banners: dict[str, str | None] = field(default_factory=dict)
+    collect_failures: dict[str, list["Record"]] = field(default_factory=dict)
 
     def base(self, site: str) -> str:
         """網域代號對應的網址前綴。
@@ -1205,6 +1225,81 @@ def collect_from_one_page(run: Run, category: Category) -> list[str]:
     """
     list_url = run.base(category.list_site) + category.list_path
     return find_page_links(decode_page(run.fetcher.get(list_url)), list_url, category.link_pattern)
+
+
+DEBIT_GROUP_PATTERN = re.compile(r"^/TSB/personal/credit/intro/payment/(cg\d+)/$")
+REDIRECT_PATTERN = re.compile(r"""location\.replace\(\s*(["'])(.*?)\1\s*\)""")
+
+
+def find_redirect_target(landing_html: str, landing_url: str, card_pattern: re.Pattern[str]) -> str:
+    """從金融卡群組落地頁讀出轉址目標（location.replace 的參數），不執行 JS。
+
+    Args:
+        landing_html: 落地頁 HTML。
+        landing_url: 落地頁網址，用來解析相對網址，也限定轉址目標的網域與 payment/cgXXX/。
+        card_pattern: 卡片頁路徑的格式，第 1 個群組是 cgXXX。
+
+    Returns:
+        卡片頁完整網址（不含 query 與 fragment，路徑中 ASCII 以外的字元已百分比編碼）。
+
+    Raises:
+        FetchError: 落地頁沒有轉址、網址格式錯誤，或目標不在落地頁的網域、不在同一個 payment/cgXXX/ 底下。
+    """
+    match = REDIRECT_PATTERN.search(landing_html)
+    if match is None:
+        raise FetchError("找不到轉址目標（落地頁沒有 location.replace）")
+    landing = urlparse(landing_url)
+    target = resolve_href(landing_url, match.group(2))
+    if target is None:
+        raise FetchError(f"找不到轉址目標（轉址網址格式錯誤：{match.group(2)}）")
+    if (target.scheme, target.netloc.lower()) != (landing.scheme, landing.netloc.lower()):
+        raise FetchError(f"找不到轉址目標（{match.group(2)} 不在官網網域 {landing.netloc}）")
+    landing_group = DEBIT_GROUP_PATTERN.match(landing.path)
+    assert landing_group is not None, landing_url
+    group = card_pattern.match(unquote(target.path))
+    if group is None or group.group(1) != landing_group.group(1):
+        raise FetchError(f"找不到轉址目標（{match.group(2)} 不在 {landing.path} 底下）")
+    return request_url(target._replace(params="", query="", fragment="").geturl())
+
+
+def collect_debit_cards(run: Run, category: Category) -> list[str]:
+    """從簽帳金融卡專區列表頁找群組落地頁，再取各落地頁的轉址目標，得到卡片頁網址（金融卡卡片頁）。
+
+    每個落地頁都要請求一次（本地名稱取決於轉址目標是 card01 還是 card001），包括本地已有文件的卡。
+    單一落地頁失敗（請求失敗、找不到轉址目標）不讓整個類別失敗：那一張的失敗紀錄放進 run.collect_failures，其他卡照常。
+
+    Args:
+        run: 一次執行共用的設定。
+        category: 金融卡卡片頁類別；link_pattern 是卡片頁路徑的格式。
+
+    Returns:
+        卡片頁完整網址（去除重複、保留順序）。列表頁失敗時拋出 FetchError。
+    """
+    list_url = run.base(category.list_site) + category.list_path
+    landings = find_page_links(decode_page(run.fetcher.get(list_url)), list_url, DEBIT_GROUP_PATTERN)
+    cards: dict[str, None] = {}
+    failures: list[Record] = []
+    for landing in landings:
+        try:
+            cards[find_redirect_target(decode_page(run.fetcher.get(landing)), landing, category.link_pattern)] = None
+        except FetchError as exc:
+            group = DEBIT_GROUP_PATTERN.match(urlparse(landing).path)
+            assert group is not None, landing
+            failures.append(
+                Record(
+                    landing,
+                    category.name,
+                    f"{category.name_prefix}_{group.group(1)}",
+                    category.fmt,
+                    run.today.isoformat(),
+                    "",
+                    "",
+                    RESULT_FAILED,
+                    str(exc),
+                )
+            )
+    run.collect_failures[category.name] = failures
+    return list(cards)
 
 
 def request_url(absolute: str) -> str:
@@ -2061,9 +2156,29 @@ IMAGES = Category(
     produce=save_image,
     refresh=None,
 )
-CATEGORIES = (CARDS, RIGHTS, DOWNLOADS, ATTACHMENTS, ACTIVITIES, IMAGES)
+DEBIT_CARDS = Category(
+    name="金融卡卡片頁",
+    list_label="簽帳金融卡專區列表頁",
+    list_name="簽帳金融卡專區",
+    list_site="www",
+    list_path="/TSB/personal/credit/intro/payment/",
+    # 卡片頁是落地頁轉址的目標 payment/cgXXX/card01/ 或 card001/；本地名稱取群組編號與最後一段
+    link_pattern=re.compile(r"^/TSB/personal/credit/intro/payment/(cg\d+)/([^/]+)/$"),
+    expected_count=5,
+    unit="張卡片頁",
+    name_prefix="debit_card",
+    folder="debit_cards",
+    extension="pdf",
+    fmt=FORMAT_PDF,
+    keeps_html=True,
+    reads_period=False,
+    collect=collect_debit_cards,
+    produce=web_page_producer(print_with_chrome),
+    refresh=web_page_refresher(print_with_chrome),
+)
+CATEGORIES = (CARDS, RIGHTS, DOWNLOADS, ATTACHMENTS, ACTIVITIES, IMAGES, DEBIT_CARDS)
 # 更新模式下，列表裡沒有的文件會被搬走的類別（權益附件與活動圖片的下架判斷不依列表，另外處理）
-REMOVAL_CATEGORIES = (CARDS, RIGHTS, DOWNLOADS, ACTIVITIES)
+REMOVAL_CATEGORIES = (CARDS, RIGHTS, DOWNLOADS, ACTIVITIES, DEBIT_CARDS)
 
 
 def document_filename(category: Category, url: str, name: str) -> str:
@@ -2397,7 +2512,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str]) -> int:
-    """下載總覽頁列出的卡片頁、權益頁列出的權益子頁、文件下載區的 PDF、權益子頁連到的 PDF、刷卡優惠的活動頁與前 8 個主視覺。
+    """下載總覽頁列出的卡片頁、權益頁列出的權益子頁、文件下載區的 PDF、權益子頁連到的 PDF、刷卡優惠的活動頁與前 8 個主視覺、簽帳金融卡專區的卡片頁。
 
     Args:
         argv: 不含程式名稱的參數清單。
@@ -2435,6 +2550,15 @@ def main(argv: list[str]) -> int:
             print(f"ERROR 列表「{category.list_name}」（{list_url}）失敗：{exc}{note}", file=sys.stderr)
             failed_lists.append(category.list_name)
             continue
+        collect_failures = run.collect_failures.get(category.name, [])
+        if removable and collect_failures:
+            # 有項目沒取得，本地對應的文件不在這次的清單裡，但不是下架
+            print(
+                f"ERROR 列表「{category.list_name}」有 {len(collect_failures)} 個項目沒有成功取得"
+                f"（{'、'.join(r.url for r in collect_failures)}）；這個類別這次不搬任何檔案",
+                file=sys.stderr,
+            )
+            removable = False
         if removable and not urls and local_documents(run, category):
             # 回應成功卻解析出 0 筆，而本地有文件：官網改版讓解析失效的可能高於整類下架，當成列表沒有取得
             print(
@@ -2452,6 +2576,7 @@ def main(argv: list[str]) -> int:
         if run.update and category is IMAGES:
             records.extend(remove_replaced_images(run, urls))
         records.extend(fetch_document(run, category, url, names[url]) for url in urls)
+        records.extend(collect_failures)
         if removable:
             listed = {document_filename(category, url, names[url]) for url in urls}
             records.extend(remove_missing(run, category, listed))
