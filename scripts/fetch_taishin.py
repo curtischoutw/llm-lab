@@ -26,7 +26,7 @@
   更新模式另有「內容變更」、「未變」、「下架」與「過期移除」（見下面「更新模式」）。
 
 更新模式（--update，增量更新 spec 的下載端；目前涵蓋文件下載區 PDF 與網頁類的比對，卡片、權益、下載、活動四個列表類別的下架，
-活動的過期判斷與活動圖片跟著活動走）：
+權益附件的比對與下架，活動的過期判斷與活動圖片跟著活動走）：
 - 文件下載區的 PDF：本地已有的檔案重新下載一次並比對 SHA-256。內容不同才換掉原檔，清單記「內容變更」；相同就不碰原檔
   （位元組與修改時間都不變，清單記「未變」），這樣之後匯入時沒變的文件可以走 RAG-Anything 的解析快取（快取鍵含修改時間與內容雜湊）。
   新出現的 PDF 沿用「已下載」。下載失敗（HTTP、網路、內容不是 PDF）時原檔不動，清單記「失敗」，結束碼 1。
@@ -39,7 +39,7 @@
   文件不存在（存檔的原始 HTML 在，第一次下載時轉檔失敗留下的狀態）時不比對，照新增處理：用這次取得的原始 HTML 轉檔，成功記「已下載」；
   活動的存檔 HTML 讀出的期間已過期時除外，不請求、不轉檔，記「過期略過」。
   文件在但存檔的原始 HTML 不在（無法比對）時視為變更（ASSUMPTION）。
-- 下架（卡片、權益、下載、活動；權益附件的下架判斷還沒做，活動圖片的去留見下面「活動過期與活動圖片」）：這次官網列表裡沒有、本地類別資料夾（第一層）裡有的文件，
+- 下架（卡片、權益、下載、活動；權益附件的下架另見下一項，活動圖片的去留見下面「活動過期與活動圖片」）：這次官網列表裡沒有、本地類別資料夾（第一層）裡有的文件，
   連同它在 DIR/_meta/html/、DIR/_meta/print/ 的檔案（有才搬），搬到 DIR/_meta/removed/<下載當天>/，底下保留原本的相對路徑：
   文件到 <類別資料夾>/<檔名>，原始 HTML 到 html/<名稱>.html，列印用 HTML 到 print/<名稱>.html。清單記「下架」。
   _meta 在資料根目錄，不在類別資料夾底下，所以匯入時不會挑到搬走的檔案。這樣之後匯入端才看得到這份文件已經不在。
@@ -52,6 +52,16 @@
     不搬任何檔案，stderr 寫明，結束碼 1；本地沒有文件時，0 筆不算失敗。
   - 判斷只看類別資料夾裡的檔名是否在這次列表算出的檔名之內（檔名規則見下面「本地檔名」）。同一類別兩個網址組出同一個檔名而加了網址雜湊後綴的
     情況，列表增減會改變後綴，舊檔名會被當成下架、新檔名當成新增。
+- 權益附件跟著權益子頁上的連結走：
+  - 比對：本地已有的附件重新下載並比對 SHA-256，和下載區 PDF 相同的規則（內容不同才換掉，記「內容變更」；相同記「未變」、
+    位元組與修改時間不動；下載失敗時原檔不動，記「失敗」）。
+  - 下架：附件的候選是這次所有權益子頁（權益列表裡的）存檔的原始 HTML 連到的 PDF（讀存檔，和不加 --update 時相同；子頁在這次執行裡
+    已先換成最新的存檔）。本地 DIR/rights_attachments/ 裡的檔名不在候選算出的檔名之內，才算下架：同一份附件被多個子頁連到時，
+    只要還有一頁連到就不算；子頁本身下架（搬走、不在權益列表）時，它不再貢獻候選。搬移方式與上面的下架相同，清單記「下架」。
+  - 權益列表沒有成功取得，或任何一個權益子頁處理失敗（請求失敗，或內容變了但轉檔失敗而存檔沒換）時，這次不判斷附件下架，
+    不搬任何附件，stderr 寫「權益附件這次不判斷下架」與原因；原因本身已讓結束碼是 1，下次子頁都成功時再判斷。
+  - ASSUMPTION：權益子頁都成功取得、但連到的 PDF 一個也沒有時，本地的附件全部算下架（不像列表類別有 0 筆的防護，因為規格只對列表頁定了這條）。
+    附件下架紀錄的網址是空字串，沿用列表類別下架的做法。
 - 活動過期與活動圖片（更新模式；活動列表沒有成功取得時，這次不判斷活動過期，也不判斷活動圖片，見上面的列表失敗規則）：
   - 過期：每個已有活動文件的活動重新取得詳情頁，期間的結束日早於下載當天就算過期（現有規則，結束日等於當天仍有效），
     不比對、不轉檔，文件連同 _meta/html、_meta/print 的檔案搬到 DIR/_meta/removed/<下載當天>/（搬法同下架），清單記「過期移除」，
@@ -66,7 +76,6 @@
     少於 IMAGE_LIMIT（8）個時才補，從「活動文件確實存在、有主視覺、主視覺網址還沒有佔名額」的活動補：這次重新取得之前存檔的
     主視覺網址和現在不同的排最前面，其餘依活動被找到的順序。補不滿 8 個時印出「活動圖片名額 N/8，沒有更多候選」。
     新出現在前面的活動不擠掉現有的圖片。仍有效、主視覺網址沒變、已有圖片的活動不重新請求圖片，圖片與修改時間不變，清單記「已存在略過」。
-- 權益附件在更新模式下和不加 --update 時一樣：本地已有就略過。權益附件的比對與下架還沒做。
 - 結束時多印一段「各類別統計」：每個類別每種結果的數量。不加 --update 時不印。
 - 請求間隔、網域限制與轉址規則和不加 --update 時相同。
 
@@ -1059,7 +1068,7 @@ class Category:
     補上紀錄的 html_sha256（有原始 HTML 的類別），失敗時拋出 FetchError。
     refresh 只在更新模式下用在本地已有的文件，參數同 produce，回傳 True 表示內容變了、最終檔案已換成新內容，
     False 表示沒變、最終檔案原封不動；失敗時拋出 FetchError，而且最終檔案不動。活動頁的 refresh 在期間已過期時拋出
-    SkipDocument（檔案不動），由 fetch_document 把活動搬走。None 表示這個類別的更新模式還沒有比對（已存在就略過）。
+    SkipDocument（檔案不動），由 fetch_document 把活動搬走。None 表示這個類別的更新模式不比對內容（活動圖片：已存在就略過，去留由 remove_unreferenced_images 判斷）。
     local_name 由 name_prefix 和 link_pattern 的各個群組以底線接起來，例如卡片 card_cg047_card001。
     extension 是 None 時，副檔名取自文件網址路徑的最後一個副檔名（小寫），活動圖片是這樣。
     """
@@ -1818,7 +1827,7 @@ ATTACHMENTS = Category(
     reads_period=False,
     collect=collect_attachments,
     produce=save_attachment,
-    refresh=None,
+    refresh=refresh_pdf,
 )
 
 
@@ -2100,6 +2109,52 @@ def remove_missing(run: Run, category: Category, filenames: set[str]) -> list[Re
     return [move_removed(run, category, name) for name in local_documents(run, category) if name not in filenames]
 
 
+def attachment_removal_blocker(records: list[Record], failed_lists: list[str]) -> str | None:
+    """權益附件這次能不能判斷下架：權益列表與每個權益子頁都要成功取得。
+
+    子頁內容變了但轉檔失敗時存檔的原始 HTML 不換，附件的候選讀的是舊的連結，所以請求失敗與轉檔失敗都算沒有成功取得。
+
+    Args:
+        records: 目前為止這次執行的紀錄（權益類別已處理完）。
+        failed_lists: 目前為止沒有成功取得的列表名稱。
+
+    Returns:
+        不能判斷的原因；可以判斷時為 None。
+    """
+    if RIGHTS.list_name in failed_lists:
+        return f"權益列表「{RIGHTS.list_name}」沒有成功取得"
+    failed = [r.filename for r in records if r.category == RIGHTS.name and r.result == RESULT_FAILED]
+    if failed:
+        return f"{len(failed)} 個權益子頁請求、轉檔或搬移失敗（{'、'.join(failed)}）"
+    return None
+
+
+def remove_unlinked_attachments(
+    run: Run, category: Category, urls: list[str], records: list[Record], failed_lists: list[str]
+) -> list[Record]:
+    """所有權益子頁都不再連到的附件算下架，搬到 DIR/_meta/removed/<日期>/。
+
+    附件的候選（urls）讀的是權益子頁存檔的原始 HTML；同一份附件被多個子頁連到時，只要還有一頁連到就在候選裡，不算下架。
+    權益列表或任何一個權益子頁沒有成功取得時，這次不判斷，stderr 寫明原因（原因本身已讓結束碼是 1）。
+
+    Args:
+        run: 一次執行共用的設定。
+        category: 權益附件類別。
+        urls: 這次所有權益子頁連到的附件網址（含外部網域與下載區已有的網址，它們沒有本地檔，不影響判斷）。
+        records: 目前為止這次執行的紀錄。
+        failed_lists: 目前為止沒有成功取得的列表名稱。
+
+    Returns:
+        每一份下架（或搬移失敗）附件的清單紀錄；不判斷時為空。
+    """
+    blocker = attachment_removal_blocker(records, failed_lists)
+    if blocker is not None:
+        print(f"ERROR 權益附件這次不判斷下架：{blocker}", file=sys.stderr)
+        return []
+    names = category.local_names(urls)
+    return remove_missing(run, category, {document_filename(category, url, names[url]) for url in urls})
+
+
 # ==============================
 # 主程式
 # ==============================
@@ -2147,7 +2202,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--update",
         action="store_true",
-        help="更新模式：已存在的下載區 PDF 與網頁類重新取得並比對內容，不同才換掉；官網列表已沒有的文件、已過期的活動搬到 _meta/removed/<日期>/，活動圖片跟著活動走；結束時印出各類別、各結果的數量",
+        help="更新模式：已存在的下載區 PDF、權益附件與網頁類重新取得並比對內容，不同才換掉；官網列表已沒有的文件、已過期的活動、所有權益子頁都不再連到的附件搬到 _meta/removed/<日期>/，活動圖片跟著活動走；結束時印出各類別、各結果的數量",
     )
     return parser.parse_args(argv)
 
@@ -2209,6 +2264,8 @@ def main(argv: list[str]) -> int:
         if removable:
             listed = {document_filename(category, url, names[url]) for url in urls}
             records.extend(remove_missing(run, category, listed))
+        elif run.update and category is ATTACHMENTS:
+            records.extend(remove_unlinked_attachments(run, category, urls, records, failed_lists))
     if run.update:
         records.extend(remove_unreferenced_images(run))
 
