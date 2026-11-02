@@ -2,7 +2,7 @@
 
 為什麼存在：增量更新（spec：.scratch/incremental-update/spec.md「匯入端：對照表」規則 2、「匯入端：替換與移除」）要讓
 知識庫跟上來源檔的改版，查詢不能同時檢索到新舊兩個版本。這裡驗證 ticket 02 的範圍：替換的順序、新版本失敗時清掉寫了
-一半的內容、刪除前先查共用版本、舊版本刪除失敗與替換中斷後的補刪。用檔名遷移、prune、答案快取是後面 ticket 的範圍。
+一半的內容、刪除前先查共用版本、舊版本刪除失敗與替換中斷後的補刪。用檔名遷移、prune、答案快取見各自的測試檔。
 
 關鍵設計決策：
 - 縫與其他 ingest 測試相同：CLI 子行程（`python -m rag_lab`）與 Python API（子行程內呼叫模組函式與 Session），
@@ -67,7 +67,7 @@ class ReplaceHelpers(RegistryHelpers):
     def context_of_query(self, question: str) -> str:
         """執行一次 query，回傳送給模型產生答案的 prompt（含檢索到的 context）。
 
-        同一題會命中 LightRAG 的答案快取（快取鍵不含檢索到的內容；清快取是 ticket 05 的範圍），所以每次查詢要用不同的題目。
+        每次查詢用不同的題目：這裡要看的是檢索到的 context，同一題命中答案快取時不會送出答案請求（清快取的行為見 tests/test_answer_cache.py）。
 
         Args:
             question: 問題文字。

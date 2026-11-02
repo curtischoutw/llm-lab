@@ -26,7 +26,14 @@ CLI 只負責參數與輸出格式，這裡負責行為。
 - 用檔名遷移（_find_legacy_version，spec「匯入端：對照表」規則 3）：對照表沒有這個路徑、這次的 ID 也沒完整匯入時，用檔名
   到文件狀態找已完整處理、而且沒對照到任何路徑的文件：剛好一份當作舊版本替換，0 份記「新增」，多份拋 PipelineError 列出候選
   （該篇記成失敗，不替換也不新增，知識庫與對照表都沒動）。文件狀態只記檔名，同名的別份文件也會對到，所以對照表的排除是這條規則的
-  安全網。答案快取是後續 ticket 的範圍（.scratch/incremental-update/）。
+  安全網。
+- 答案快取（_clear_answer_cache，spec「匯入端：答案快取」）：每份文件處理完（成功或失敗），只要那份文件的處理對 LightRAG
+  的儲存做了寫入或刪除，就立刻清掉 LLM 快取裡 cache_type 為 query 的項目，保留 keywords（查詢關鍵字）與 extract／summary
+  （匯入用的抽取快取），之後同一題用新的知識庫重新回答；不等整批結束，行程中途被停掉時已經改動的部分也已經清過。「有改動」
+  由 _KnowledgeBaseChange 在呼叫 LightRAG 的寫入或刪除之前標記：開始 process_document_complete（解析完成、開始寫入；之後
+  不論哪一步失敗都算）、清掉先前失敗的舊紀錄與呼叫 adelete_by_doc_id（刪除失敗也算呼叫過）；解析階段就失敗的、沒變、
+  與別的路徑共用版本而沒有寫入或刪除的不標記，所以不清。不用 LightRAG 的 aclear_cache：它 drop 整個 LLM 快取。
+  清掉的筆數累計在 IngestSummary.answer_cache_cleared。
 - 來源已不在與 prune（_ingest 的 source_folder、prune 參數，spec「匯入端：替換與移除」）：對照表的來源資料夾記 `ingest <資料夾>`
   的那個資料夾（resolve() 後；Python API 指定了就記指定的，沒指定記檔案實體路徑所在的資料夾），所以資料夾裡指向別處的 symlink
   檔，對照表的路徑可以不在來源資料夾底下。指定了來源資料夾才在匯入之後檢查：對照表裡來源資料夾等於它、路徑在檔案系統上已不存在的
@@ -115,6 +122,8 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   `mineru --version` 檢查 parser，查詢不解析文件也一樣要通過。
 
 已知極限：
+- 列舉查詢答案快取用 JsonKVStorage 的私有欄位 `_data` 與 `_storage_lock`：LightRAG 1.4.16 的 BaseKVStorage 沒有列出所有 key 的
+  公開方法，而 aclear_cache 會連關鍵字與抽取快取一起清。刪除與寫檔（index_done_callback）走公開方法。
 - rerank 失敗的偵測在 models.rerank_model_func：只涵蓋回應的格式與內容（請求例外、HTTP 錯誤、空結果、筆數、index、分數是否合法）。
   格式正確但排序品質差，這裡看不出來。
 - 使用 RAGAnything 的私有方法 _ensure_lightrag_initialized：官方沒有公開的等價 API，
@@ -175,6 +184,9 @@ STATUS_PAGE_SIZE = 200
 OUTCOME_ADDED = "added"
 OUTCOME_REPLACED = "replaced"
 OUTCOME_UNCHANGED = "unchanged"
+
+# LightRAG 的 LLM 快取項目的 cache_type：查詢答案。其餘有 keywords（查詢關鍵字）、extract（匯入的實體抽取）、summary
+QUERY_CACHE_TYPE = "query"
 
 # rerank 之後保留的 chunk 數與分數門檻。數值等於 LightRAG 的預設值，但 LightRAG 會讀行程環境的 CHUNK_TOP_K 與
 # MIN_RERANK_SCORE（import 時決定預設），所以明確傳入，查詢行為才不受使用者 shell 裡的環境變數影響。
@@ -415,6 +427,7 @@ class IngestSummary:
             （每份文件只歸一類）。
         removed: prune 刪除成功的文件（對照表的鍵）；別的路徑還對照到同一個文件 ID 而沒有刪知識庫內容的也算。
         remove_failed: prune 刪除失敗的文件：對照表的鍵 → 「型別：訊息」。這些文件的知識庫內容與對照表那一筆都沒動。
+        answer_cache_cleared: 這次 ingest 清掉的查詢答案快取筆數（每份有改動的文件處理完各清一次，加總）。
     """
 
     reports: list[IngestReport] = field(default_factory=list)
@@ -432,6 +445,38 @@ class IngestSummary:
     missing: list[Path] = field(default_factory=list)
     removed: list[Path] = field(default_factory=list)
     remove_failed: dict[Path, str] = field(default_factory=dict)
+    answer_cache_cleared: int = 0
+
+
+@dataclass
+class _KnowledgeBaseChange:
+    """一份文件的處理有沒有對 LightRAG 的儲存做過寫入或刪除（spec「詞彙」的「知識庫有改動」）。
+
+    在呼叫寫入或刪除之前就標記：呼叫中途失敗時，寫了一半的內容也算有改動。
+
+    Attributes:
+        changed: True 表示做過（或開始做）寫入或刪除。
+    """
+
+    changed: bool = False
+
+
+async def _clear_answer_cache(rag: RAGAnything) -> int:
+    """清掉 LLM 快取裡所有查詢答案的項目，保留查詢關鍵字與匯入用的抽取快取，並立刻寫回檔案。
+
+    Args:
+        rag: 已初始化的 RAGAnything。
+
+    Returns:
+        清掉的筆數。
+    """
+    cache = rag.lightrag.llm_response_cache
+    async with cache._storage_lock:
+        keys = [key for key, entry in cache._data.items() if entry.get("cache_type") == QUERY_CACHE_TYPE]
+    if keys:
+        await cache.delete(keys)
+        await cache.index_done_callback()
+    return len(keys)
 
 
 def _office_output_dir(parser_output_dir: str, document: Path) -> Path:
@@ -472,7 +517,9 @@ def _classify_fully_processed(known: dict[str, dict[str, str]], key: str, doc_id
     return OUTCOME_ADDED if shared else OUTCOME_UNCHANGED
 
 
-async def _remove_version(rag: RAGAnything, known: dict[str, dict[str, str]], key: str, doc_id: str) -> None:
+async def _remove_version(
+    rag: RAGAnything, known: dict[str, dict[str, str]], key: str, doc_id: str, change: _KnowledgeBaseChange
+) -> None:
     """從知識庫刪掉一個版本，保留它的 LLM 抽取快取；還有別的路徑對照到它時不刪。
 
     替換的舊版本與 `--prune` 共用這個步驟（spec「匯入端：替換與移除」）：兩者都是「這個路徑不再使用這個版本」。
@@ -483,12 +530,14 @@ async def _remove_version(rag: RAGAnything, known: dict[str, dict[str, str]], ke
         known: 對照表（路徑 → 紀錄），只讀。
         key: 不再使用這個版本的路徑（對照表的鍵）。
         doc_id: 要刪的版本的文件 ID。
+        change: 呼叫刪除之前標記「知識庫有改動」；別的路徑還對照到這個版本而沒有刪除時不標記。
 
     Raises:
         PipelineError: LightRAG 回報刪除失敗（訊息含狀態與原因）。
     """
     if any(other != key and entry["doc_id"] == doc_id for other, entry in known.items()):
         return
+    change.changed = True
     deletion = await rag.lightrag.adelete_by_doc_id(doc_id, delete_llm_cache=False)
     # not_found：知識庫已經沒有它（例如上次刪到一半被中斷），目標狀態已達成
     if deletion.status not in ("success", "not_found"):
@@ -496,7 +545,12 @@ async def _remove_version(rag: RAGAnything, known: dict[str, dict[str, str]], ke
 
 
 async def _remove_superseded_version(
-    rag: RAGAnything, known: dict[str, dict[str, str]], document: Path, old_id: str, new_id: str
+    rag: RAGAnything,
+    known: dict[str, dict[str, str]],
+    document: Path,
+    old_id: str,
+    new_id: str,
+    change: _KnowledgeBaseChange,
 ) -> None:
     """新版本已完整匯入後刪掉舊版本；失敗時訊息寫出新舊兩個文件 ID。
 
@@ -506,12 +560,13 @@ async def _remove_superseded_version(
         document: 被替換的文件。
         old_id: 對照表記的舊版本文件 ID。
         new_id: 已完整匯入的新版本文件 ID。
+        change: 見 _remove_version。
 
     Raises:
         PipelineError: 刪除舊版本失敗。對照表沒有改，下次 ingest 會依「這次的 ID 已完整匯入」補刪舊版本。
     """
     try:
-        await _remove_version(rag, known, _registry_key(document), old_id)
+        await _remove_version(rag, known, _registry_key(document), old_id, change)
     except Exception as exc:
         raise PipelineError(
             f"{document.name} 的新版本 {new_id} 已匯入，但刪除舊版本 {old_id} 失敗：{exc}。"
@@ -583,13 +638,16 @@ async def _find_legacy_version(rag: RAGAnything, document: Path, known: dict[str
     return candidates[0] if candidates else None
 
 
-async def _ingest_one(rag: RAGAnything, document: Path, known: dict[str, dict[str, str]]) -> IngestReport:
+async def _ingest_one(
+    rag: RAGAnything, document: Path, known: dict[str, dict[str, str]], change: _KnowledgeBaseChange
+) -> IngestReport:
     """匯入單篇文件；已完整處理就略過，先前未完成的先清掉舊紀錄再重匯，內容變了的先匯入新版本再刪舊版本。
 
     Args:
         rag: 已初始化的 RAGAnything。
         document: 文件路徑。
         known: 對照表（路徑 → 紀錄），只讀。
+        change: 這份文件的處理對知識庫做過寫入或刪除時，在呼叫之前標記（成功或失敗都保留標記，由呼叫端據此清答案快取）。
 
     Returns:
         這一篇的 IngestReport（total_seconds、description_failed、write_failed 由呼叫端填入）。成功時 outcome 是分類；
@@ -619,7 +677,7 @@ async def _ingest_one(rag: RAGAnything, document: Path, known: dict[str, dict[st
             outcome = _classify_fully_processed(known, key, doc_id)
             if outcome == OUTCOME_REPLACED:
                 # 上次替換中斷：新版本已完整匯入、舊版本沒刪
-                await _remove_superseded_version(rag, known, document, old_id, doc_id)
+                await _remove_superseded_version(rag, known, document, old_id, doc_id, change)
             return IngestReport(
                 document, skipped=True, parse_seconds=timer.parse_seconds or 0.0, doc_id=doc_id, outcome=outcome
             )
@@ -630,11 +688,13 @@ async def _ingest_one(rag: RAGAnything, document: Path, known: dict[str, dict[st
             # 對照表記的舊版本已不在知識庫：照一般匯入新版本，不刪任何東西
             old_id = None
         if await rag.lightrag.doc_status.get_by_id(doc_id) is not None:
+            change.changed = True
             deletion = await rag.lightrag.adelete_by_doc_id(doc_id)
             if deletion.status != "success":
                 raise PipelineError(
                     f"{document.name} 先前的匯入沒有完成，清除舊紀錄 {doc_id} 失敗（{deletion.status}）：{deletion.message}"
                 )
+        change.changed = True
         try:
             await rag.process_document_complete(str(document), **parse_kwargs)
         except Exception as exc:
@@ -667,7 +727,7 @@ async def _ingest_one(rag: RAGAnything, document: Path, known: dict[str, dict[st
         # 沒有完整匯入過（新文件、先前失敗、或對照表記的舊版本已不在知識庫）：照一般匯入，成功就是新增
         report.outcome = OUTCOME_ADDED
     else:
-        await _remove_superseded_version(rag, known, document, old_id, doc_id)
+        await _remove_superseded_version(rag, known, document, old_id, doc_id, change)
         report.outcome = OUTCOME_REPLACED
     return report
 
@@ -878,16 +938,20 @@ async def _prune_missing(
         settings: 已驗證的設定（取 WORKING_DIR）。
         known: 對照表（路徑 → 紀錄），刪除成功的那一筆會被移除。
         missing: 要刪除的對照表鍵。
-        summary: 刪除結果記在它的 removed 與 remove_failed。
+        summary: 刪除結果記在它的 removed 與 remove_failed，清掉的答案快取筆數加進 answer_cache_cleared。
 
     Raises:
         PipelineError: 對照表寫不進去（這份文件的知識庫內容已刪，後面的文件不再處理）。
     """
     for key in missing:
+        change = _KnowledgeBaseChange()
         try:
-            await _remove_version(rag, known, key, known[key]["doc_id"])
+            await _remove_version(rag, known, key, known[key]["doc_id"], change)
         except Exception as exc:
             summary.remove_failed[Path(key)] = f"{type(exc).__name__}: {exc}"
+        if change.changed:
+            summary.answer_cache_cleared += await _clear_answer_cache(rag)
+        if Path(key) in summary.remove_failed:
             continue
         del known[key]
         try:
@@ -933,14 +997,17 @@ async def _ingest(
     for document in documents:
         description_before, write_before = models.failure_counts()
         started = time.perf_counter()
+        change = _KnowledgeBaseChange()
         try:
-            report = await _ingest_one(rag, document, known)
+            report = await _ingest_one(rag, document, known, change)
         except Exception as exc:
             # 單篇失敗不中斷整批：記下是哪一篇、為什麼，CLI 據此印出並以非零碼結束
             report = IngestReport(document, skipped=False, parse_seconds=0.0, error=f"{type(exc).__name__}: {exc}")
         report.total_seconds = time.perf_counter() - started
         report.description_failed = models.description_stats.failed - description_before
         report.write_failed = models.description_stats.write_failed - write_before
+        if change.changed:
+            summary.answer_cache_cleared += await _clear_answer_cache(rag)
         summary.reports.append(report)
         if report.error is None:
             try:

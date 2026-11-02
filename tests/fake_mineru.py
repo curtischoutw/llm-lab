@@ -20,6 +20,8 @@
 - 輸入的 PDF 帶有 `% fake version: <文字>` 一行時（測試用它造出「同一個路徑上內容改了」的新版本），多輸出一段文字
   `Version marker: <文字>`，並把表格說明改成 `Table 1: numbers (<文字>)`：文字 chunk 與表格 chunk 都隨版本改變，
   文件 ID 也跟著變。
+- 主檔名以 `stall` 開頭時，先在環境變數 `FAKE_MINERU_STALLED` 指定的路徑建立一個檔案（測試據此知道解析已經開始），
+  然後睡 10 分鐘不回應，模擬「這份文件處理到一半」；測試要自己結束整個行程群組。
 - 主檔名以 `broken` 開頭時以非零碼結束，模擬解析失敗。主檔名以 `multichunk` 開頭時
   多輸出 8 段長文字，讓 LightRAG 切出多個 chunk，測試能觀察多個 LLM 請求同時進行的情境。
 - 主檔名以 `bigtable` 開頭時，把固定的小表格換成 `big_table_html()` 的大表格（MinerU 的寫法：每個儲存格都帶
@@ -38,6 +40,7 @@ import base64
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 # 1x1 透明 PNG
@@ -111,6 +114,10 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     stem = Path(args.path).stem
+    if stem.startswith("stall"):
+        Path(os.environ["FAKE_MINERU_STALLED"]).write_text("stalled", encoding="utf-8")
+        time.sleep(600)
+        return 1
     if stem.startswith("broken"):
         print(f"fake mineru: cannot parse {stem}", file=sys.stderr)
         return 1
