@@ -1,6 +1,6 @@
 """下載台新銀行信用卡與金融卡的官網內容到本地資料夾，作為知識庫的來源文件。
 
-為什麼存在：知識庫要用台新信用卡的卡片頁、權益說明、文件下載區與刷卡優惠活動頁（約 140 份），以及簽帳金融卡專區的卡片頁。
+為什麼存在：知識庫要用台新信用卡的卡片頁、權益說明、文件下載區與刷卡優惠活動頁（約 140 份），以及簽帳金融卡專區的卡片頁、約定條款 PDF 與說明頁。
 這些內容不進版本控管，所以用這支腳本讓任何機器都能用一個指令重建同一批內容。
 
 用法：
@@ -18,9 +18,15 @@
 - 金融卡卡片頁：官網簽帳金融卡專區列表頁（payment/）上的群組落地頁（payment/cgXXX/）轉址到的卡片頁（card01/ 或 card001/），
   處理方式同卡片（取主內容區、Chrome 列印成 PDF），放在 DIR/debit_cards/，本地名稱 debit_card_cgXXX_card01（或 card001）。
   資料夾叫 taishin_credit_card，裡面也有金融卡：金融卡是新類別資料夾，不改既有資料夾名稱，已匯入文件的對照表路徑才不變。
-  金融卡的其他類別（約定條款 PDF、說明頁、richart.tw）由後續 ticket 加入，命名照這個類別：資料夾與本地名稱以 debit_ 開頭
-  （richart.tw 的文件以 richart_ 開頭），因為 _meta/html、_meta/print 是所有類別共用的平面目錄，名稱必須全域唯一，
-  而官網金融卡的群組編號（cg003、cg008）和信用卡卡片頁重複。
+- 金融卡約定條款 PDF：約定條款頁（payment/notice/TSBankGridPage-000003/）上指向官網同網域的 PDF 連結，不轉檔、原樣存檔，
+  放在 DIR/debit_terms/，本地名稱 debit_term_<PDF 主檔名>。約定條款頁本身不存成文件；指向其他網域（例如悠遊卡公司）的連結略過，
+  不下載、不記入清單。
+- 金融卡說明頁：寫死的 7 個官網網址（DEBIT_INFO_PATHS：費用、常見問題 2 頁、Richart 摘要頁、存款專區晶片金融卡 3 頁），
+  處理方式同卡片（取主內容區、Chrome 列印成 PDF），放在 DIR/debit_info/，本地名稱 debit_info_<網址最後一段>
+  （例如 debit_info_TSBankGridPage-000004、debit_info_card-list）。沒有列表頁可以解析，所以不請求任何列表。
+  ASSUMPTION：存款專區首頁（deposit/debit-card/）盤點時沒抓過，沒有主內容區時照其他頁的規則記失敗。
+- 金融卡的 richart.tw 類別由後續 ticket 加入。金融卡類別的命名：資料夾與本地名稱以 debit_ 開頭（richart.tw 的文件以 richart_ 開頭），
+  因為 _meta/html、_meta/print 是所有類別共用的平面目錄，名稱必須全域唯一，而官網金融卡的群組編號（cg003、cg008）和信用卡卡片頁重複。
 
 輸出結構：
 - DIR/<類別資料夾>/：匯入知識庫的文件，每個類別一個資料夾（ingest 不遞迴，一次匯入一個資料夾）。
@@ -31,7 +37,7 @@
   還有「過期略過」（活動）、「格式不支援略過」（活動圖片）、「外部網域略過」與「重複略過」（權益附件）。
   更新模式另有「內容變更」、「未變」、「下架」與「過期移除」（見下面「更新模式」）。
 
-更新模式（--update，增量更新 spec 的下載端；目前涵蓋文件下載區 PDF 與網頁類的比對，卡片、權益、下載、活動、金融卡卡片頁五個列表類別的下架，
+更新模式（--update，增量更新 spec 的下載端；目前涵蓋文件下載區 PDF 與網頁類的比對，卡片、權益、下載、活動、金融卡卡片頁、金融卡約定條款 PDF 六個列表類別的下架，
 權益附件的比對與下架，活動的過期判斷與活動圖片跟著活動走）：
 - 文件下載區的 PDF：本地已有的檔案重新下載一次並比對 SHA-256。內容不同才換掉原檔，清單記「內容變更」；相同就不碰原檔
   （位元組與修改時間都不變，清單記「未變」），這樣之後匯入時沒變的文件可以走 RAG-Anything 的解析快取（快取鍵含修改時間與內容雜湊）。
@@ -46,7 +52,7 @@
   文件不存在（存檔的原始 HTML 在，第一次下載時轉檔失敗留下的狀態）時不比對，照新增處理：用這次取得的原始 HTML 轉檔，成功記「已下載」；
   活動的存檔 HTML 讀出的期間已過期時除外，不請求、不轉檔，記「過期略過」。
   文件在但存檔的原始 HTML 不在（無法比對）時視為變更（ASSUMPTION）。
-- 下架（卡片、權益、下載、活動、金融卡卡片頁；權益附件的下架另見下一項，活動圖片的去留見下面「活動過期與活動圖片」）：這次官網列表裡沒有、本地類別資料夾（第一層）裡有的文件，
+- 下架（卡片、權益、下載、活動、金融卡卡片頁、金融卡約定條款 PDF；權益附件的下架另見下一項，活動圖片的去留見下面「活動過期與活動圖片」）：這次官網列表裡沒有、本地類別資料夾（第一層）裡有的文件，
   連同它在 DIR/_meta/html/、DIR/_meta/print/ 的檔案（有才搬），搬到 DIR/_meta/removed/<下載當天>/，底下保留原本的相對路徑：
   文件到 <類別資料夾>/<檔名>，原始 HTML 到 html/<名稱>.html，列印用 HTML 到 print/<名稱>.html。清單記「下架」。
   _meta 在資料根目錄，不在類別資料夾底下，所以匯入時不會挑到搬走的檔案。這樣之後匯入端才看得到這份文件已經不在。
@@ -62,6 +68,10 @@
   - 金融卡卡片頁的列表是兩層：專區列表頁找群組落地頁，落地頁再轉址到卡片頁。列表頁沒有成功取得、列表頁解析出 0 張而本地有檔案時，
     規則同上。另外，任何一個落地頁請求失敗或找不到轉址目標時，那一張記「失敗」（url 是落地頁網址，檔名 debit_card_cgXXX，沒有卡片編號與副檔名），
     其他卡照常，這次整個金融卡卡片頁類別不判斷下架（stderr 寫明，結束碼 1），已下載的那張不會被當成下架搬走。
+  - 金融卡約定條款 PDF 的列表是約定條款頁（單一頁）：頁面請求失敗、或解析出 0 份而本地 debit_terms/ 有文件時，規則同上（這次不搬任何檔案）。
+    它是 PDF 類別：比對規則同下載區 PDF，下架時沒有 _meta/html、_meta/print 的檔案可搬。
+  - 金融卡說明頁沒有下架判斷：網址是寫死的，沒有列表可比對（不在 REMOVAL_CATEGORIES）。更新模式下每頁照網頁類的規則比對主內容區，
+    請求失敗、沒有主內容區或轉檔失敗時記「失敗」，本地的文件與存檔不動。
   - 判斷只看類別資料夾裡的檔名是否在這次列表算出的檔名之內（檔名規則見下面「本地檔名」）。同一類別兩個網址組出同一個檔名而加了網址雜湊後綴的
     情況，列表增減會改變後綴，舊檔名會被當成下架、新檔名當成新增。
 - 權益附件跟著權益子頁上的連結走：
@@ -198,7 +208,7 @@
   ticket 11 預期 7 份，只對應 right07xx；其餘 11 份（SKinsurance_20260626.pdf 等）依同一條規則也會收，使用者 2026-10-31 決定 18 份全收、不限縮。
   數量沒有預期值，只印出找到的連結數（含外部網域與重複的）。
 - 官網改版時，列表頁的連結格式、id="centercontainer" 或 class page-content 可能失效；總覽頁找到的卡片數不是 16、
-  權益頁找到的子頁數不是 46、下載區找到的 PDF 數不是 19、金融卡卡片頁數不是 5 時，腳本會印出實際數量提醒，但不中止。
+  權益頁找到的子頁數不是 46、下載區找到的 PDF 數不是 19、金融卡卡片頁數不是 5、金融卡約定條款 PDF 數不是 4 時，腳本會印出實際數量提醒，但不中止。
 - 翻頁上限 DOWNLOAD_MAX_PAGES（ASSUMPTION：20，目前實際只有 2 頁）。翻滿上限仍有新的 PDF 時，
   視為下載頁失敗（官網改版或不再重複最後一頁的徵兆），而不是無限翻頁。
 - 只確認 PDF 以 `%PDF-` 開頭，不檢查檔案是否完整、能不能開啟（ASSUMPTION）。
@@ -1340,6 +1350,45 @@ def find_pdf_links(list_html: str, list_url: str, link_pattern: re.Pattern[str])
     return list(seen)
 
 
+def collect_pdfs_from_one_page(run: Run, category: Category) -> list[str]:
+    """從單一頁取出同網域的 PDF 連結（金融卡約定條款頁）。
+
+    Args:
+        run: 一次執行共用的設定。
+        category: 要找文件的類別；list_path 是那一頁，link_pattern 是 PDF 連結的路徑格式。
+
+    Returns:
+        PDF 完整網址（去除重複、保留順序）；其他網域的連結略過。頁面請求失敗時拋出 FetchError。
+    """
+    list_url = run.base(category.list_site) + category.list_path
+    return find_pdf_links(decode_page(run.fetcher.get(list_url)), list_url, category.link_pattern)
+
+
+# 金融卡說明頁：寫死的 7 個官網路徑（費用、常見問題 2 頁、Richart 摘要頁、存款專區晶片金融卡 3 頁），沒有列表頁可以解析
+DEBIT_INFO_PATHS = (
+    "/TSB/personal/credit/intro/payment/notice/TSBankGridPage-000004/",
+    "/TSB/personal/credit/intro/payment/notice/TSBankGridPage-000001/",
+    "/TSB/personal/credit/intro/payment/notice/TSBankGridPage-000340/",
+    "/TSB/personal/credit/intro/payment/notice/TSBankGridPage-000344/",
+    "/TSB/personal/deposit/debit-card/",
+    "/TSB/personal/deposit/debit-card/card-list/",
+    "/TSB/personal/deposit/debit-card/overseas-withdraw-cash-and-payment/",
+)
+
+
+def collect_fixed_info_pages(run: Run, category: Category) -> list[str]:
+    """金融卡說明頁的網址：寫死的清單，不請求任何頁面。
+
+    Args:
+        run: 一次執行共用的設定。
+        category: 金融卡說明頁類別。
+
+    Returns:
+        DEBIT_INFO_PATHS 各路徑接在官網網域前綴後面的完整網址，順序同清單。
+    """
+    return [run.base(category.list_site) + path for path in DEBIT_INFO_PATHS]
+
+
 def walk_pages(
     fetcher: Fetcher,
     page_url: Callable[[int], str],
@@ -2176,9 +2225,49 @@ DEBIT_CARDS = Category(
     produce=web_page_producer(print_with_chrome),
     refresh=web_page_refresher(print_with_chrome),
 )
-CATEGORIES = (CARDS, RIGHTS, DOWNLOADS, ATTACHMENTS, ACTIVITIES, IMAGES, DEBIT_CARDS)
+DEBIT_TERMS = Category(
+    name="金融卡約定條款 PDF",
+    list_label="約定條款頁",
+    list_name="金融卡約定條款",
+    list_site="www",
+    list_path="/TSB/personal/credit/intro/payment/notice/TSBankGridPage-000003/",
+    # 約定條款頁本身不存成文件；路徑以 .pdf 結尾、在官網網域的連結都收，名稱取最後一段的主檔名
+    link_pattern=re.compile(r"^/(?:.*/)?([^/]+)\.pdf$", re.IGNORECASE),
+    expected_count=4,
+    unit="個 PDF",
+    name_prefix="debit_term",
+    folder="debit_terms",
+    extension="pdf",
+    fmt=FORMAT_PDF,
+    keeps_html=False,
+    reads_period=False,
+    collect=collect_pdfs_from_one_page,
+    produce=save_pdf,
+    refresh=refresh_pdf,
+)
+DEBIT_INFO = Category(
+    name="金融卡說明頁",
+    list_label="說明頁清單",
+    list_name="金融卡說明頁",
+    list_site="www",
+    list_path="",
+    # 本地名稱取網址的最後一段（例如 TSBankGridPage-000004、card-list）；沒有列表頁，網址是寫死的清單
+    link_pattern=re.compile(r"^/TSB/personal/(?:.+/)?([^/]+)/$"),
+    expected_count=len(DEBIT_INFO_PATHS),
+    unit="個說明頁",
+    name_prefix="debit_info",
+    folder="debit_info",
+    extension="pdf",
+    fmt=FORMAT_PDF,
+    keeps_html=True,
+    reads_period=False,
+    collect=collect_fixed_info_pages,
+    produce=web_page_producer(print_with_chrome),
+    refresh=web_page_refresher(print_with_chrome),
+)
+CATEGORIES = (CARDS, RIGHTS, DOWNLOADS, ATTACHMENTS, ACTIVITIES, IMAGES, DEBIT_CARDS, DEBIT_TERMS, DEBIT_INFO)
 # 更新模式下，列表裡沒有的文件會被搬走的類別（權益附件與活動圖片的下架判斷不依列表，另外處理）
-REMOVAL_CATEGORIES = (CARDS, RIGHTS, DOWNLOADS, ACTIVITIES, DEBIT_CARDS)
+REMOVAL_CATEGORIES = (CARDS, RIGHTS, DOWNLOADS, ACTIVITIES, DEBIT_CARDS, DEBIT_TERMS)
 
 
 def document_filename(category: Category, url: str, name: str) -> str:
@@ -2512,7 +2601,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str]) -> int:
-    """下載總覽頁列出的卡片頁、權益頁列出的權益子頁、文件下載區的 PDF、權益子頁連到的 PDF、刷卡優惠的活動頁與前 8 個主視覺、簽帳金融卡專區的卡片頁。
+    """下載總覽頁列出的卡片頁、權益頁列出的權益子頁、文件下載區的 PDF、權益子頁連到的 PDF、刷卡優惠的活動頁與前 8 個主視覺、簽帳金融卡專區的卡片頁、金融卡約定條款 PDF 與說明頁。
 
     Args:
         argv: 不含程式名稱的參數清單。
