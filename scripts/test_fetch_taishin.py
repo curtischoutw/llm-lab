@@ -1195,7 +1195,7 @@ class UpdateModeDownloadAreaTests(ScriptTestCase):
         result = self.run_update()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("下載：已下載 1、內容變更 1、未變 1、失敗 1", result.stdout)
-        self.assertIn("卡片：已存在略過 1", result.stdout)
+        self.assertIn("卡片：未變 1", result.stdout)
         self.assertIn("活動：沒有文件", result.stdout)
 
 
@@ -2156,6 +2156,245 @@ class RedirectTests(ScriptTestCase):
         self.assertIn("轉址到外部網域", record["detail"])
 
 
+def with_csrf(page: str, token: str) -> str:
+    """在頁面的 <head> 開頭加上 <meta id="_csrf">（官網每次請求都可能換 token；主內容區以外）。"""
+    return page.replace("<head>", f'<head><meta id="_csrf" content="{token}">', 1)
+
+
+class UpdateModeWebPageTests(ScriptTestCase):
+    """更新模式下，網頁類（卡片頁、權益子頁、活動頁）只在主內容區變了時才重新轉檔。"""
+
+    def first_download(self) -> dict[str, Path]:
+        """第一次下載（不開更新模式）後，把每份文件的修改時間設成很久以前。
+
+        Returns:
+            類別資料夾底下的檔名對本地檔案。
+        """
+        self.assertEqual(self.run_script().returncode, 0)
+        folders = (self.out / name for name in ("cards", "rights", "offers"))
+        saved = {p.name: p for folder in folders if folder.is_dir() for p in folder.iterdir()}
+        for file in saved.values():
+            os.utime(file, ns=(OLD_MTIME_NS, OLD_MTIME_NS))
+        self.server.requests.clear()
+        self.mkp_server.requests.clear()
+        return saved
+
+    def run_update_without_converters(self) -> subprocess.CompletedProcess:
+        """更新模式，Chrome 路徑不存在、PATH 上沒有 LibreOffice：任何一次轉檔都會讓那一頁失敗。"""
+        empty_path = self.tmp / "empty_path"
+        empty_path.mkdir(exist_ok=True)
+        return self.run_update(chrome=str(self.tmp / "no-such-chrome"), path=str(empty_path))
+
+    def records(self, category: str) -> dict[str, dict[str, str]]:
+        """下載清單中某個類別的紀錄，檔名對紀錄。"""
+        return {r["filename"]: r for r in self.manifest() if r["category"] == category}
+
+    def test_card_page_whose_main_content_is_the_same_is_not_converted_and_nothing_is_touched(self) -> None:
+        self.serve_cards({RICHART: with_csrf(card_html("RICHART"), "token-1")})
+        saved = self.first_download()
+        document = saved["card_cg047_card001.pdf"]
+        raw_path = self.out / "_meta" / "html" / "card_cg047_card001.html"
+        print_path = self.out / "_meta" / "print" / "card_cg047_card001.html"
+        before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in (document, raw_path, print_path)}
+        self.serve_cards({RICHART: with_csrf(card_html("RICHART"), "token-2")})
+        result = self.run_update_without_converters()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(RICHART, self.server.paths(), "更新模式要重新取得原始 HTML 來比對")
+        for path, state in before.items():
+            self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), state, path.name)
+        record = self.records("卡片")["card_cg047_card001.pdf"]
+        self.assertEqual(record["result"], "未變")
+        self.assertEqual(record["sha256"], hashlib.sha256(before[document][0]).hexdigest())
+        self.assertEqual(record["html_sha256"], hashlib.sha256(before[raw_path][0]).hexdigest())
+
+    def test_rights_page_whose_main_content_is_the_same_is_not_converted_and_nothing_is_touched(self) -> None:
+        self.serve_rights({INSURANCE: with_csrf(card_html("INSURANCE"), "token-1")})
+        saved = self.first_download()
+        document = saved["rights_insurance_right0201.docx"]
+        raw_path = self.out / "_meta" / "html" / "rights_insurance_right0201.html"
+        before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in (document, raw_path)}
+        self.serve_rights({INSURANCE: with_csrf(card_html("INSURANCE"), "token-2")})
+        result = self.run_update_without_converters()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for path, state in before.items():
+            self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), state, path.name)
+        self.assertEqual(self.records("權益")["rights_insurance_right0201.docx"]["result"], "未變")
+
+    def test_activity_page_whose_main_content_is_the_same_is_not_converted_and_nothing_is_touched(self) -> None:
+        self.serve_offers({"A": [[detail_path(1)]]})
+        self.serve_details({detail_path(1): with_csrf(offer_detail_html("OFFER1"), "token-1")})
+        saved = self.first_download()
+        document = saved[f"offer_{wm(1)}.pdf"]
+        raw_path = self.out / "_meta" / "html" / f"offer_{wm(1)}.html"
+        print_path = self.out / "_meta" / "print" / f"offer_{wm(1)}.html"
+        before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in (document, raw_path, print_path)}
+        self.serve_details({detail_path(1): with_csrf(offer_detail_html("OFFER1"), "token-2")})
+        result = self.run_update_without_converters()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(detail_path(1), self.mkp_server.paths())
+        for path, state in before.items():
+            self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), state, path.name)
+        record = self.records("活動")[f"offer_{wm(1)}.pdf"]
+        self.assertEqual(record["result"], "未變")
+        self.assertEqual(record["period"], "2099-01-01~2099-12-31")
+
+    def test_card_page_with_a_new_main_content_is_converted_again_and_all_three_files_are_replaced(self) -> None:
+        self.serve_cards({RICHART: card_html("RICHART"), DAQUANLIAN: card_html("DAQUANLIAN")})
+        saved = self.first_download()
+        new_page = with_csrf(card_html("RICHART-REVISED"), "token-2").encode()
+        self.routes[RICHART] = (200, new_page)
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        document = saved["card_cg047_card001.pdf"]
+        self.assertIn(b"RICHART-REVISED", document.read_bytes())
+        self.assertEqual((self.out / "_meta" / "html" / "card_cg047_card001.html").read_bytes(), new_page)
+        self.assertIn(b"RICHART-REVISED", (self.out / "_meta" / "print" / "card_cg047_card001.html").read_bytes())
+        records = self.records("卡片")
+        changed = records["card_cg047_card001.pdf"]
+        self.assertEqual(changed["result"], "內容變更")
+        self.assertEqual(changed["sha256"], hashlib.sha256(document.read_bytes()).hexdigest())
+        self.assertEqual(changed["html_sha256"], hashlib.sha256(new_page).hexdigest())
+        self.assertEqual(changed["downloaded_at"], time.strftime("%Y-%m-%d"))
+        self.assertEqual(records["card_cg010_card001.pdf"]["result"], "未變")
+        self.assertEqual(saved["card_cg010_card001.pdf"].stat().st_mtime_ns, OLD_MTIME_NS)
+        self.assertEqual(
+            sorted(p.name for p in (self.out / "cards").iterdir()), ["card_cg010_card001.pdf", "card_cg047_card001.pdf"]
+        )
+
+    def test_rights_page_with_a_new_main_content_is_converted_again(self) -> None:
+        self.serve_rights({INSURANCE: card_html("INSURANCE")})
+        saved = self.first_download()
+        self.routes[INSURANCE] = (200, card_html("INSURANCE-REVISED").encode())
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(b"INSURANCE-REVISED", saved["rights_insurance_right0201.docx"].read_bytes())
+        self.assertEqual(self.records("權益")["rights_insurance_right0201.docx"]["result"], "內容變更")
+
+    def test_activity_page_with_a_new_main_content_is_converted_again_and_its_period_is_recorded(self) -> None:
+        self.serve_offers({"A": [[detail_path(1)]]})
+        self.serve_details({detail_path(1): offer_detail_html("OFFER1")})
+        saved = self.first_download()
+        self.serve_details({detail_path(1): offer_detail_html("OFFER1-REVISED", period="2099-02-01~2099-12-31")})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(b"OFFER1-REVISED", saved[f"offer_{wm(1)}.pdf"].read_bytes())
+        record = self.records("活動")[f"offer_{wm(1)}.pdf"]
+        self.assertEqual(record["result"], "內容變更")
+        self.assertEqual(record["period"], "2099-02-01~2099-12-31")
+
+    def test_failed_conversion_leaves_document_and_both_html_files_alone_and_the_next_run_tries_again(self) -> None:
+        self.serve_cards({RICHART: card_html("RICHART")})
+        saved = self.first_download()
+        document = saved["card_cg047_card001.pdf"]
+        raw_path = self.out / "_meta" / "html" / "card_cg047_card001.html"
+        print_path = self.out / "_meta" / "print" / "card_cg047_card001.html"
+        before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in (document, raw_path, print_path)}
+        self.routes[RICHART] = (200, card_html("FAKE-CHROME-FAIL").encode())
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        for path, state in before.items():
+            self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), state, path.name)
+        record = self.records("卡片")["card_cg047_card001.pdf"]
+        self.assertEqual(record["result"], "失敗")
+        self.assertIn("Chrome", record["detail"])
+        self.assertEqual(sorted(p.name for p in (self.out / "_meta").iterdir()), ["html", "manifest.jsonl", "print"])
+        self.routes[RICHART] = (200, card_html("RICHART-FIXED").encode())
+        retry = self.run_update()
+        self.assertEqual(retry.returncode, 0, retry.stdout + retry.stderr)
+        self.assertIn(b"RICHART-FIXED", document.read_bytes())
+        self.assertEqual(self.records("卡片")["card_cg047_card001.pdf"]["result"], "內容變更")
+
+    def test_failed_rights_conversion_leaves_the_files_alone(self) -> None:
+        self.serve_rights({INSURANCE: card_html("INSURANCE")})
+        saved = self.first_download()
+        document = saved["rights_insurance_right0201.docx"]
+        raw_path = self.out / "_meta" / "html" / "rights_insurance_right0201.html"
+        before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in (document, raw_path)}
+        self.routes[INSURANCE] = (200, card_html("INSURANCE-REVISED").encode())
+        result = self.run_update_without_converters()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        for path, state in before.items():
+            self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), state, path.name)
+        record = self.records("權益")["rights_insurance_right0201.docx"]
+        self.assertEqual(record["result"], "失敗")
+        self.assertIn("LibreOffice", record["detail"])
+
+    def test_page_that_cannot_be_fetched_or_has_no_main_content_leaves_the_files_alone(self) -> None:
+        self.serve_cards({RICHART: card_html("RICHART"), DAQUANLIAN: card_html("DAQUANLIAN")})
+        saved = self.first_download()
+        before = {name: (file.read_bytes(), file.stat().st_mtime_ns) for name, file in saved.items()}
+        self.routes[RICHART] = (500, b"boom")
+        self.routes[DAQUANLIAN] = (200, card_html_without_main_content().encode())
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        for name, file in saved.items():
+            self.assertEqual((file.read_bytes(), file.stat().st_mtime_ns), before[name], name)
+        records = self.records("卡片")
+        self.assertEqual(records["card_cg047_card001.pdf"]["result"], "失敗")
+        self.assertIn("500", records["card_cg047_card001.pdf"]["detail"])
+        self.assertEqual(records["card_cg010_card001.pdf"]["result"], "失敗")
+        self.assertIn("找不到主內容區", records["card_cg010_card001.pdf"]["detail"])
+
+    def test_saved_html_without_a_document_is_converted_from_the_html_fetched_this_time(self) -> None:
+        self.serve_cards({RICHART: card_html("FAKE-CHROME-FAIL")})
+        self.assertEqual(self.run_script().returncode, 1)
+        raw_path = self.out / "_meta" / "html" / "card_cg047_card001.html"
+        self.assertTrue(raw_path.is_file())
+        self.assertFalse((self.out / "cards" / "card_cg047_card001.pdf").exists())
+        self.serve_cards({RICHART: card_html("RICHART")})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(b"RICHART", (self.out / "cards" / "card_cg047_card001.pdf").read_bytes())
+        self.assertEqual(raw_path.read_bytes(), self.routes[RICHART][1])
+        self.assertEqual(self.records("卡片")["card_cg047_card001.pdf"]["result"], "已下載")
+
+    def test_saved_html_of_an_expired_activity_without_a_document_is_skipped_without_a_request(self) -> None:
+        self.serve_offers({"A": [[detail_path(1)]]})
+        self.serve_details({detail_path(1): offer_detail_html("OFFER1", period=period_from_today(-60, -1))})
+        self.assertEqual(self.run_script().returncode, 0)
+        self.mkp_server.requests.clear()
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.mkp_server.paths(), [])
+        record = self.records("活動")[f"offer_{wm(1)}.pdf"]
+        self.assertEqual(record["result"], "過期略過")
+        self.assertFalse((self.out / "offers" / f"offer_{wm(1)}.pdf").exists())
+
+    def test_saved_html_of_an_active_activity_without_a_document_is_converted_from_the_html_fetched_this_time(self) -> None:
+        self.serve_offers({"A": [[detail_path(1)]]})
+        self.serve_details({detail_path(1): offer_detail_html("FAKE-CHROME-FAIL")})
+        self.assertEqual(self.run_script().returncode, 1)
+        self.serve_details({detail_path(1): offer_detail_html("OFFER1")})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(b"OFFER1", (self.out / "offers" / f"offer_{wm(1)}.pdf").read_bytes())
+        self.assertEqual(self.records("活動")[f"offer_{wm(1)}.pdf"]["result"], "已下載")
+
+    def test_requests_for_web_pages_in_update_mode_are_spaced_by_the_configured_interval(self) -> None:
+        self.serve_cards({RICHART: card_html("RICHART")})
+        self.serve_rights({INSURANCE: card_html("INSURANCE")})
+        self.serve_offers({"A": [[detail_path(1)]]})
+        self.serve_details({detail_path(1): offer_detail_html("OFFER1")})
+        self.first_download()
+        interval = 0.3
+        result = self.run_update(interval=str(interval))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        times = sorted(t for server in (self.server, self.mkp_server) for _path, t, _ua in server.requests)
+        # 總覽頁、卡片頁、權益頁、權益子頁、下載頁、刷卡優惠列表 A 的 2 頁（第 2 頁沒有新連結而停止）與 B–I 各 1 頁、mkp 的活動頁
+        self.assertEqual(len(times), 16)
+        for earlier, later in zip(times, times[1:]):
+            self.assertGreaterEqual(later - earlier, interval - 0.02)
+
+    def test_prints_the_count_of_each_result_for_web_pages(self) -> None:
+        self.serve_cards({RICHART: card_html("RICHART"), DAQUANLIAN: card_html("DAQUANLIAN")})
+        self.first_download()
+        self.routes[RICHART] = (200, card_html("RICHART-REVISED").encode())
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("卡片：內容變更 1、未變 1", result.stdout)
+
+
 class ExpiredActivityRerunTests(ScriptTestCase):
     def test_rerun_does_not_request_the_page_of_an_activity_whose_saved_html_is_expired(self) -> None:
         period = period_from_today(-60, -1)
@@ -2611,8 +2850,8 @@ class UpdateModeRemovedFromListTests(ScriptTestCase):
         self.assertTrue((self.out / "_meta" / "html" / "card_cg047_card001.html").is_file())
         records = {r["filename"]: r for r in self.manifest() if r["category"] == "卡片"}
         self.assertEqual(records["card_cg010_card001.pdf"]["result"], "下架")
-        self.assertEqual(records["card_cg047_card001.pdf"]["result"], "已存在略過")
-        self.assertIn("卡片：已存在略過 1、下架 1", result.stdout)
+        self.assertEqual(records["card_cg047_card001.pdf"]["result"], "未變")
+        self.assertIn("卡片：未變 1、下架 1", result.stdout)
 
     def test_rights_downloads_and_activities_missing_from_their_lists_are_moved_too(self) -> None:
         self.serve_rights({INSURANCE: card_html("INSURANCE"), PARKING: card_html("PARKING")})
@@ -2747,6 +2986,161 @@ class UpdateModeRemovedFromListTests(ScriptTestCase):
         self.assertEqual(record["result"], "失敗")
         self.assertIn("搬移失敗", record["detail"])
         self.assertTrue((self.out / "cards" / "card_cg010_card001.pdf").is_file(), "沒搬成功，原檔留著")
+
+
+class UpdateModeAttachmentTests(ScriptTestCase):
+    """更新模式下，權益附件跟著權益子頁上的連結走：沒有任何子頁還連到的搬走，內容變了的換掉。"""
+
+    def serve_pages(self, pages: dict[str, list[str]]) -> None:
+        """登記這些權益子頁（主內容區連到 hrefs）與它們連到的 PDF。
+
+        Args:
+            pages: 權益子頁路徑對它連到的 PDF 路徑清單；頁面內容隨 PDF 清單而異，所以換連結會被判成內容變更。
+        """
+        self.serve_rights({page: rights_page_with_pdfs(f"{page}-{hrefs}", hrefs) for page, hrefs in pages.items()})
+        for href in {href for hrefs in pages.values() for href in hrefs}:
+            self.routes[href] = (200, pdf_bytes(href))
+
+    def first_download(self, pages: dict[str, list[str]]) -> None:
+        """第一次下載（不開更新模式）這些權益子頁與它們連到的附件，清掉請求紀錄。
+
+        Args:
+            pages: 權益子頁路徑對它連到的 PDF 路徑清單。
+        """
+        self.serve_pages(pages)
+        self.assertEqual(self.run_script().returncode, 0)
+        self.server.requests.clear()
+
+    def removed_dir(self) -> Path:
+        """今天的下架資料夾 DIR/_meta/removed/<日期>/。"""
+        return self.out / "_meta" / "removed" / date.today().isoformat()
+
+    def attachment_records(self) -> dict[str, dict[str, str]]:
+        """下載清單中權益附件的紀錄，檔名對紀錄。"""
+        return {r["filename"]: r for r in self.manifest() if r["category"] == "權益附件"}
+
+    def test_attachment_that_no_subpage_links_to_any_more_is_moved_and_recorded_as_removed(self) -> None:
+        self.first_download({DUAL_PAGE: [DUAL_PDF, DUAL_PDF_2]})
+        before = (self.out / "rights_attachments" / "attachment_dual-card_02.pdf").read_bytes()
+        self.serve_pages({DUAL_PAGE: [DUAL_PDF]})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.out / "rights_attachments" / "attachment_dual-card_02.pdf").exists())
+        self.assertEqual(
+            (self.removed_dir() / "rights_attachments" / "attachment_dual-card_02.pdf").read_bytes(), before
+        )
+        self.assertTrue((self.out / "rights_attachments" / "attachment_dual-card_01.pdf").is_file())
+        records = self.attachment_records()
+        self.assertEqual(records["attachment_dual-card_02.pdf"]["result"], "下架")
+        self.assertEqual(records["attachment_dual-card_01.pdf"]["result"], "未變")
+        self.assertIn("權益附件：未變 1、下架 1", result.stdout)
+
+    def test_attachment_with_the_same_content_keeps_its_bytes_and_modification_time_and_new_content_replaces_it(self) -> None:
+        self.first_download({DUAL_PAGE: [DUAL_PDF, DUAL_PDF_2]})
+        folder = self.out / "rights_attachments"
+        for file in folder.iterdir():
+            os.utime(file, ns=(OLD_MTIME_NS, OLD_MTIME_NS))
+        unchanged = folder / "attachment_dual-card_01.pdf"
+        before = (unchanged.read_bytes(), unchanged.stat().st_mtime_ns)
+        new_content = pdf_bytes(DUAL_PDF_2) + b"%revised\n"
+        self.routes[DUAL_PDF_2] = (200, new_content)
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((unchanged.read_bytes(), unchanged.stat().st_mtime_ns), before)
+        self.assertEqual((folder / "attachment_dual-card_02.pdf").read_bytes(), new_content)
+        records = self.attachment_records()
+        self.assertEqual(records["attachment_dual-card_01.pdf"]["result"], "未變")
+        self.assertEqual(records["attachment_dual-card_02.pdf"]["result"], "內容變更")
+        self.assertEqual(records["attachment_dual-card_02.pdf"]["sha256"], hashlib.sha256(new_content).hexdigest())
+
+    def test_failed_download_of_an_existing_attachment_keeps_the_file_and_is_recorded_as_failed(self) -> None:
+        self.first_download({DUAL_PAGE: [DUAL_PDF]})
+        attachment = self.out / "rights_attachments" / "attachment_dual-card_01.pdf"
+        before = attachment.read_bytes()
+        self.routes[DUAL_PDF] = (500, b"boom")
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(attachment.read_bytes(), before)
+        self.assertEqual(self.attachment_records()["attachment_dual-card_01.pdf"]["result"], "失敗")
+
+    def test_attachment_linked_from_several_subpages_stays_while_one_of_them_still_links_to_it(self) -> None:
+        self.first_download({CO_BRAND_PAGE: [DUAL_PDF, CO_BRAND_PDF], DUAL_PAGE: [DUAL_PDF]})
+        self.serve_pages({CO_BRAND_PAGE: [CO_BRAND_PDF], DUAL_PAGE: [DUAL_PDF]})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.out / "rights_attachments" / "attachment_dual-card_01.pdf").is_file())
+        self.assertEqual(self.attachment_records()["attachment_dual-card_01.pdf"]["result"], "未變")
+        self.assertFalse(self.removed_dir().exists())
+        self.serve_pages({CO_BRAND_PAGE: [CO_BRAND_PDF], DUAL_PAGE: []})
+        again = self.run_update()
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertFalse((self.out / "rights_attachments" / "attachment_dual-card_01.pdf").exists())
+        self.assertTrue((self.removed_dir() / "rights_attachments" / "attachment_dual-card_01.pdf").is_file())
+
+    def test_attachment_of_a_subpage_that_left_the_rights_list_is_removed(self) -> None:
+        self.first_download({CO_BRAND_PAGE: [CO_BRAND_PDF], DUAL_PAGE: [DUAL_PDF]})
+        self.serve_pages({DUAL_PAGE: [DUAL_PDF]})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        records = self.attachment_records()
+        self.assertEqual(records["attachment_TSCC-11312.pdf"]["result"], "下架")
+        self.assertEqual(records["attachment_dual-card_01.pdf"]["result"], "未變")
+        self.assertTrue((self.removed_dir() / "rights_attachments" / "attachment_TSCC-11312.pdf").is_file())
+
+    def test_removal_is_not_judged_when_a_subpage_request_failed_and_the_report_names_the_reason(self) -> None:
+        self.first_download({CO_BRAND_PAGE: [CO_BRAND_PDF], DUAL_PAGE: [DUAL_PDF]})
+        self.serve_pages({CO_BRAND_PAGE: [], DUAL_PAGE: [DUAL_PDF]})
+        self.routes[DUAL_PAGE] = (500, b"boom")
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertTrue((self.out / "rights_attachments" / "attachment_TSCC-11312.pdf").is_file())
+        self.assertNotIn("下架", {r["result"] for r in self.attachment_records().values()})
+        self.assertFalse(self.removed_dir().exists())
+        self.assertIn("權益附件這次不判斷下架", result.stderr)
+        self.assertIn("rights_right_right0704.docx", result.stderr)
+
+    def test_removal_is_not_judged_when_a_subpage_conversion_failed_and_is_judged_on_the_next_successful_run(self) -> None:
+        self.first_download({DUAL_PAGE: [DUAL_PDF, DUAL_PDF_2]})
+        self.serve_pages({DUAL_PAGE: [DUAL_PDF]})
+        empty_path = self.tmp / "empty_path"
+        empty_path.mkdir()
+        result = self.run_update(path=str(empty_path))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue((self.out / "rights_attachments" / "attachment_dual-card_02.pdf").is_file())
+        self.assertIn("權益附件這次不判斷下架", result.stderr)
+        self.assertEqual(self.attachment_records()["attachment_dual-card_02.pdf"]["result"], "未變")
+        retry = self.run_update()
+        self.assertEqual(retry.returncode, 0, retry.stdout + retry.stderr)
+        self.assertEqual(self.attachment_records()["attachment_dual-card_02.pdf"]["result"], "下架")
+        self.assertFalse((self.out / "rights_attachments" / "attachment_dual-card_02.pdf").exists())
+
+    def test_removal_is_not_judged_when_the_rights_list_failed(self) -> None:
+        self.first_download({DUAL_PAGE: [DUAL_PDF]})
+        self.routes[RIGHTS_LIST_PATH] = (500, b"boom")
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue((self.out / "rights_attachments" / "attachment_dual-card_01.pdf").is_file())
+        self.assertIn("列表「信用卡權益」", result.stderr)
+        self.assertIn("權益附件這次不判斷下架", result.stderr)
+        self.assertFalse(self.removed_dir().exists())
+
+    def test_no_removal_without_update_mode(self) -> None:
+        self.first_download({DUAL_PAGE: [DUAL_PDF, DUAL_PDF_2]})
+        self.serve_pages({DUAL_PAGE: [DUAL_PDF]})
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.out / "rights_attachments" / "attachment_dual-card_02.pdf").is_file())
+        self.assertFalse((self.out / "_meta" / "removed").exists())
+
+    def test_requests_for_attachments_in_update_mode_are_spaced_by_the_configured_interval(self) -> None:
+        self.first_download({DUAL_PAGE: [DUAL_PDF, DUAL_PDF_2]})
+        interval = 0.3
+        self.assertEqual(self.run_update(interval=str(interval)).returncode, 0)
+        requests = self.server.requests
+        self.assertIn(DUAL_PDF, self.server.paths())
+        for earlier, later in zip(requests, requests[1:]):
+            self.assertGreaterEqual(later[1] - earlier[1], interval - 0.02)
 
 
 if __name__ == "__main__":

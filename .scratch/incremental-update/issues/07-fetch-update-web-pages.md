@@ -4,13 +4,13 @@
 
 **Blocked by:** 06（含 06 的實測結果；06 把這張改成 needs-info 時，等使用者決定比對範圍）
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] 主內容區沒變（包括只有 `_csrf` token 等主內容區以外的地方不同）：不呼叫 Chrome／LibreOffice，文件的位元組與修改時間不變，清單記「未變」。
-- [ ] HTML 變了：重新轉檔；轉檔成功後才換掉 `DIR/_meta/html/`、`DIR/_meta/print/` 的檔案與文件，清單記「內容變更」。
-- [ ] 轉檔失敗：三者都不動，清單記失敗，下次執行會再比對到差異並重試。
-- [ ] 存檔的原始 HTML 在、文件不在（第一次下載時轉檔失敗）：不比對，照新增處理，用這次重新取得的原始 HTML 轉檔，成功記「已下載」；活動的存檔 HTML 讀出的期間已過期時除外，照現行規則記「過期略過」（09）。
-- [ ] 測試沿用假 HTTP server、假 Chrome、假 LibreOffice；現有測試全綠。
+- [x] 主內容區沒變（包括只有 `_csrf` token 等主內容區以外的地方不同）：不呼叫 Chrome／LibreOffice，文件的位元組與修改時間不變，清單記「未變」。
+- [x] HTML 變了：重新轉檔；轉檔成功後才換掉 `DIR/_meta/html/`、`DIR/_meta/print/` 的檔案與文件，清單記「內容變更」。
+- [x] 轉檔失敗：三者都不動，清單記失敗，下次執行會再比對到差異並重試。
+- [x] 存檔的原始 HTML 在、文件不在（第一次下載時轉檔失敗）：不比對，照新增處理，用這次重新取得的原始 HTML 轉檔，成功記「已下載」；活動的存檔 HTML 讀出的期間已過期時除外，照現行規則記「過期略過」（09）。
+- [x] 測試沿用假 HTTP server、假 Chrome、假 LibreOffice；現有測試全綠。
 
 ## Comments
 
@@ -19,3 +19,11 @@
 需要使用者決定：比對範圍是否改成只比主內容區（建議；卡片頁用 `id="centercontainer"`，活動頁用 class 含 `page-content` 的第一個元素），還是維持整份 HTML、或另外排除特定欄位。決定之後 Status 才能改回 ready-for-agent。
 
 2026-11-02，使用者決定（grill Q29）：只比主內容區，卡片頁與權益子頁用 `id="centercontainer"`，活動頁用 class 含 `page-content` 的第一個元素（和轉檔取的範圍相同）。主內容區相同、只有其他地方不同時記「未變」，存檔的原始 HTML 不換。Status 改回 ready-for-agent。
+
+2026-11-02，實作完成（`scripts/fetch_taishin.py` 的 `web_page_refresher`、`scripts/test_fetch_taishin.py` 的 `UpdateModeWebPageTests`）：卡片頁、權益子頁、活動頁在更新模式下只比主內容區，沒變記「未變」、不碰三個檔案，變了才轉檔並依序換掉文件、列印用 HTML、原始 HTML，轉檔失敗三者都不動。主內容區的元素與 Q29 寫的相同（卡片頁與權益子頁 `id="centercontainer"`、活動頁 class 含 `page-content` 的第一個），不需要照程式更正。
+
+ASSUMPTION：
+- 比對的是 `extract_main_content` 拿掉 script／style 等之後的結果（轉檔實際用的那一塊），不是主內容區的原始字串。
+- 文件在、存檔的原始 HTML 不在（無法比對）時視為變更，重新轉檔並記「內容變更」。
+- 換檔順序是文件、列印用 HTML、原始 HTML：原始 HTML 是下次比對的基準，最後換，中途中斷時下次仍會比對到差異。
+- 活動頁在更新模式下若新頁面的期間已過期，目前仍記「內容變更」並照常轉檔；過期判斷屬於 09。
