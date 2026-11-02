@@ -35,3 +35,10 @@ ASSUMPTION：
 範圍外發現：
 
 - 無新的。權益附件、活動圖片的下架與活動過期仍待 09、10。
+
+### code-review 修正 2：本地清單排除不是文件的檔案（2026-11-02）
+
+`local_documents` 原本列出類別資料夾第一層所有檔案，macOS 的 `.DS_Store`、`._*`、Office 的 `~$` 鎖定檔會被當成「官網列表沒有」而搬進 `_meta/removed/`，也會讓「解析出 0 筆」的防護誤判本地有文件。
+
+- `local_documents` 排除 `rag_lab/formats.py` 的 `NOT_A_DOCUMENT_PREFIXES`（`.`、`~$`）開頭的檔案，腳本直接 import 那個常數，規則只有一份。
+- 測試：`test_files_that_are_not_documents_are_never_moved_and_are_not_in_the_manifest`、`test_empty_list_is_fine_when_the_local_folder_has_only_files_that_are_not_documents`（先紅後綠）。

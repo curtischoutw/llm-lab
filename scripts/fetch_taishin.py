@@ -46,6 +46,8 @@
   - 目的地已有同名檔時，在檔名後加時間（_HHMMSS 加微秒），不覆寫（ASSUMPTION，見增量更新 spec）。
   - 下架清單紀錄的網址是空字串：本地只有檔案，沒有它的網址，不去翻上一次的清單（ASSUMPTION）。
   - 搬移時的檔案系統錯誤，那一份記「失敗」並寫出原因（結束碼 1），其餘文件照常處理。
+  - 本地清單不含不是文件的檔案（`.` 開頭的隱藏檔如 .DS_Store、`~$` 開頭的鎖定檔，規則同 rag_lab/formats.py 的 NOT_A_DOCUMENT_PREFIXES）：
+    它們不會被搬走，「解析出 0 筆」的保護也只算真正的文件。
   - 不設下架數量的比例門檻：列表有 1 筆以上時，其餘本地文件全部算下架。
   - 某個類別的列表頁沒有成功取得（請求失敗、逾時、翻頁失敗），那個類別這次不搬任何檔案，stderr 寫明列表與原因，結束碼 1，其他類別照常。
     列表頁回應成功、卻解析出 0 筆，而本地這個類別資料夾有文件時，也當成列表頁沒有成功取得（官網改版讓解析失效的可能高於整類下架），
@@ -192,7 +194,7 @@
 - 列印前拿掉註解與 <iframe>、樣式表連結，所以 iframe 裡的內容與外部樣式表不會出現在 PDF／.docx；<object>、<embed> 沒有處理
   （Chrome 的 JavaScript 已封鎖，LibreOffice 不執行腳本）。
 
-Dependencies: 標準函式庫；rag_lab.formats（專案內，只用標準函式庫，取圖片副檔名清單）；
+Dependencies: 標準函式庫；rag_lab.formats（專案內，只用標準函式庫，取圖片副檔名清單與「不是文件」的檔名開頭）；
 列印需要 Google Chrome，轉 .docx 需要 LibreOffice。
 """
 
@@ -221,7 +223,7 @@ from urllib.parse import ParseResult, quote, unquote, urljoin, urlparse, urlunpa
 # 圖片格式的清單沿用專案唯一的一份（rag_lab/formats.py，只用標準函式庫）；腳本在 scripts/ 底下，
 # 要先把 repo 根目錄放進 sys.path 才找得到 rag_lab
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from rag_lab.formats import FORMATS  # noqa: E402
+from rag_lab.formats import FORMATS, NOT_A_DOCUMENT_PREFIXES  # noqa: E402
 
 # ==============================
 # 設定
@@ -1986,6 +1988,9 @@ def fetch_document(run: Run, category: Category, url: str, name: str) -> Record:
 def local_documents(run: Run, category: Category) -> list[str]:
     """類別資料夾裡現有的文件檔名（ingest 不遞迴，所以只看資料夾第一層的檔案）。
 
+    不是文件的檔案（.DS_Store 等 `.` 開頭的隱藏檔、`~$` 開頭的 Office 鎖定檔，規則同 rag_lab.formats.NOT_A_DOCUMENT_PREFIXES，
+    ingest 也不會匯入它們）不列，所以不會被當成下架搬走，「解析出 0 筆」的保護也不把它們算進本地文件。
+
     Args:
         run: 一次執行共用的設定。
         category: 要看哪個類別的資料夾。
@@ -1996,7 +2001,7 @@ def local_documents(run: Run, category: Category) -> list[str]:
     folder = run.out / category.folder
     if not folder.is_dir():
         return []
-    return sorted(p.name for p in folder.iterdir() if p.is_file())
+    return sorted(p.name for p in folder.iterdir() if p.is_file() and not p.name.startswith(NOT_A_DOCUMENT_PREFIXES))
 
 
 def free_destination(destination: Path) -> Path:

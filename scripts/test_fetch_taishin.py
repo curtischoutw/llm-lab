@@ -2977,6 +2977,26 @@ class UpdateModeRemovedFromListTests(ScriptTestCase):
         )
         self.assertFalse((self.out / "_meta" / "removed").exists())
 
+    def test_files_that_are_not_documents_are_never_moved_and_are_not_in_the_manifest(self) -> None:
+        self.download_cards({RICHART: card_html("RICHART")})
+        stray = [self.out / "cards" / ".DS_Store", self.out / "cards" / "~$card.pdf", self.out / "cards" / "._card.pdf"]
+        for file in stray:
+            file.write_bytes(b"not a document")
+        self.serve_cards({RICHART: card_html("RICHART")})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(all(file.is_file() for file in stray))
+        self.assertFalse((self.out / "_meta" / "removed").exists())
+        self.assertEqual([r["filename"] for r in self.manifest()], ["card_cg047_card001.pdf"])
+
+    def test_empty_list_is_fine_when_the_local_folder_has_only_files_that_are_not_documents(self) -> None:
+        (self.out / "cards").mkdir(parents=True)
+        (self.out / "cards" / ".DS_Store").write_bytes(b"not a document")
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("0 筆", result.stderr)
+        self.assertTrue((self.out / "cards" / ".DS_Store").is_file())
+
     def test_empty_activity_list_moves_no_activity_but_empty_list_for_a_category_without_local_documents_is_fine(self) -> None:
         self.serve_offers({"A": [[detail_path(1)]]})
         self.serve_details({detail_path(1): offer_detail_html("OFFER1")})
