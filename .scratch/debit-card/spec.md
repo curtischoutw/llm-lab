@@ -112,7 +112,7 @@
 
 ## Further Notes
 
-- 2026-11-02 grill：Q1 使用者回答金融卡包含簽帳金融卡與晶片金融卡兩種；Q2 使用者說明目的是讓 RAG 分清楚客戶常搞混的兩種卡片，Q7 依此定案；Q3–Q15 照建議。Q16–Q19（縫、新基準含新題目、實作時機、範圍外）提出後使用者直接執行 to-spec，視為照建議；要改請在 ticket 開工前提出。
+- 2026-11-02 grill：Q1 使用者回答金融卡包含簽帳金融卡與晶片金融卡兩種；Q2 使用者說明目的是讓 RAG 分清楚客戶常搞混的兩種卡片，Q7 依此定案；Q3–Q15 照建議。Q16–Q19（縫、新基準含新題目、實作時機、範圍外）照建議（使用者在 to-spec 之後確認）。
 - 盤點（2026-11-02，37 次 GET，每次間隔 2.5 秒以上）的事實：
   - richart.tw 的卡片頁不跑 JS 就有內容，頁面內沒有卡片內容用的 API；網址為 `https://richart.tw/TSDIB_RichartWeb/card`、`/card/debit-card`、`/card/credit-card`。每張卡沒有自己的詳細頁，「看優惠詳情」連到 `/discount`，細則在 `/discount/discount-details?discount=<id>`；簽帳金融卡頁連到 14 個 id（277, 278, 350, 353, 355, 357, 358, 359, 380, 385, 386, 387, 391, 399）。richart.tw 會發 session cookie，不帶 cookie 也能取得頁面。
   - 簽帳金融卡：Mastercard 簽帳金融卡（D 卡、遛狗卡）、Visa 簽帳金融卡（綠狗卡、白狗卡），一般消費 0.5% 無上限，遛狗卡與綠狗卡有悠遊卡功能。信用卡：台新 Richart 卡（Mastercard／VISA／JCB），最高 3.8%，6 種可切換方案。
