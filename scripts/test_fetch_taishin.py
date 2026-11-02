@@ -3329,6 +3329,46 @@ class UpdateModeOfferImageTests(ScriptTestCase):
         self.assertEqual(records[new_name]["result"], "已下載")
         self.assertEqual(records[self.image_name(1)]["result"], "下架")
 
+    def test_activity_whose_only_change_is_the_main_visual_url_is_a_content_change_and_its_image_is_replaced(self) -> None:
+        self.first_download({1: banner_path(1)})
+        html_path = self.out / "_meta" / "html" / f"offer_{wm(1)}.html"
+        new_banner = banner_path(1).replace("banner_image", "banner_image_v2")
+        # 主內容區和第一次完全相同（同一個 OFFER1），只有主內容區外的主視覺網址不同
+        self.serve_details({detail_path(1): offer_detail_html("OFFER1", banner=self.mkp_server.base_url + new_banner)})
+        self.serve_images({new_banner: PNG_BYTES + b"new"})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        activity = next(r for r in self.manifest() if r["category"] == "活動")
+        self.assertEqual(activity["result"], "內容變更")
+        self.assertIn(new_banner.encode(), html_path.read_bytes(), "存檔的原始 HTML 換成新的")
+        new_name = self.image_name(1).replace("banner_image", "banner_image_v2")
+        self.assertEqual([p.name for p in (self.out / "offer_images").iterdir()], [new_name])
+        self.assertEqual([p.name for p in self.removed_images_dir().iterdir()], [self.image_name(1)])
+        self.assertEqual(self.image_records()[new_name]["result"], "已下載")
+        self.assertEqual(self.image_requests(), [new_banner])
+
+    def test_new_main_visual_with_the_same_base_name_replaces_the_old_file_instead_of_being_skipped(self) -> None:
+        self.first_download({1: banner_path(1)})
+        old_bytes = (self.out / "offer_images" / self.image_name(1)).read_bytes()
+        # 新舊網址只有資料夾不同，檔名一樣，所以衍生出的本地檔名一樣
+        new_banner = banner_path(1).replace(UPLOAD_PREFIX, UPLOAD_PREFIX + "v2/")
+        self.assertEqual(new_banner.rsplit("/", 1)[1], banner_path(1).rsplit("/", 1)[1])
+        self.serve_details({detail_path(1): offer_detail_html("OFFER1", banner=self.mkp_server.base_url + new_banner)})
+        self.serve_images({new_banner: PNG_BYTES + b"new"})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.image_requests(), [new_banner])
+        self.assertEqual((self.out / "offer_images" / self.image_name(1)).read_bytes(), PNG_BYTES + b"new")
+        self.assertEqual((self.removed_images_dir() / self.image_name(1)).read_bytes(), old_bytes)
+        results = [r["result"] for r in self.manifest() if r["category"] == "活動圖片"]
+        self.assertEqual(sorted(results), ["下架", "已下載"])
+        # 下一次執行：主視覺網址沒變，不再請求
+        self.mkp_server.requests.clear()
+        again = self.run_update()
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertEqual(self.image_requests(), [])
+        self.assertEqual((self.out / "offer_images" / self.image_name(1)).read_bytes(), PNG_BYTES + b"new")
+
     def test_banner_of_a_still_valid_activity_with_the_same_url_is_not_requested_and_not_touched(self) -> None:
         banners = {1: banner_path(1), 2: banner_path(2)}
         self.first_download(banners)

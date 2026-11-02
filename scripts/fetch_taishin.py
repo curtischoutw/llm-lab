@@ -34,6 +34,7 @@
   卡片頁與權益子頁是 id="centercontainer"，活動頁是 class 含 page-content 的第一個元素，取出後拿掉會執行的部分；grill Q29）。
   主內容區相同就不轉檔、不碰文件、列印用 HTML 與存檔的原始 HTML（位元組與修改時間不變，清單記「未變」），
   主內容區以外的差異（例如活動頁 <head> 的 _csrf token，2026-11-02 實測 2 頁都和 10-30 存的不同）不算變更。
+  例外：活動頁的主視覺（div.banner-image，在主內容區外面）網址變了也算變更（grill Q30），照下面的主內容區不同處理（重新轉檔、換存檔）。
   主內容區不同才重新轉檔，轉檔成功後依序換掉文件、列印用 HTML、原始 HTML（原始 HTML 是下次比對的基準，最後換，中途中斷時
   下次還會比對到差異），清單記「內容變更」。下載、轉檔失敗或找不到主內容區時三者都不動，清單記「失敗」，結束碼 1，下次執行會再比對到差異並重試。
   文件不存在（存檔的原始 HTML 在，第一次下載時轉檔失敗留下的狀態）時不比對，照新增處理：用這次取得的原始 HTML 轉檔，成功記「已下載」；
@@ -75,7 +76,8 @@
     只有原始 HTML、沒有活動文件的活動，行為不變：存檔的期間已過期記「過期略過」，不請求；否則當成新增轉檔。
   - 圖片的去留在所有活動處理完之後算：圖片資料夾裡，沒有任何「活動文件仍在」（活動 PDF 與存檔的原始 HTML 都在）的活動
     指向的圖片，搬到 DIR/_meta/removed/<下載當天>/offer_images/，清單記「下架」、網址是空字串。共用同一張圖的活動都不在了才搬；
-    活動改版換了主視覺網址時，舊圖搬走。
+    活動改版換了主視覺網址時，舊圖搬走。新舊網址只有資料夾或 query 不同、檔名相同時，本地檔名一樣，那個檔案是舊圖：
+    先把它搬走（清單記「下架」），新圖再下載換上（記「已下載」），不會當成「已存在」略過。
   - 名額：「活動文件仍在」的活動的主視覺網址去除重複後，圖片檔在本地的或副檔名不支援的各佔一個（下載失敗沒有留檔的不佔）。
     少於 IMAGE_LIMIT（8）個時才補，從「活動文件確實存在、有主視覺、主視覺網址還沒有佔名額」的活動補：這次重新取得之前存檔的
     主視覺網址和現在不同的排最前面，其餘依活動被找到的順序。補不滿 8 個時印出「活動圖片名額 N/8，沒有更多候選」。
@@ -188,9 +190,6 @@
 - 已過期的活動，不加 --update 再次執行時依上次存下的原始 HTML 判斷，不再請求；官網之後延長該活動的期間，要刪除 `_meta/html`
   裡那個檔案才會重新下載。加 --update 時，沒有文件但有存檔 HTML 的活動，存檔的期間已過期同樣不請求（記過期略過）；
   已經搬到 `_meta/removed/` 的過期活動，之後在活動列表又出現且沒過期，視為新增，重新下載。
-- 活動的主視覺在詳情頁的主內容區外面（div.banner-image 在 class 含 page-content 的元素之前，2026-11-02 看一份本機存檔的樣本確認）。
-  更新模式只比對主內容區，所以只換了主視覺、主內容區沒變的活動，存檔的原始 HTML 不會換，主視覺網址的變動偵測不到
-  （要主內容區也跟著變才會）。
 - 更新模式的 PDF 比對把整份回應讀進記憶體再算雜湊（ASSUMPTION：2026-10-30 下載區最大的 PDF 約 6.7 MB，不另外做串流；現有的下載本來就是整份讀進記憶體）。
 - 行內 `style="display:none"` 沒有處理：2026-10-30 實測轉出率 0.93–1.01，沒有因此漏字。
 - 列印前拿掉註解與 <iframe>、樣式表連結，所以 iframe 裡的內容與外部樣式表不會出現在 PDF／.docx；<object>、<embed> 沒有處理
@@ -1405,12 +1404,15 @@ def web_page_refresher(
     convert: Callable[[Tools, Path, Path, Path], None],
     main_content: tuple[str, str] = ("id", "centercontainer"),
     inspect: Callable[[Record, str], None] | None = None,
+    also_compare: Callable[[Run, str, str], object] | None = None,
 ) -> Callable[[Run, Category, str, str, Path, Record], bool]:
     """產生更新模式的 refresh 函式：重新取得網頁，主內容區和存檔的上一份不同才重新轉檔。
 
     Args:
         convert: 轉檔函式，同 web_page_producer。
         main_content: 主內容區怎麼找，必須和同一個類別的 web_page_producer 相同，比對的就是轉檔實際用的那一塊。
+        also_compare: 主內容區以外還要比對的東西，參數是 (執行設定, 網頁網址, 頁面文字)，回傳可比較相等的值；
+            新舊頁面的值不同也算變更（活動頁用它比主視覺網址，主視覺在主內容區外面；grill Q30）。
         inspect: 取得頁面、比對前呼叫，參數是 (清單紀錄, 頁面文字)；可以補紀錄，或拋出 SkipDocument 讓這一頁不比對、不轉檔
             （活動頁用它補活動期間並判斷過期，同 web_page_producer 的 inspect）。
 
@@ -1421,8 +1423,8 @@ def web_page_refresher(
     def refresh(run: Run, category: Category, url: str, name: str, target: Path, record: Record) -> bool:
         """重新取得網頁並比對主內容區；不同才轉檔，轉檔成功後才換掉文件、列印用 HTML 與存檔的原始 HTML。
 
-        比對的是 extract_main_content 的結果（轉檔實際用的那一塊），所以主內容區以外的差異（例如 <head> 的 _csrf token）
-        不算變更，存檔的原始 HTML 也不換。存檔的原始 HTML 不存在（無法比對）時視為變更。
+        比對的是 extract_main_content 的結果（轉檔實際用的那一塊）加上 also_compare 指定的東西，所以其餘的差異
+        （例如 <head> 的 _csrf token）不算變更，存檔的原始 HTML 也不換。存檔的原始 HTML 不存在（無法比對）時視為變更。
         換檔的順序是文件、列印用 HTML、原始 HTML：原始 HTML 是下次比對的基準，最後換，中途中斷時下次還會比對到差異並重試。
 
         Args:
@@ -1449,9 +1451,13 @@ def web_page_refresher(
         content = extract_main_content(page, *main_content)
         if content is None:
             raise FetchError("找不到主內容區")
-        if raw_path.is_file() and extract_main_content(saved_html(raw_path), *main_content) == content:
-            record.html_sha256 = sha256_of(raw_path)
-            return False
+        if raw_path.is_file():
+            saved = saved_html(raw_path)
+            if extract_main_content(saved, *main_content) == content and (
+                also_compare is None or also_compare(run, url, saved) == also_compare(run, url, page)
+            ):
+                record.html_sha256 = sha256_of(raw_path)
+                return False
         for folder in (raw_path.parent, print_path.parent):
             folder.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=run.out / "_meta") as tmp:
@@ -1686,6 +1692,55 @@ def local_names_for(run: Run, category: Category, urls: list[str]) -> dict[str, 
     return category.local_names(urls)
 
 
+def replaced_banners(run: Run, live: dict[str, str | None]) -> set[str]:
+    """主視覺網址變了、而且新網址的本地檔名和舊網址的一樣的主視覺網址。
+
+    只有資料夾或 query 不同、檔名相同的新舊網址，衍生出的本地檔名一樣：本地那個檔案是舊圖，不是新圖，
+    不能因為「檔案已存在」就略過。舊網址的檔名以它單獨存在時的檔名算（舊網址不在現在的主視覺網址裡了）；
+    它若和別的主視覺網址同名，新網址會因此加雜湊後綴，檔名就不一樣，不在這裡。
+
+    Args:
+        run: 一次執行共用的設定（previous_banners 是重新取得之前存檔的主視覺網址）。
+        live: live_banners 的結果。
+
+    Returns:
+        新的主視覺網址的集合；沒有主視覺網址變動的活動時為空。
+    """
+    names = IMAGES.local_names(banner_universe(run))
+    replaced: set[str] = set()
+    for activity, banner in live.items():
+        previous = run.previous_banners.get(activity)
+        if banner is None or previous is None or previous == banner:
+            continue
+        if document_filename(IMAGES, banner, names[banner]) == document_filename(
+            IMAGES, previous, IMAGES.local_name(previous)
+        ):
+            replaced.add(banner)
+    return replaced
+
+
+def remove_replaced_images(run: Run, urls: list[str]) -> list[Record]:
+    """更新模式：主視覺網址變了、但新舊網址的本地檔名相同的活動，把本地的舊圖搬到 DIR/_meta/removed/<日期>/offer_images/。
+
+    搬走之後，新圖在下載時才不會被當成「已存在」略過。只處理這次要下載的網址（urls）。
+
+    Args:
+        run: 一次執行共用的設定（found 裡要有活動類別找到的網址）。
+        urls: 這次要處理的主視覺網址（collect_banners_to_fill 的結果）。
+
+    Returns:
+        每一張搬走（或搬移失敗）舊圖的清單紀錄。
+    """
+    replaced = replaced_banners(run, live_banners(run))
+    names = IMAGES.local_names(banner_universe(run))
+    filenames = [document_filename(IMAGES, url, names[url]) for url in urls if url in replaced]
+    return [
+        move_removed(run, IMAGES, filename, reason="活動換了主視覺網址，舊圖搬走")
+        for filename in filenames
+        if (run.out / IMAGES.folder / filename).is_file()
+    ]
+
+
 def collect_banners_to_fill(run: Run) -> list[str]:
     """更新模式：現有的圖片照舊，名額少於 IMAGE_LIMIT 個時才補。
 
@@ -1704,10 +1759,14 @@ def collect_banners_to_fill(run: Run) -> list[str]:
     live = live_banners(run)
     banners = banner_universe(run)
     names = IMAGES.local_names(banners)
+    replaced = replaced_banners(run, live)
     occupied = [
         banner
         for banner in banners
-        if (run.out / IMAGES.folder / document_filename(IMAGES, banner, names[banner])).is_file()
+        if (
+            (run.out / IMAGES.folder / document_filename(IMAGES, banner, names[banner])).is_file()
+            and banner not in replaced
+        )
         or f".{IMAGES.extension_of(banner)}" not in SUPPORTED_IMAGE_EXTENSIONS
     ]
     changed = {
@@ -1911,7 +1970,9 @@ ACTIVITIES = Category(
         main_content=("class", "page-content"),
         inspect=check_offer_period,
     ),
-    refresh=web_page_refresher(print_with_chrome, main_content=("class", "page-content"), inspect=check_offer_period),
+    refresh=web_page_refresher(
+        print_with_chrome, main_content=("class", "page-content"), inspect=check_offer_period, also_compare=banner_of
+    ),
 )
 IMAGES = Category(
     name="活動圖片",
@@ -2308,6 +2369,8 @@ def main(argv: list[str]) -> int:
         expected = "" if category.expected_count is None else f"（預期 {category.expected_count}）"
         print(f"{category.list_label}找到 {len(urls)} {category.unit}{expected}")
         names = local_names_for(run, category, urls)
+        if run.update and category is IMAGES:
+            records.extend(remove_replaced_images(run, urls))
         records.extend(fetch_document(run, category, url, names[url]) for url in urls)
         if removable:
             listed = {document_filename(category, url, names[url]) for url in urls}
