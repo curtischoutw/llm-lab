@@ -58,6 +58,8 @@
 - 權益附件跟著權益子頁上的連結走：
   - 比對：本地已有的附件重新下載並比對 SHA-256，和下載區 PDF 相同的規則（內容不同才換掉，記「內容變更」；相同記「未變」、
     位元組與修改時間不動；下載失敗時原檔不動，記「失敗」）。
+    本地已有的附件，網址現在也在文件下載區時（和不加 --update 的「重複略過」同一條規則）不請求：清單記「重複略過」並把它當成下架搬走
+    （搬法同下架）。ASSUMPTION：它的內容已由下載區那一份匯入，不搬的話同一份 PDF 會在知識庫裡兩次。
   - 下架：附件的候選是這次所有權益子頁（權益列表裡的）存檔的原始 HTML 連到的 PDF（讀存檔，和不加 --update 時相同；子頁在這次執行裡
     已先換成最新的存檔）。本地 DIR/rights_attachments/ 裡的檔名不在候選算出的檔名之內，才算下架：同一份附件被多個子頁連到時，
     只要還有一頁連到就不算；子頁本身下架（搬走、不在權益列表）時，它不再貢獻候選。搬移方式與上面的下架相同，清單記「下架」。
@@ -1076,7 +1078,7 @@ class Category:
     補上紀錄的 html_sha256（有原始 HTML 的類別），失敗時拋出 FetchError。
     refresh 只在更新模式下用在本地已有的文件，參數同 produce，回傳 True 表示內容變了、最終檔案已換成新內容，
     False 表示沒變、最終檔案原封不動；失敗時拋出 FetchError，而且最終檔案不動。活動頁的 refresh 在期間已過期時拋出
-    SkipDocument（檔案不動），由 fetch_document 把活動搬走。None 表示這個類別的更新模式不比對內容（活動圖片：已存在就略過，去留由 remove_unreferenced_images 判斷）。
+    SkipDocument（檔案不動），權益附件的 refresh 在網址已在文件下載區時拋出 SkipDocument（重複），由 fetch_document 把文件搬走。None 表示這個類別的更新模式不比對內容（活動圖片：已存在就略過，去留由 remove_unreferenced_images 判斷）。
     local_name 由 name_prefix 和 link_pattern 的各個群組以底線接起來，例如卡片 card_cg047_card001。
     extension 是 None 時，副檔名取自文件網址路徑的最後一個副檔名（小寫），活動圖片是這樣。
     """
@@ -1551,6 +1553,50 @@ def refresh_pdf(run: Run, category: Category, url: str, name: str, target: Path,
     return True
 
 
+def download_area_duplicate(run: Run, url: str) -> SkipDocument | None:
+    """附件的網址若和文件下載區找到的相同，回傳「重複略過」。
+
+    Args:
+        run: 一次執行共用的設定（found 裡要有文件下載區找到的網址；下載區的列表失敗時沒有，無法判斷重複）。
+        url: 附件 PDF 的完整網址。
+
+    Returns:
+        重複時是 result 為 RESULT_DUPLICATE、訊息寫出它在下載區的檔名的 SkipDocument（交給呼叫端拋出）；否則為 None。
+    """
+    downloads = run.found.get(DOWNLOADS.name, [])
+    if url not in downloads:
+        return None
+    in_downloads = f"{DOWNLOADS.local_names(downloads)[url]}.{DOWNLOADS.extension_of(url)}"
+    return SkipDocument(RESULT_DUPLICATE, f"同一個網址已在文件下載區，檔名 {in_downloads}")
+
+
+def refresh_attachment(run: Run, category: Category, url: str, name: str, target: Path, record: Record) -> bool:
+    """更新模式的權益附件：和文件下載區重複就略過，否則同 refresh_pdf（重新下載並比對 SHA-256）。
+
+    ASSUMPTION：已存在的附件若網址現在也在文件下載區，它的內容已由下載區那一份匯入，不搬走的話同一份 PDF 會在知識庫裡兩次，
+    所以由 fetch_document 記「重複略過」並把它當成下架搬走（不請求）。
+
+    Args:
+        run: 一次執行共用的設定。
+        category: 權益附件類別。
+        url: PDF 完整網址。
+        name: 本地名稱。
+        target: 原檔路徑（已存在）。
+        record: 清單紀錄。
+
+    Returns:
+        內容變了、原檔已換成新內容時為 True；沒變時為 False。
+
+    Raises:
+        SkipDocument: 和文件下載區找到的網址相同（不請求，檔案不動）。
+        FetchError: 下載失敗，或內容不是以 %PDF- 開頭；原檔不動。
+    """
+    duplicate = download_area_duplicate(run, url)
+    if duplicate is not None:
+        raise duplicate
+    return refresh_pdf(run, category, url, name, target, record)
+
+
 def save_attachment(run: Run, category: Category, url: str, name: str, target: Path, record: Record) -> None:
     """權益子頁連到的 PDF：只收官網（www）網域的，其他網域略過；文件下載區已有的同一個網址也略過；
     通過後和下載區的 PDF 一樣原樣存檔（save_pdf）。
@@ -1570,10 +1616,9 @@ def save_attachment(run: Run, category: Category, url: str, name: str, target: P
     host, www_host = urlparse(url).netloc.lower(), urlparse(run.www).netloc.lower()
     if host != www_host:
         raise SkipDocument(RESULT_EXTERNAL, f"外部網域 {host}（官網網域是 {www_host}），不下載")
-    downloads = run.found.get(DOWNLOADS.name, [])
-    if url in downloads:
-        in_downloads = f"{DOWNLOADS.local_names(downloads)[url]}.{DOWNLOADS.extension_of(url)}"
-        raise SkipDocument(RESULT_DUPLICATE, f"同一個網址已在文件下載區，檔名 {in_downloads}")
+    duplicate = download_area_duplicate(run, url)
+    if duplicate is not None:
+        raise duplicate
     save_pdf(run, category, url, name, target, record)
 
 
@@ -1925,7 +1970,7 @@ ATTACHMENTS = Category(
     reads_period=False,
     collect=collect_attachments,
     produce=save_attachment,
-    refresh=refresh_pdf,
+    refresh=refresh_attachment,
 )
 
 
@@ -2038,8 +2083,10 @@ def fetch_document(run: Run, category: Category, url: str, name: str) -> Record:
             try:
                 changed = category.refresh(run, category, url, name, target, record)
             except SkipDocument as exc:
-                # 只有活動頁的 refresh 會拋：重新判斷的結果是已過期
-                moved = move_removed(run, category, filename, RESULT_EXPIRED_REMOVED, str(exc))
+                # refresh 拋的略過都要把已存在的文件搬走：活動頁重新判斷的結果是已過期（過期移除），
+                # 權益附件的網址現在也在文件下載區（重複略過）
+                moved_result = {RESULT_EXPIRED: RESULT_EXPIRED_REMOVED, RESULT_DUPLICATE: RESULT_DUPLICATE}[exc.result]
+                moved = move_removed(run, category, filename, moved_result, str(exc))
                 moved.url, moved.period = url, record.period
                 return moved
             if not changed:

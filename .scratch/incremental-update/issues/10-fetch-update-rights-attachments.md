@@ -42,3 +42,12 @@ ASSUMPTION：
 - 測試：`test_subpage_that_always_redirects_to_another_domain_does_not_block_the_removal_judgement`（先紅：stderr 出現「權益附件這次不判斷下架」；修後綠）。
 
 範圍外發現：這三個子頁讓每次執行的結束碼都是 1，是既有行為，沒有改。
+
+### code-review 修正 5：更新模式的附件也做「和下載區重複」檢查（2026-11-02）
+
+更新模式原本對已存在的附件走 `refresh_pdf`，跳過了 `save_attachment` 的重複檢查（上面「實作結果」ASSUMPTION 的最後一條）。
+
+- 新增 `download_area_duplicate`（`save_attachment` 與新的 `refresh_attachment` 共用）；`ATTACHMENTS.refresh` 改用 `refresh_attachment`：網址現在也在文件下載區時不請求，`fetch_document` 把它當成下架搬到 `_meta/removed/<日期>/rights_attachments/`，清單記「重複略過」，網址是附件網址，原因寫出它在下載區的檔名。
+- ASSUMPTION（使用者指定）：它的內容已由下載區那一份匯入，不搬的話同一份 PDF 會在知識庫裡兩次。
+- 外部網域的略過不加進更新模式：外部網域的附件從來沒有本地檔。
+- 測試：`test_existing_attachment_that_is_now_in_the_download_area_is_recorded_as_duplicate_and_moved_away`（先紅：附件還在附件資料夾；修後綠）。

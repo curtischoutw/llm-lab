@@ -3123,6 +3123,26 @@ class UpdateModeAttachmentTests(ScriptTestCase):
         self.assertEqual(records["attachment_dual-card_01.pdf"]["result"], "未變")
         self.assertTrue((self.removed_dir() / "rights_attachments" / "attachment_TSCC-11312.pdf").is_file())
 
+    def test_existing_attachment_that_is_now_in_the_download_area_is_recorded_as_duplicate_and_moved_away(self) -> None:
+        # ASSUMPTION：內容已由下載區那一份匯入，不搬走的話同一份 PDF 會在知識庫裡出現兩次
+        self.first_download({DUAL_PAGE: [DUAL_PDF, DUAL_PDF_2]})
+        before = (self.out / "rights_attachments" / "attachment_dual-card_01.pdf").read_bytes()
+        self.serve_downloads([[DUAL_PDF]])
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.out / "rights_attachments" / "attachment_dual-card_01.pdf").exists())
+        self.assertEqual(
+            (self.removed_dir() / "rights_attachments" / "attachment_dual-card_01.pdf").read_bytes(), before
+        )
+        self.assertTrue((self.out / "downloads" / "download_dual-card_01.pdf").is_file())
+        records = self.attachment_records()
+        self.assertEqual(records["attachment_dual-card_01.pdf"]["result"], "重複略過")
+        self.assertEqual(records["attachment_dual-card_01.pdf"]["url"], self.server.base_url + DUAL_PDF)
+        self.assertIn("download_dual-card_01.pdf", records["attachment_dual-card_01.pdf"]["detail"])
+        self.assertEqual(records["attachment_dual-card_02.pdf"]["result"], "未變")
+        self.assertEqual(self.server.paths().count(DUAL_PDF), 1, "只有下載區那一份請求，附件不重複請求")
+        self.assertIn("權益附件：未變 1、重複略過 1", result.stdout)
+
     def test_removal_is_not_judged_when_a_subpage_request_failed_and_the_report_names_the_reason(self) -> None:
         self.first_download({CO_BRAND_PAGE: [CO_BRAND_PDF], DUAL_PAGE: [DUAL_PDF]})
         self.serve_pages({CO_BRAND_PAGE: [], DUAL_PAGE: [DUAL_PDF]})
