@@ -67,8 +67,10 @@
     不搬任何附件，stderr 寫「權益附件這次不判斷下架」與原因；原因本身已讓結束碼是 1，下次子頁都成功時再判斷。
     例外：失敗原因是「轉址到外部網域」的子頁不算（真實官網的 Visa、Mastercard、JCB 子頁每次都是）：它從來沒有內容，
     也不會提供附件連結。其他失敗（請求、轉檔、搬移）照樣阻擋。
-  - ASSUMPTION：權益子頁都成功取得、但連到的 PDF 一個也沒有時，本地的附件全部算下架（不像列表類別有 0 筆的防護，因為規格只對列表頁定了這條）。
-    附件下架紀錄的網址是空字串，沿用列表類別下架的做法。
+  - 權益子頁都成功取得、但解析到的附件連結是 0 個，而本地有附件時，也當成沒有成功取得（官網改版讓解析失效的可能高於所有附件同時下架，
+    做法同列表頁解析出 0 筆）：不搬任何附件，stderr 寫「權益附件這次不判斷下架」與原因。ASSUMPTION：結束碼比照列表頁的 0 筆保護是 1。
+    本地沒有附件時，0 個不算失敗。
+  - 附件下架紀錄的網址是空字串，沿用列表類別下架的做法。
 - 活動過期與活動圖片（更新模式；活動列表沒有成功取得時，這次不判斷活動過期，也不判斷活動圖片，見上面的列表失敗規則）：
   - 過期：每個已有活動文件的活動重新取得詳情頁，期間的結束日早於下載當天就算過期（現有規則，結束日等於當天仍有效），
     不比對、不轉檔，文件連同 _meta/html、_meta/print 的檔案搬到 DIR/_meta/removed/<下載當天>/（搬法同下架），清單記「過期移除」，
@@ -2292,13 +2294,15 @@ def remove_unlinked_attachments(
 
     附件的候選（urls）讀的是權益子頁存檔的原始 HTML；同一份附件被多個子頁連到時，只要還有一頁連到就在候選裡，不算下架。
     權益列表或任何一個權益子頁沒有成功取得時，這次不判斷，stderr 寫明原因（原因本身已讓結束碼是 1）。
+    權益子頁都成功、但解析到的附件連結是 0 個，而本地有附件時，也當成沒有成功取得（官網改版讓解析失效的可能高於所有附件同時下架，
+    做法同列表頁解析出 0 筆）：不搬任何附件，stderr 寫明原因，結束碼 1（ASSUMPTION：結束碼比照列表頁的 0 筆保護）；本地沒有附件時不算失敗。
 
     Args:
         run: 一次執行共用的設定。
         category: 權益附件類別。
         urls: 這次所有權益子頁連到的附件網址（含外部網域與下載區已有的網址，它們沒有本地檔，不影響判斷）。
         records: 目前為止這次執行的紀錄。
-        failed_lists: 目前為止沒有成功取得的列表名稱。
+        failed_lists: 目前為止沒有成功取得的列表名稱；解析到 0 個連結而本地有附件時，這裡會加上附件類別的名稱（結束碼因此是 1）。
 
     Returns:
         每一份下架（或搬移失敗）附件的清單紀錄；不判斷時為空。
@@ -2306,6 +2310,15 @@ def remove_unlinked_attachments(
     blocker = attachment_removal_blocker(records, failed_lists)
     if blocker is not None:
         print(f"ERROR 權益附件這次不判斷下架：{blocker}", file=sys.stderr)
+        return []
+    local = local_documents(run, category)
+    if not urls and local:
+        print(
+            f"ERROR 權益附件這次不判斷下架：權益子頁都成功取得，但解析到的附件連結是 0 個，"
+            f"本地 {category.folder}/ 有 {len(local)} 份附件；當成沒有成功取得，不搬任何附件",
+            file=sys.stderr,
+        )
+        failed_lists.append(category.list_name)
         return []
     names = category.local_names(urls)
     return remove_missing(run, category, {document_filename(category, url, names[url]) for url in urls})

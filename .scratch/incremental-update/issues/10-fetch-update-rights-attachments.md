@@ -51,3 +51,11 @@ ASSUMPTION：
 - ASSUMPTION（使用者指定）：它的內容已由下載區那一份匯入，不搬的話同一份 PDF 會在知識庫裡兩次。
 - 外部網域的略過不加進更新模式：外部網域的附件從來沒有本地檔。
 - 測試：`test_existing_attachment_that_is_now_in_the_download_area_is_recorded_as_duplicate_and_moved_away`（先紅：附件還在附件資料夾；修後綠）。
+
+### code-review 修正 6：解析到 0 個附件連結而本地有附件時不判斷下架（2026-11-02，使用者同意改掉上面的 ASSUMPTION）
+
+原本的 ASSUMPTION「權益子頁都成功取得、但連到的 PDF 一個也沒有時，本地的附件全部算下架」作廢。改成：權益子頁都成功、但解析到的附件連結是 0 個，而本地 `rights_attachments/` 有附件時，當成沒有成功取得，不搬任何附件，stderr 寫「權益附件這次不判斷下架」與原因（做法同列表頁「解析出 0 筆」的保護）；本地沒有附件時，0 個不算失敗。
+
+- `remove_unlinked_attachments` 在 `attachment_removal_blocker` 之後多一個 0 個連結的檢查；並把附件類別名稱加進 `failed_lists`。
+- ASSUMPTION：結束碼比照列表頁的 0 筆保護是 1（使用者只說「做法和列表頁相同」，沒有明講結束碼）。
+- 測試：`test_removal_is_not_judged_when_all_subpages_succeed_but_no_attachment_link_is_parsed_while_local_has_attachments`（先紅：2 份附件被搬走）、`test_zero_attachment_links_is_fine_when_there_are_no_local_attachments`（本來就綠，守住「本地沒有附件不算失敗」）。

@@ -3143,6 +3143,28 @@ class UpdateModeAttachmentTests(ScriptTestCase):
         self.assertEqual(self.server.paths().count(DUAL_PDF), 1, "只有下載區那一份請求，附件不重複請求")
         self.assertIn("權益附件：未變 1、重複略過 1", result.stdout)
 
+    def test_removal_is_not_judged_when_all_subpages_succeed_but_no_attachment_link_is_parsed_while_local_has_attachments(self) -> None:
+        # 官網改版讓連結解析失效的可能高於所有附件同時下架，和列表頁「解析出 0 筆」的保護相同
+        self.first_download({DUAL_PAGE: [DUAL_PDF, DUAL_PDF_2]})
+        self.serve_pages({DUAL_PAGE: []})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        for text in ("權益附件這次不判斷下架", "0 個", "rights_attachments/ 有 2 份"):
+            self.assertIn(text, result.stderr)
+        self.assertEqual(
+            sorted(p.name for p in (self.out / "rights_attachments").iterdir()),
+            ["attachment_dual-card_01.pdf", "attachment_dual-card_02.pdf"],
+        )
+        self.assertFalse(self.removed_dir().exists())
+        self.assertNotIn("下架", {r["result"] for r in self.attachment_records().values()})
+
+    def test_zero_attachment_links_is_fine_when_there_are_no_local_attachments(self) -> None:
+        self.first_download({DUAL_PAGE: []})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("權益附件這次不判斷下架", result.stderr)
+
     def test_removal_is_not_judged_when_a_subpage_request_failed_and_the_report_names_the_reason(self) -> None:
         self.first_download({CO_BRAND_PAGE: [CO_BRAND_PDF], DUAL_PAGE: [DUAL_PDF]})
         self.serve_pages({CO_BRAND_PAGE: [], DUAL_PAGE: [DUAL_PDF]})
