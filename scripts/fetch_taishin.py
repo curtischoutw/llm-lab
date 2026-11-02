@@ -1,6 +1,6 @@
 """下載台新銀行信用卡與金融卡的官網內容到本地資料夾，作為知識庫的來源文件。
 
-為什麼存在：知識庫要用台新信用卡的卡片頁、權益說明、文件下載區與刷卡優惠活動頁（約 140 份），以及簽帳金融卡專區的卡片頁、約定條款 PDF 與說明頁。
+為什麼存在：知識庫要用台新信用卡的卡片頁、權益說明、文件下載區與刷卡優惠活動頁（約 140 份），以及簽帳金融卡專區的卡片頁、約定條款 PDF 與說明頁，和 richart.tw 的卡片頁與優惠細則。
 這些內容不進版本控管，所以用這支腳本讓任何機器都能用一個指令重建同一批內容。
 
 用法：
@@ -25,8 +25,13 @@
   處理方式同卡片（取主內容區、Chrome 列印成 PDF），放在 DIR/debit_info/，本地名稱 debit_info_<網址最後一段>
   （例如 debit_info_TSBankGridPage-000004、debit_info_card-list）。沒有列表頁可以解析，所以不請求任何列表。
   ASSUMPTION：存款專區首頁（deposit/debit-card/）盤點時沒抓過，沒有主內容區時照其他頁的規則記失敗。
-- 金融卡的 richart.tw 類別由後續 ticket 加入。金融卡類別的命名：資料夾與本地名稱以 debit_ 開頭（richart.tw 的文件以 richart_ 開頭），
+- 金融卡類別的命名：資料夾與本地名稱以 debit_ 開頭（richart.tw 的文件以 richart_ 開頭，見下面兩個 Richart 類別），
   因為 _meta/html、_meta/print 是所有類別共用的平面目錄，名稱必須全域唯一，而官網金融卡的群組編號（cg003、cg008）和信用卡卡片頁重複。
+- Richart 卡片頁：richart.tw 的簽帳金融卡頁（/TSDIB_RichartWeb/card/debit-card）與信用卡頁（/TSDIB_RichartWeb/card/credit-card），
+  寫死的兩個網址，沒有列表頁；取主內容區、Chrome 列印成 PDF，放在 DIR/richart/，本地名稱 richart_debit-card、richart_credit-card。
+  Richart 卡（信用卡）與 Richart 簽帳金融卡最容易被客戶搞混，所以兩種都要有；richart_ 前綴不寫 debit_，因為其中有信用卡的頁面。
+- Richart 優惠細則：上面兩頁連到的 /TSDIB_RichartWeb/discount/discount-details?discount=<id>，處理方式同卡片，
+  放在 DIR/richart_discounts/，本地名稱 richart_discount_<id>。
 
 輸出結構：
 - DIR/<類別資料夾>/：匯入知識庫的文件，每個類別一個資料夾（ingest 不遞迴，一次匯入一個資料夾）。
@@ -37,13 +42,14 @@
   還有「過期略過」（活動）、「格式不支援略過」（活動圖片）、「外部網域略過」與「重複略過」（權益附件）。
   更新模式另有「內容變更」、「未變」、「下架」與「過期移除」（見下面「更新模式」）。
 
-更新模式（--update，增量更新 spec 的下載端；目前涵蓋文件下載區 PDF 與網頁類的比對，卡片、權益、下載、活動、金融卡卡片頁、金融卡約定條款 PDF 六個列表類別的下架，
+更新模式（--update，增量更新 spec 的下載端；目前涵蓋文件下載區 PDF 與網頁類的比對，卡片、權益、下載、活動、金融卡卡片頁、金融卡約定條款 PDF、Richart 優惠細則七個列表類別的下架，
 權益附件的比對與下架，活動的過期判斷與活動圖片跟著活動走）：
 - 文件下載區的 PDF：本地已有的檔案重新下載一次並比對 SHA-256。內容不同才換掉原檔，清單記「內容變更」；相同就不碰原檔
   （位元組與修改時間都不變，清單記「未變」），這樣之後匯入時沒變的文件可以走 RAG-Anything 的解析快取（快取鍵含修改時間與內容雜湊）。
   新出現的 PDF 沿用「已下載」。下載失敗（HTTP、網路、內容不是 PDF）時原檔不動，清單記「失敗」，結束碼 1。
-- 網頁類（卡片頁、權益子頁、活動頁）：重新取得原始 HTML，和 DIR/_meta/html/ 存的上一份比對主內容區（轉檔實際用的那一塊：
-  卡片頁與權益子頁是 id="centercontainer"，活動頁是 class 含 page-content 的第一個元素，取出後拿掉會執行的部分；grill Q29）。
+- 網頁類（卡片頁、權益子頁、活動頁、Richart 卡片頁與優惠細則）：重新取得原始 HTML，和 DIR/_meta/html/ 存的上一份比對主內容區（轉檔實際用的那一塊：
+  卡片頁與權益子頁是 id="centercontainer"，活動頁是 class 含 page-content 的第一個元素，richart.tw 的頁面是 id="main-container"，
+  取出後拿掉會執行的部分；grill Q29）。
   主內容區相同就不轉檔、不碰文件、列印用 HTML 與存檔的原始 HTML（位元組與修改時間不變，清單記「未變」），
   主內容區以外的差異（例如活動頁 <head> 的 _csrf token，2026-11-02 實測 2 頁都和 10-30 存的不同）不算變更。
   例外：活動頁的主視覺（div.banner-image，在主內容區外面）網址變了也算變更（grill Q30），照下面的主內容區不同處理（重新轉檔、換存檔）。
@@ -52,7 +58,7 @@
   文件不存在（存檔的原始 HTML 在，第一次下載時轉檔失敗留下的狀態）時不比對，照新增處理：用這次取得的原始 HTML 轉檔，成功記「已下載」；
   活動的存檔 HTML 讀出的期間已過期時除外，不請求、不轉檔，記「過期略過」。
   文件在但存檔的原始 HTML 不在（無法比對）時視為變更（ASSUMPTION）。
-- 下架（卡片、權益、下載、活動、金融卡卡片頁、金融卡約定條款 PDF；權益附件的下架另見下一項，活動圖片的去留見下面「活動過期與活動圖片」）：這次官網列表裡沒有、本地類別資料夾（第一層）裡有的文件，
+- 下架（卡片、權益、下載、活動、金融卡卡片頁、金融卡約定條款 PDF、Richart 優惠細則；權益附件的下架另見下一項，活動圖片的去留見下面「活動過期與活動圖片」）：這次官網列表裡沒有、本地類別資料夾（第一層）裡有的文件，
   連同它在 DIR/_meta/html/、DIR/_meta/print/ 的檔案（有才搬），搬到 DIR/_meta/removed/<下載當天>/，底下保留原本的相對路徑：
   文件到 <類別資料夾>/<檔名>，原始 HTML 到 html/<名稱>.html，列印用 HTML 到 print/<名稱>.html。清單記「下架」。
   _meta 在資料根目錄，不在類別資料夾底下，所以匯入時不會挑到搬走的檔案。這樣之後匯入端才看得到這份文件已經不在。
@@ -72,6 +78,11 @@
     它是 PDF 類別：比對規則同下載區 PDF，下架時沒有 _meta/html、_meta/print 的檔案可搬。
   - 金融卡說明頁沒有下架判斷：網址是寫死的，沒有列表可比對（不在 REMOVAL_CATEGORIES）。更新模式下每頁照網頁類的規則比對主內容區，
     請求失敗、沒有主內容區或轉檔失敗時記「失敗」，本地的文件與存檔不動。
+  - Richart 優惠細則的「列表」是簽帳金融卡頁與信用卡頁（collect_richart_discounts 每次執行各請求一次）。兩頁任一頁請求失敗
+    （或不是 UTF-8），那一頁記「失敗」（url 是卡片頁網址，檔名 richart_discount_from_debit-card 或 richart_discount_from_credit-card），
+    另一頁連到的細則照常處理，這次整個細則類別不判斷下架（stderr 寫明，結束碼 1）。兩頁都成功、但細則連結合計 0 則，而本地
+    richart_discounts/ 有檔案時，沿用上面的 0 筆保護（不搬任何檔案，stderr 寫明，結束碼 1）；本地沒有細則時 0 則不算失敗。
+    Richart 卡片頁（寫死的兩個網址）沒有下架判斷：取不到時記「失敗」，本地的文件與存檔的 HTML 不動。
   - 判斷只看類別資料夾裡的檔名是否在這次列表算出的檔名之內（檔名規則見下面「本地檔名」）。同一類別兩個網址組出同一個檔名而加了網址雜湊後綴的
     情況，列表增減會改變後綴，舊檔名會被當成下架、新檔名當成新增。
 - 權益附件跟著權益子頁上的連結走：
@@ -181,6 +192,19 @@
   舊名稱算下架、新名稱算新增（ASSUMPTION：官網很少改，接受重新匯入一份）。
   每次執行都要請求每個落地頁（名稱取決於轉址目標），包括本地已有文件、不加 --update 而略過的卡，所以略過的卡仍有 1 個落地頁請求，卡片頁本身不請求。
   ASSUMPTION：location.replace 取整頁第一個，不限定在主內容區內（2026-11-02 盤點的 5 個落地頁只有主內容區裡那一個）。
+- richart.tw 的主內容區（ASSUMPTION，由實作者從 2026-11-02 盤點存下的簽帳金融卡頁、信用卡頁與優惠細則 277 的 HTML 判斷）：
+  id="main-container" 的元素。三份 HTML 各有 1 個；導覽列（class main-header）與頁尾（class main-footer）在它外面，
+  取出的文字量是簽帳金融卡頁約 1,918 字、信用卡頁約 2,276 字、細則 277 約 1,673 字（整頁含導覽與頁尾約 2,592／4,572／2,234 字）。
+  頁面是伺服器端直接渲染的 HTML，不用 JS 就有內容；簽帳金融卡頁的 592,344 字元中有 4 張 base64 內嵌圖片，圖片留在主內容區裡，
+  不影響文字，交給 Chrome 時是本機 HTML 裡的 data: 網址，不是額外的請求。找不到 main-container 的頁面記為失敗（同其他網頁類）。
+- Richart 優惠細則的連結收集（find_discount_links）不用 find_page_links，因為後者只收沒有 query 的連結，而細則的 id 在 query 裡
+  （?discount=<id>）。兩個卡片頁的所有 <a href> 都看，連結以卡片頁網址解析；只收網域和 richart.tw 前綴相同（環境變數替換後以替換值為準）、
+  路徑是 /TSDIB_RichartWeb/discount/discount-details、query 有 discount=<數字> 的連結，網址整理成只留 discount 一個 query
+  （fragment 與別的 query 去掉），去除重複、保留出現順序，所以同一則細則在兩頁都出現、或同一頁出現多次，只下載一次。
+  優惠列表（/TSDIB_RichartWeb/discount，沒有 discount query）不是細則，不收。其他網域的連結略過：不請求、不算失敗，
+  清單也沒有紀錄（ASSUMPTION：規格只說略過；權益附件的「外部網域略過」是清單裡有一行，這個類別沒有）。
+  細則的本地名稱直接取 id（richart_discount_277，Category.match_query），不加網址雜湊後綴，所以細則清單增減時既有細則的檔名不變。
+  細則 id 限數字（ASSUMPTION：2026-11-02 盤點的 14 個 id 都是數字）。
 - 單頁失敗（HTTP、網路、轉址到外部網域、網址無法送出請求、轉檔、檔案系統）時記下原因，其他頁照常處理；最後列出所有失敗的頁面並以非零碼結束。
   列表頁（總覽頁、權益頁、文件下載頁與刷卡優惠列表的任何一頁）本身失敗時，那一類沒有任何網址，指出是哪一個列表；
   其他類別照常處理，最後以非零碼結束。
@@ -191,15 +215,24 @@
   刪除資料夾後重新下載。加 --update 時文件下載區的 PDF 與網頁類會重新取得並比對，見「更新模式」。
 - 請求間隔：腳本自己發出的每個 HTTP 請求之間至少 TAISHIN_REQUEST_INTERVAL_SEC 秒（預設 2）。
   這個環境變數只給測試調小。
-- 三個網域的前綴各用一個環境變數取代，只給測試指向本機假 server 用：TAISHIN_WWW_BASE 取代
+- 四個網域的前綴各用一個環境變數取代，只給測試指向本機假 server 用：TAISHIN_WWW_BASE 取代
   https://www.taishinbank.com.tw，TAISHIN_MKPCARD_BASE 取代 https://mkpcard.taishinbank.com.tw（刷卡優惠列表），
-  TAISHIN_MKP_BASE 取代 https://mkp.taishinbank.com.tw（活動詳情頁與主視覺）。列表裡指向 mkp 的絕對網址
-  會被換成 TAISHIN_MKP_BASE 的前綴，所以測試只要設這三個變數，不會有請求送到真的官網。
+  TAISHIN_MKP_BASE 取代 https://mkp.taishinbank.com.tw（活動詳情頁與主視覺），TAISHIN_RICHART_BASE 取代 https://richart.tw
+  （Richart 卡片頁與優惠細則）。列表裡指向 mkp 的絕對網址會被換成 TAISHIN_MKP_BASE 的前綴，所以測試只要設這四個變數，
+  不會有請求送到真的官網。richart.tw 的頁面連結是相對路徑；絕對網址只有網域和替換後的前綴相同時才收。
+  richart.tw 的請求間隔與轉址規則和官網相同（同一個 Fetcher，轉址只跟隨原請求的網域）；richart.tw 沒有 robots.txt
+  （/robots.txt 轉址到首頁，2026-11-02 盤點）。
   TAISHIN_CHROME 指定 Chrome 執行檔，預設是 macOS 上 Google Chrome 的標準安裝路徑。
 - Chrome 列印時使用暫時的使用者資料夾（含封鎖 JavaScript 的 Preferences），不用使用者自己的 Chrome profile。
 - 下載的內容是不可信資料：腳本不執行它們；外部命令用參數列表呼叫。
 
 已知極限：
+- Richart 信用卡頁的「可每日切換方案」彈窗（id="modalSwitchPlans"，各方案的適用商店清單，共 7 段，約 2,100 字）在 id="main-container"
+  外面，不在 PDF 裡；頁面上的方案摘要（方案名稱與最高回饋）在主內容區內。簽帳金融卡頁與細則頁沒有這類主內容區外的內文
+  （2026-11-02 盤點的三份 HTML）。
+- 收集 Richart 優惠細則的連結時，簽帳金融卡頁與信用卡頁各請求一次，和 Richart 卡片頁類別下載同兩頁的請求分開
+  （ASSUMPTION：不為了省 2 個請求，在兩個類別之間傳遞頁面內容）。每次執行都有這 2 個請求，包括不加 --update 而本地已有卡片頁時；
+  每個頁面（簽帳金融卡頁約 650 KB）最多請求 2 次。
 - Chrome 與 LibreOffice 透過 <base href> 自行載入圖片，這些請求不受腳本的間隔控制。
 - 刷卡優惠列表頁頂的輪播（a.btn-slide，絕對網址）不收：2026-10-30 的樣本中，A 的輪播有一個活動不在 A 的任何列表頁裡，
   所以這類活動不會被下載（範圍外，ticket 05）。
@@ -249,7 +282,7 @@ from datetime import date, datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import IO
-from urllib.parse import ParseResult, quote, unquote, urljoin, urlparse, urlunparse
+from urllib.parse import ParseResult, parse_qs, quote, unquote, urljoin, urlparse, urlunparse
 
 # 圖片格式的清單沿用專案唯一的一份（rag_lab/formats.py，只用標準函式庫）；腳本在 scripts/ 底下，
 # 要先把 repo 根目錄放進 sys.path 才找得到 rag_lab
@@ -268,6 +301,7 @@ CHROME_TIMEOUT_SEC = 180
 WWW_PREFIX = "https://www.taishinbank.com.tw"
 MKPCARD_PREFIX = "https://mkpcard.taishinbank.com.tw"
 MKP_PREFIX = "https://mkp.taishinbank.com.tw"
+RICHART_PREFIX = "https://richart.tw"
 DEFAULT_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 DEFAULT_INTERVAL_SEC = 2.0
 
@@ -301,6 +335,7 @@ INTERVAL_ENV = "TAISHIN_REQUEST_INTERVAL_SEC"
 WWW_BASE_ENV = "TAISHIN_WWW_BASE"
 MKPCARD_BASE_ENV = "TAISHIN_MKPCARD_BASE"
 MKP_BASE_ENV = "TAISHIN_MKP_BASE"
+RICHART_BASE_ENV = "TAISHIN_RICHART_BASE"
 
 # request_url 編碼 query 時保持原樣的字元：query 的分隔符號與已經編碼的 %
 QUERY_SAFE = "=&%+/?:;,@$!*'()~"
@@ -1045,7 +1080,7 @@ class Tools:
 
 @dataclass(frozen=True)
 class Run:
-    """一次執行共用的設定：資料根目錄、三個官網網域的前綴、發請求的物件、轉檔工具、下載當天，以及各類別找到的網址。
+    """一次執行共用的設定：資料根目錄、四個網域的前綴（官網三個、richart.tw）、發請求的物件、轉檔工具、下載當天，以及各類別找到的網址。
 
     today 在一次執行開始時取一次（本機日期），活動是否過期、清單的下載日期都用它，所以執行跨過午夜時前後一致。
 
@@ -1065,6 +1100,7 @@ class Run:
     www: str
     mkpcard: str
     mkp: str
+    richart: str
     fetcher: Fetcher
     tools: Tools
     today: date
@@ -1077,12 +1113,12 @@ class Run:
         """網域代號對應的網址前綴。
 
         Args:
-            site: 網域代號：www、mkpcard 或 mkp。
+            site: 網域代號：www、mkpcard、mkp 或 richart。
 
         Returns:
             該網域這次執行用的前綴（預設是官網，環境變數替換後是替換值）。
         """
-        return {"www": self.www, "mkpcard": self.mkpcard, "mkp": self.mkp}[site]
+        return {"www": self.www, "mkpcard": self.mkpcard, "mkp": self.mkp, "richart": self.richart}[site]
 
     def to_mkp(self, absolute: str) -> str:
         """指向官網 mkp 網域的網址，換成這次執行的 mkp 前綴（和活動詳情頁連結的處理一樣）；其他網域原樣回傳。
@@ -1103,7 +1139,7 @@ class Run:
 class Category:
     """一個類別：從哪個列表頁找文件、文件怎麼取得、放在哪個資料夾。
 
-    list_site 是列表頁所在的網域代號（www 或 mkpcard），list_path 接在該網域的前綴後面。
+    list_site 是列表頁所在的網域代號（www、mkpcard、mkp 或 richart），list_path 接在該網域的前綴後面。
 
     collect 的參數是 (執行設定, 類別)，回傳文件的完整網址（去除重複、保留順序），列表頁失敗時拋出 FetchError。
     produce 的參數是 (執行設定, 類別, 網址, 本地名稱, 最終檔案, 清單紀錄)，把文件寫到最終檔案、
@@ -1113,6 +1149,9 @@ class Category:
     SkipDocument（檔案不動），權益附件的 refresh 在網址已在文件下載區時拋出 SkipDocument（重複），由 fetch_document 把文件搬走。None 表示這個類別的更新模式不比對內容（活動圖片：已存在就略過，去留由 remove_unreferenced_images 判斷）。
     local_name 由 name_prefix 和 link_pattern 的各個群組以底線接起來，例如卡片 card_cg047_card001。
     extension 是 None 時，副檔名取自文件網址路徑的最後一個副檔名（小寫），活動圖片是這樣。
+
+    match_query 是 True 時，link_pattern 比對的是「路徑?query」而不是只有路徑，所以本地名稱可以取自 query 裡的值
+    （Richart 優惠細則的 id 在 query 裡，其餘類別的網址 query 不參與名稱）。
     """
 
     name: str
@@ -1132,6 +1171,7 @@ class Category:
     collect: Callable[["Run", "Category"], list[str]]
     produce: Callable[["Run", "Category", str, str, Path, "Record"], None]
     refresh: Callable[["Run", "Category", str, str, Path, "Record"], bool] | None
+    match_query: bool = False
 
     def local_name(self, url: str) -> str:
         """由文件網址組出本地檔名（不含副檔名）。
@@ -1144,7 +1184,8 @@ class Category:
         Returns:
             name_prefix 和 link_pattern 的各個群組以底線接起來的名稱，例如 card_cg047_card001。
         """
-        match = self.link_pattern.match(unquote(urlparse(url).path))
+        parsed = urlparse(url)
+        match = self.link_pattern.match(unquote(f"{parsed.path}?{parsed.query}" if self.match_query else parsed.path))
         assert match is not None, url
         parts = (re.sub(r"[^\w.-]", "_", group) for group in match.groups())
         return "_".join((self.name_prefix, *parts))
@@ -1310,6 +1351,95 @@ def collect_debit_cards(run: Run, category: Category) -> list[str]:
             )
     run.collect_failures[category.name] = failures
     return list(cards)
+
+
+RICHART_CARD_PATHS = ("/TSDIB_RichartWeb/card/debit-card", "/TSDIB_RichartWeb/card/credit-card")
+
+
+def collect_richart_cards(run: Run, category: Category) -> list[str]:
+    """Richart 卡片頁：寫死的兩個網址（簽帳金融卡頁、信用卡頁），沒有列表頁，所以不發請求也不會失敗。
+
+    Args:
+        run: 一次執行共用的設定。
+        category: Richart 卡片頁類別。
+
+    Returns:
+        兩個卡片頁的完整網址。
+    """
+    return [run.base(category.list_site) + path for path in RICHART_CARD_PATHS]
+
+
+RICHART_DISCOUNT_PATH = "/TSDIB_RichartWeb/discount/discount-details"
+
+
+def find_discount_links(page_html: str, page_url: str, richart: str, link_pattern: re.Pattern[str]) -> list[str]:
+    """從 richart.tw 的卡片頁取出優惠細則頁的網址（細則的 id 在 query 裡，所以不用 find_page_links，它會丟掉 query）。
+
+    Args:
+        page_html: 卡片頁 HTML。
+        page_url: 卡片頁網址，用來解析相對路徑。
+        richart: 這次執行的 richart.tw 前綴；連結的網域和它不同的略過（不請求、不算失敗）。
+        link_pattern: 「路徑?discount=<id>」的格式。
+
+    Returns:
+        去除重複、保留出現順序的細則完整網址，只留 discount 一個 query（fragment 與別的 query 去掉）。
+        格式錯誤的 href、id 不符格式的連結略過。
+    """
+    collector = _AnchorCollector()
+    collector.feed(page_html)
+    seen: dict[str, None] = {}
+    for href in collector.hrefs:
+        parsed = resolve_href(page_url, href)
+        if parsed is None or parsed.netloc.lower() != urlparse(richart).netloc.lower():
+            continue
+        ids = parse_qs(parsed.query).get("discount")
+        candidate = f"{parsed.path}?discount={ids[0]}" if ids else ""
+        if link_pattern.match(candidate):
+            seen[richart + candidate] = None
+    return list(seen)
+
+
+def collect_richart_discounts(run: Run, category: Category) -> list[str]:
+    """Richart 優惠細則：取得簽帳金融卡頁與信用卡頁，收集兩頁連到的細則頁網址。
+
+    兩頁各請求一次（和下載卡片頁的請求分開）。單一卡片頁沒有成功取得不讓整個類別失敗：那一頁的失敗紀錄放進
+    run.collect_failures，另一頁的細則照常回傳；main 因此在更新模式下不判斷細則下架。
+
+    Args:
+        run: 一次執行共用的設定。
+        category: Richart 優惠細則類別；link_pattern 是「路徑?discount=<id>」的格式。
+
+    Returns:
+        細則頁完整網址（去除重複、保留順序）。
+    """
+    links: dict[str, None] = {}
+    failures: list[Record] = []
+    for path in RICHART_CARD_PATHS:
+        page_url = run.richart + path
+        try:
+            links.update(
+                dict.fromkeys(
+                    find_discount_links(decode_page(run.fetcher.get(page_url)), page_url, run.richart, category.link_pattern)
+                )
+            )
+        except FetchError as exc:
+            card = RICHART_CARDS.link_pattern.match(path)
+            assert card is not None, path
+            failures.append(
+                Record(
+                    page_url,
+                    category.name,
+                    f"{category.name_prefix}_from_{card.group(1)}",
+                    category.fmt,
+                    run.today.isoformat(),
+                    "",
+                    "",
+                    RESULT_FAILED,
+                    f"無法取得細則連結所在的卡片頁（{exc}）",
+                )
+            )
+    run.collect_failures[category.name] = failures
+    return list(links)
 
 
 def request_url(absolute: str) -> str:
@@ -2265,9 +2395,61 @@ DEBIT_INFO = Category(
     produce=web_page_producer(print_with_chrome),
     refresh=web_page_refresher(print_with_chrome),
 )
-CATEGORIES = (CARDS, RIGHTS, DOWNLOADS, ATTACHMENTS, ACTIVITIES, IMAGES, DEBIT_CARDS, DEBIT_TERMS, DEBIT_INFO)
+RICHART_CARDS = Category(
+    name="Richart 卡片頁",
+    list_label="寫死的網址",
+    list_name="Richart 卡片頁",
+    list_site="richart",
+    list_path="",
+    link_pattern=re.compile(r"^/TSDIB_RichartWeb/card/(debit-card|credit-card)$"),
+    expected_count=2,
+    unit="張卡片頁",
+    name_prefix="richart",
+    folder="richart",
+    extension="pdf",
+    fmt=FORMAT_PDF,
+    keeps_html=True,
+    reads_period=False,
+    collect=collect_richart_cards,
+    produce=web_page_producer(print_with_chrome, main_content=("id", "main-container")),
+    refresh=web_page_refresher(print_with_chrome, main_content=("id", "main-container")),
+)
+RICHART_DISCOUNTS = Category(
+    name="Richart 優惠細則",
+    list_label="Richart 卡片頁",
+    list_name="Richart 優惠細則",
+    list_site="richart",
+    list_path="",
+    # 細則的 id 在 query 裡（match_query），本地名稱取 id，不加網址雜湊後綴，清單增減時既有細則的檔名不變
+    link_pattern=re.compile(r"^" + re.escape(RICHART_DISCOUNT_PATH) + r"\?discount=(\d+)$"),
+    expected_count=None,
+    unit="則優惠細則",
+    name_prefix="richart_discount",
+    folder="richart_discounts",
+    extension="pdf",
+    fmt=FORMAT_PDF,
+    keeps_html=True,
+    reads_period=False,
+    collect=collect_richart_discounts,
+    produce=web_page_producer(print_with_chrome, main_content=("id", "main-container")),
+    refresh=web_page_refresher(print_with_chrome, main_content=("id", "main-container")),
+    match_query=True,
+)
+CATEGORIES = (
+    CARDS,
+    RIGHTS,
+    DOWNLOADS,
+    ATTACHMENTS,
+    ACTIVITIES,
+    IMAGES,
+    DEBIT_CARDS,
+    DEBIT_TERMS,
+    DEBIT_INFO,
+    RICHART_CARDS,
+    RICHART_DISCOUNTS,
+)
 # 更新模式下，列表裡沒有的文件會被搬走的類別（權益附件與活動圖片的下架判斷不依列表，另外處理）
-REMOVAL_CATEGORIES = (CARDS, RIGHTS, DOWNLOADS, ACTIVITIES, DEBIT_CARDS, DEBIT_TERMS)
+REMOVAL_CATEGORIES = (CARDS, RIGHTS, DOWNLOADS, ACTIVITIES, DEBIT_CARDS, DEBIT_TERMS, RICHART_DISCOUNTS)
 
 
 def document_filename(category: Category, url: str, name: str) -> str:
@@ -2601,7 +2783,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str]) -> int:
-    """下載總覽頁列出的卡片頁、權益頁列出的權益子頁、文件下載區的 PDF、權益子頁連到的 PDF、刷卡優惠的活動頁與前 8 個主視覺、簽帳金融卡專區的卡片頁、金融卡約定條款 PDF 與說明頁。
+    """下載總覽頁列出的卡片頁、權益頁列出的權益子頁、文件下載區的 PDF、權益子頁連到的 PDF、刷卡優惠的活動頁與前 8 個主視覺、簽帳金融卡專區的卡片頁、金融卡約定條款 PDF 與說明頁、richart.tw 的卡片頁與優惠細則。
 
     Args:
         argv: 不含程式名稱的參數清單。
@@ -2613,6 +2795,7 @@ def main(argv: list[str]) -> int:
     www = os.environ.get(WWW_BASE_ENV, WWW_PREFIX).rstrip("/")
     mkpcard = os.environ.get(MKPCARD_BASE_ENV, MKPCARD_PREFIX).rstrip("/")
     mkp = os.environ.get(MKP_BASE_ENV, MKP_PREFIX).rstrip("/")
+    richart = os.environ.get(RICHART_BASE_ENV, RICHART_PREFIX).rstrip("/")
     chrome = os.environ.get(CHROME_ENV, DEFAULT_CHROME)
     try:
         interval = float(os.environ.get(INTERVAL_ENV, DEFAULT_INTERVAL_SEC))
@@ -2625,7 +2808,9 @@ def main(argv: list[str]) -> int:
     if args.out.exists() and not args.out.is_dir():
         print(f"ERROR --out {args.out} 已存在但不是資料夾", file=sys.stderr)
         return 2
-    run = Run(args.out, www, mkpcard, mkp, Fetcher(interval), Tools(chrome, find_office()), date.today(), args.update)
+    run = Run(
+        args.out, www, mkpcard, mkp, richart, Fetcher(interval), Tools(chrome, find_office()), date.today(), args.update
+    )
 
     records: list[Record] = []
     failed_lists: list[str] = []
