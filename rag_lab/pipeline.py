@@ -9,6 +9,13 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   已完整處理就不再呼叫 process_document_complete。這避開 RAG-Anything 單檔路徑的兩個
   副作用（LightRAG 留下 status=failed 的 dup 紀錄、原文件卡在 handling 使
   get_status_counts() 拋 KeyError）。
+- 對照表（rag_lab.registry，`WORKING_DIR/rag_lab_documents.json`）：每份文件處理成功後記下它的實體路徑、文件 ID、
+  匯入時間與來源資料夾，並在報告分類（IngestReport.outcome、IngestSummary.added／unchanged）。分類依解析出的文件 ID
+  與對照表決定，見 _classify_fully_processed：沒完整匯入過的一律照一般匯入、成功記「新增」；已完整匯入的，對照表記著同一個 ID
+  或對照表沒有這個路徑也沒有別的路徑用這個 ID 時記「沒變」，否則記「新增」（共用版本，知識庫不寫入）。對照表在處理任何文件之前
+  載入，壞掉就拋 PipelineError（不當成空表）；每份成功的文件處理完立刻寫回，寫入失敗時不再處理後面的文件，
+  前面文件的收尾（_mark_swallowed_failures）做完才拋 PipelineError。失敗的文件不分類、不寫入。
+  替換、移除與清答案快取是後續 ticket 的範圍（.scratch/incremental-update/）。
 - 重試未完成的文件（上次失敗、被中斷而卡在 processing，或文字完成但多模態沒做完）：先用
   LightRAG 的 adelete_by_doc_id 刪掉舊紀錄與部分結果，再重新匯入。LightRAG 遇到已存在的
   doc ID 不會重新排入，只會另寫一筆 status=failed 的 dup- 紀錄；刪除時保留 LLM 快取，
@@ -118,6 +125,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from rag_lab.config import Settings, get_settings, reject_unmanaged_library_env
@@ -133,7 +141,7 @@ from lightrag.kg.shared_storage import finalize_share_data  # noqa: E402
 from raganything import RAGAnything, RAGAnythingConfig  # noqa: E402
 from raganything.callbacks import ProcessingCallback  # noqa: E402
 
-from rag_lab import models, tables  # noqa: E402
+from rag_lab import models, registry, tables  # noqa: E402
 
 # ==============================
 # 常數與例外
@@ -144,6 +152,10 @@ MINERU_BACKEND = "pipeline"
 
 # 統計文件狀態時每頁讀幾筆（LightRAG 的上限是 200）
 STATUS_PAGE_SIZE = 200
+
+# 報告對每份成功的文件的分類（失敗的文件沒有分類）
+OUTCOME_ADDED = "added"
+OUTCOME_UNCHANGED = "unchanged"
 
 # rerank 之後保留的 chunk 數與分數門檻。數值等於 LightRAG 的預設值，但 LightRAG 會讀行程環境的 CHUNK_TOP_K 與
 # MIN_RERANK_SCORE（import 時決定預設），所以明確傳入，查詢行為才不受使用者 shell 裡的環境變數影響。
@@ -343,6 +355,7 @@ class IngestReport:
         description_failed: 這一篇的圖／表／公式描述失敗次數。
         write_failed: 這一篇的多模態內容寫入索引失敗次數。
         doc_id: 內容雜湊的文件 ID（RAG-Anything 的 doc- 開頭）；解析前就失敗的文件為 None。
+        outcome: 分類，OUTCOME_ADDED（新增）或 OUTCOME_UNCHANGED（沒變）；失敗的文件為 None。
     """
 
     document: Path
@@ -356,6 +369,7 @@ class IngestReport:
     description_failed: int = 0
     write_failed: int = 0
     doc_id: str | None = None
+    outcome: str | None = None
 
 
 @dataclass
@@ -372,6 +386,8 @@ class IngestSummary:
         vlm_failed: VLM 失敗呼叫次數。
         vlm_sample: 第一則 VLM 圖片描述（供人工判斷與原圖是否相符）。
         description_error: 有圖／表／公式描述或多模態內容寫入失敗時的完整說明（含端點與位址）；None 表示沒有。
+        added: 分類為新增的文件（取 resolve() 後的絕對路徑，即對照表的鍵）。
+        unchanged: 分類為沒變的文件（同上）。
     """
 
     reports: list[IngestReport] = field(default_factory=list)
@@ -383,6 +399,8 @@ class IngestSummary:
     vlm_failed: int = 0
     vlm_sample: str | None = None
     description_error: str | None = None
+    added: list[Path] = field(default_factory=list)
+    unchanged: list[Path] = field(default_factory=list)
 
 
 def _office_output_dir(parser_output_dir: str, document: Path) -> Path:
@@ -403,16 +421,40 @@ def _office_output_dir(parser_output_dir: str, document: Path) -> Path:
     return Path(parser_output_dir) / "office" / f"{document.stem}_{digest}"
 
 
-async def _ingest_one(rag: RAGAnything, document: Path) -> IngestReport:
+def _classify_fully_processed(known: dict[str, dict[str, str]], key: str, doc_id: str) -> str:
+    """已完整匯入的文件依對照表分類。
+
+    Args:
+        known: 對照表（路徑 → 紀錄）。
+        key: 這份文件的對照表鍵（resolve() 後的絕對路徑）。
+        doc_id: 這次解析出的文件 ID。
+
+    Returns:
+        OUTCOME_UNCHANGED：對照表記的就是這個 ID，或對照表沒有這個路徑而且沒有別的路徑對照到這個 ID
+        （建立對照表之前就匯入的文件）。OUTCOME_ADDED：新的路徑和已對照的另一個路徑內容相同（共用版本），
+        或這個路徑記的是另一個 ID。
+        ASSUMPTION：後一種（路徑已對照到別的 ID、這次的 ID 已完整匯入）是替換中斷的狀態，替換由 ticket 02 實作，
+        這裡先記「新增」。
+    """
+    entry = known.get(key)
+    if entry is not None:
+        return OUTCOME_UNCHANGED if entry["doc_id"] == doc_id else OUTCOME_ADDED
+    shared = any(other["doc_id"] == doc_id for other in known.values())
+    return OUTCOME_ADDED if shared else OUTCOME_UNCHANGED
+
+
+async def _ingest_one(rag: RAGAnything, document: Path, known: dict[str, dict[str, str]]) -> IngestReport:
     """匯入單篇文件；已完整處理就略過，先前未完成的先清掉舊紀錄再重匯。
 
     Args:
         rag: 已初始化的 RAGAnything。
         document: 文件路徑。
+        known: 對照表（路徑 → 紀錄），只讀。
 
     Returns:
-        這一篇的 IngestReport（total_seconds、description_failed、write_failed 由呼叫端填入）。圖／表／公式描述
-        或多模態內容寫入失敗時，文件在索引裡改記成 failed（重新執行不會被略過），report.error 寫出原因。
+        這一篇的 IngestReport（total_seconds、description_failed、write_failed 由呼叫端填入）。成功時 outcome 是分類；
+        圖／表／公式描述或多模態內容寫入失敗時，文件在索引裡改記成 failed（重新執行不會被略過），
+        report.error 寫出原因，沒有分類。
 
     Raises:
         PipelineError: 解析不出內容，或清除舊紀錄失敗。
@@ -430,7 +472,13 @@ async def _ingest_one(rag: RAGAnything, document: Path) -> IngestReport:
         if not content_list:
             raise PipelineError(f"MinerU 沒有從 {document.name} 解析出任何內容（輸出資料夾：{rag.config.parser_output_dir}）")
         if await rag.is_document_fully_processed(doc_id):
-            return IngestReport(document, skipped=True, parse_seconds=timer.parse_seconds or 0.0, doc_id=doc_id)
+            return IngestReport(
+                document,
+                skipped=True,
+                parse_seconds=timer.parse_seconds or 0.0,
+                doc_id=doc_id,
+                outcome=_classify_fully_processed(known, _registry_key(document), doc_id),
+            )
         if await rag.lightrag.doc_status.get_by_id(doc_id) is not None:
             deletion = await rag.lightrag.adelete_by_doc_id(doc_id)
             if deletion.status != "success":
@@ -457,6 +505,9 @@ async def _ingest_one(rag: RAGAnything, document: Path) -> IngestReport:
             models.describe_failures(description_after - description_before, write_after - write_before)
             + "。文件已記成失敗，修好端點後重新執行 ingest 會重試這份文件"
         )
+    else:
+        # 沒有完整匯入過（新文件、先前失敗、或對照表記的是另一個版本）：照一般匯入，成功就是新增
+        report.outcome = OUTCOME_ADDED
     return report
 
 
@@ -548,6 +599,64 @@ def _require_supported(documents: list[Path]) -> None:
             raise PipelineError(f"不支援的格式：{document.name}（支援的格式：{describe_supported()}）")
 
 
+def _registry_key(document: Path) -> str:
+    """文件在對照表裡的鍵：和 CLI 取路徑的方式相同，resolve() 成絕對的實體路徑。
+
+    Args:
+        document: 文件路徑。
+
+    Returns:
+        絕對路徑字串（symlink 已解析）。
+    """
+    return str(document.resolve())
+
+
+def _load_registry(settings: Settings) -> dict[str, dict[str, str]]:
+    """讀出對照表，壞掉時改拋 PipelineError。
+
+    Args:
+        settings: 已驗證的設定（取 WORKING_DIR）。
+
+    Returns:
+        路徑 → 紀錄；沒有對照表時是空 dict。
+
+    Raises:
+        PipelineError: 對照表讀不了、不是合法的 JSON 或格式不符（訊息含檔案路徑）。
+    """
+    try:
+        return registry.load(settings.working_dir)
+    except registry.RegistryError as exc:
+        raise PipelineError(str(exc)) from exc
+
+
+def _record_success(settings: Settings, known: dict[str, dict[str, str]], report: IngestReport) -> None:
+    """文件處理成功後更新對照表那一筆並寫回檔案。
+
+    沒變而且對照表已經是這個 ID 時，保留原本那一筆、不寫檔。
+
+    Args:
+        settings: 已驗證的設定（取 WORKING_DIR）。
+        known: 對照表（路徑 → 紀錄），會被更新。
+        report: 成功的報告（outcome 與 doc_id 都有值）。
+
+    Raises:
+        registry.RegistryError: 對照表寫不進去。
+    """
+    key = _registry_key(report.document)
+    entry = known.get(key)
+    if report.outcome == OUTCOME_UNCHANGED and entry is not None and entry["doc_id"] == report.doc_id:
+        return
+    known[key] = {
+        "doc_id": report.doc_id,
+        # ASSUMPTION：對照表建立之前匯入的文件，真正的匯入時間已不可考，記補登的時間
+        "ingested_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        # ASSUMPTION：來源資料夾記文件所在的資料夾。`ingest <資料夾>` 時文件都是該資料夾的直接子檔，兩者相同
+        # （資料夾裡的 symlink 檔除外）；Python API 指定來源資料夾的參數由 ticket 04 加入
+        "source_folder": str(Path(key).parent),
+    }
+    registry.save(settings.working_dir, known)
+
+
 async def _ingest(rag: RAGAnything, documents: list[Path], settings: Settings) -> IngestSummary:
     """在已初始化的 RAGAnything 上匯入一批文件並彙整結果。
 
@@ -561,15 +670,19 @@ async def _ingest(rag: RAGAnything, documents: list[Path], settings: Settings) -
 
     Raises:
         EndpointError: 開始前有端點不可達。
+        PipelineError: 對照表壞掉（在處理任何文件之前）；對照表寫不進去（這份文件已匯入，後面的文件不再處理，
+            已處理的收尾照常做完才拋）。
     """
+    known = _load_registry(settings)
     models.check_reachable("LLM", "VLM", "Embedding")
     models.reset_stats()
     summary = IngestSummary()
+    registry_error: registry.RegistryError | None = None
     for document in documents:
         description_before, write_before = models.failure_counts()
         started = time.perf_counter()
         try:
-            report = await _ingest_one(rag, document)
+            report = await _ingest_one(rag, document, known)
         except Exception as exc:
             # 單篇失敗不中斷整批：記下是哪一篇、為什麼，CLI 據此印出並以非零碼結束
             report = IngestReport(document, skipped=False, parse_seconds=0.0, error=f"{type(exc).__name__}: {exc}")
@@ -577,7 +690,21 @@ async def _ingest(rag: RAGAnything, documents: list[Path], settings: Settings) -
         report.description_failed = models.description_stats.failed - description_before
         report.write_failed = models.description_stats.write_failed - write_before
         summary.reports.append(report)
+        if report.error is None:
+            try:
+                _record_success(settings, known, report)
+            except registry.RegistryError as exc:
+                # 對照表寫不進去就不再處理後面的文件（它們也記不進去）；先把前面文件的收尾做完再拋
+                registry_error = exc
+                break
     await _mark_swallowed_failures(rag, summary.reports)
+    if registry_error is not None:
+        raise PipelineError(
+            f"{registry_error}。{summary.reports[-1].document.name} 已匯入知識庫但沒有記進對照表，"
+            f"後面的文件沒有處理；修好後重新執行同一個 ingest 即可"
+        ) from registry_error
+    summary.added = [r.document.resolve() for r in summary.reports if r.outcome == OUTCOME_ADDED]
+    summary.unchanged = [r.document.resolve() for r in summary.reports if r.outcome == OUTCOME_UNCHANGED]
     summary.entities, summary.relations, summary.belongs_to = await _graph_stats(rag)
     summary.status_counts = await _status_counts(rag)
     stats = models.vision_stats
