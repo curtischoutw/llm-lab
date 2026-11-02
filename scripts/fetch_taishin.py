@@ -191,7 +191,8 @@
   否則當成找不到轉址目標，那一張失敗，目標不請求。本地名稱取目標的最後一段，所以轉址目標從 card01/ 改成 card001/ 時，
   舊名稱算下架、新名稱算新增（ASSUMPTION：官網很少改，接受重新匯入一份）。
   每次執行都要請求每個落地頁（名稱取決於轉址目標），包括本地已有文件、不加 --update 而略過的卡，所以略過的卡仍有 1 個落地頁請求，卡片頁本身不請求。
-  ASSUMPTION：location.replace 取整頁第一個，不限定在主內容區內（2026-11-02 盤點的 5 個落地頁只有主內容區裡那一個）。
+  只在落地頁的 id="centercontainer" 內找 location.replace（主內容區外的，例如頁首的另一段 JS，不算）；找不到 centercontainer 時同樣記為找不到轉址目標。
+  ASSUMPTION：取主內容區裡第一個 location.replace（2026-11-02 盤點的 5 個落地頁各只有 1 個，都在 centercontainer 裡）。
 - richart.tw 的主內容區（ASSUMPTION，由實作者從 2026-11-02 盤點存下的簽帳金融卡頁、信用卡頁與優惠細則 277 的 HTML 判斷）：
   id="main-container" 的元素。三份 HTML 各有 1 個；導覽列（class main-header）與頁尾（class main-footer）在它外面，
   取出的文字量是簽帳金融卡頁約 1,918 字、信用卡頁約 2,276 字、細則 277 約 1,673 字（整頁含導覽與頁尾約 2,592／4,572／2,234 字）。
@@ -781,17 +782,16 @@ def strip_active_content(fragment: str) -> str:
     return "".join(stripper.parts)
 
 
-def extract_main_content(page_html: str, attr: str, value: str) -> str | None:
-    """取出第一個符合條件的元素（含自身），並拿掉會執行或載入外部內容的部分（strip_active_content）。
+def extract_element(page_html: str, attr: str, value: str) -> str | None:
+    """取出第一個符合條件的元素（含自身），內容原樣保留（含 <script>）。
 
     Args:
         page_html: 原始 HTML。
-        attr: 主內容區用哪個屬性找：id（屬性值等於 value）或 class（class 含 value 這個名稱）。
+        attr: 用哪個屬性找：id（屬性值等於 value）或 class（class 含 value 這個名稱）。
         value: 屬性值或 class 名稱。
 
     Returns:
-        主內容區的 HTML（不含 <script>、<style>、<iframe>、樣式表連結、事件屬性與 javascript: 網址）；
-        找不到、或元素沒有結束標籤時為 None。
+        元素的原始 HTML；找不到、或元素沒有結束標籤時為 None。
     """
     finder = _MainContentFinder(attr, value)
     finder.feed(page_html)
@@ -804,7 +804,23 @@ def extract_main_content(page_html: str, attr: str, value: str) -> str | None:
     begin = offsets[finder.start[0] - 1] + finder.start[1]
     close = offsets[finder.end[0] - 1] + finder.end[1]
     stop = page_html.index(">", close) + 1
-    return strip_active_content(page_html[begin:stop])
+    return page_html[begin:stop]
+
+
+def extract_main_content(page_html: str, attr: str, value: str) -> str | None:
+    """取出第一個符合條件的元素（含自身），並拿掉會執行或載入外部內容的部分（strip_active_content）。
+
+    Args:
+        page_html: 原始 HTML。
+        attr: 主內容區用哪個屬性找：id（屬性值等於 value）或 class（class 含 value 這個名稱）。
+        value: 屬性值或 class 名稱。
+
+    Returns:
+        主內容區的 HTML（不含 <script>、<style>、<iframe>、樣式表連結、事件屬性與 javascript: 網址）；
+        找不到、或元素沒有結束標籤時為 None。
+    """
+    element = extract_element(page_html, attr, value)
+    return None if element is None else strip_active_content(element)
 
 
 def build_print_html(main_content: str, base_url: str) -> str:
@@ -1283,7 +1299,7 @@ REDIRECT_PATTERN = re.compile(r"""location\.replace\(\s*(["'])(.*?)\1\s*\)""")
 
 
 def find_redirect_target(landing_html: str, landing_url: str, card_pattern: re.Pattern[str]) -> str:
-    """從金融卡群組落地頁讀出轉址目標（location.replace 的參數），不執行 JS。
+    """從金融卡群組落地頁的主內容區（id="centercontainer"）讀出轉址目標（location.replace 的參數），不執行 JS。
 
     Args:
         landing_html: 落地頁 HTML。
@@ -1294,11 +1310,14 @@ def find_redirect_target(landing_html: str, landing_url: str, card_pattern: re.P
         卡片頁完整網址（不含 query 與 fragment，路徑中 ASCII 以外的字元已百分比編碼）。
 
     Raises:
-        FetchError: 落地頁沒有轉址、網址格式錯誤，或目標不在落地頁的網域、不在同一個 payment/cgXXX/ 底下。
+        FetchError: 落地頁沒有主內容區、主內容區沒有轉址、網址格式錯誤，或目標不在落地頁的網域、不在同一個 payment/cgXXX/ 底下。
     """
-    match = REDIRECT_PATTERN.search(landing_html)
+    main_content = extract_element(landing_html, "id", "centercontainer")
+    if main_content is None:
+        raise FetchError('找不到轉址目標（落地頁找不到主內容區 id="centercontainer"）')
+    match = REDIRECT_PATTERN.search(main_content)
     if match is None:
-        raise FetchError("找不到轉址目標（落地頁沒有 location.replace）")
+        raise FetchError("找不到轉址目標（落地頁主內容區沒有 location.replace）")
     landing = urlparse(landing_url)
     target = resolve_href(landing_url, match.group(2))
     if target is None:

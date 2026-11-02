@@ -1223,6 +1223,42 @@ class DebitCardRedirectTests(ScriptTestCase):
         self.assertEqual(records["debit_card_cg006_card001.pdf"]["result"], "已下載")
         self.assertIn(f"FAILED {self.server.base_url + DEBIT_VISA_GROUP}", result.stderr)
 
+    def test_only_the_redirect_inside_the_main_content_counts(self) -> None:
+        self.serve_debit_cards({DEBIT_VISA_GROUP: DEBIT_VISA}, {DEBIT_VISA: card_html("VISA")})
+        self.routes[DEBIT_VISA_GROUP] = (
+            200,
+            (
+                '<html><body><script>function go() { location.replace("/TSB/login/"); }</script>'
+                f'<div id="centercontainer"><script>location.replace("{DEBIT_VISA}");</script></div>'
+                "</body></html>"
+            ).encode(),
+        )
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([p.name for p in (self.out / "debit_cards").iterdir()], ["debit_card_cg001_card01.pdf"])
+        self.assertNotIn("/TSB/login/", self.server.paths())
+
+    def test_redirects_outside_the_main_content_or_without_a_main_content_are_a_failed_card(self) -> None:
+        outside_only = (
+            f'<html><body><script>location.replace("{DEBIT_VISA}");</script><div id="centercontainer">x</div></body></html>'
+        )
+        no_main_content = f'<html><body><script>location.replace("{DEBIT_LABOR}");</script></body></html>'
+        self.serve_debit_cards(
+            {DEBIT_VISA_GROUP: None, DEBIT_LABOR_GROUP: None},
+            {DEBIT_VISA: card_html("VISA"), DEBIT_LABOR: card_html("LABOR")},
+        )
+        self.routes[DEBIT_VISA_GROUP] = (200, outside_only.encode())
+        self.routes[DEBIT_LABOR_GROUP] = (200, no_main_content.encode())
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertFalse((self.out / "debit_cards").exists() and list((self.out / "debit_cards").iterdir()))
+        failed = [r for r in self.manifest() if r["result"] == "失敗"]
+        self.assertEqual(len(failed), 2)
+        for record in failed:
+            self.assertIn("找不到轉址目標", record["detail"])
+        for path in (DEBIT_VISA, DEBIT_LABOR):
+            self.assertNotIn(path, self.server.paths())
+
     def test_landing_page_request_failure_is_a_failed_card_and_the_other_cards_continue(self) -> None:
         self.serve_debit_cards(
             {DEBIT_VISA_GROUP: DEBIT_VISA, DEBIT_LABOR_GROUP: DEBIT_LABOR},
