@@ -26,6 +26,7 @@
 - `scripts/test_fetch_taishin.py`：新增 23 個測試（`RichartCardPageTests` 9、`RichartDiscountTests` 6、`RichartDiscountUpdateModeTests` 8）。richart.tw 用獨立的假 server（`self.richart_server`，`run_script` 一律設 `TAISHIN_RICHART_BASE`），`setUp` 預設登記兩個沒有細則連結的卡片頁（`serve_richart([], [])`），所以每個既有測試都會多下載這兩份文件。
 - 既有測試改了 27 個（subTest 展開後 31 個失敗），都只改預期值：檔案清單加 `RICHART_DEFAULT_FILES`（6 處：`CardPageTests`、`DebitCardPageTests`、`DebitCardNamingTests`、`RightsPageTests`、`OfferListTests`、`OfferPeriodTests`）；下載清單的檔名或筆數加兩份 richart 文件（`DownloadAreaManifestTests`、`ManifestTests`、`RightsManifestTests`、`OverviewTests` 2 個、`RightsPageTests` 2 個、`OfferPeriodTests.serve_one_activity`、`UrlHandlingTests` 3 個、`UpdateModeRemovedFromListTests`）；`DownloadAreaFailureTests`、`LibreOfficeProfileTests`、`RightsAttachmentTests` 的檔案清單加 richart 檔；`FailureTests.assert_failed_page_is_reported` 加 `also_failed`（Chrome 不存在時 richart 兩頁也失敗）；`RerunTests` 的結果清單多兩個「已存在略過」；`DownloadAreaRerunTests` 對 richart 文件預期有 `html_sha256`（網頁類）。`self.server`（官網）的請求清單與數量斷言一處都沒改，因為 richart.tw 的請求不經過它。另在 `RequestPolicyTests` 的兩個「送出請求前被擋下」測試加了 richart server 也沒收到請求的斷言。
 - 模組說明（兩個檔）與 README 第 2 節同步。
+- 合併 `integration/debit-card`（ticket 02 已併入）時，`scripts/fetch_taishin.py`、`scripts/test_fetch_taishin.py`、README 各有衝突，兩邊的類別都保留：`CATEGORIES` 順序是 …、金融卡卡片頁、金融卡約定條款 PDF、金融卡說明頁、Richart 卡片頁、Richart 優惠細則；`REMOVAL_CATEGORIES` 加上約定條款 PDF 與 Richart 優惠細則。測試的 `setUp` 同時登記約定條款頁、7 個說明頁（02）與 richart 兩個卡片頁（03，在獨立的假 server，所以不進 `DEBIT_DEFAULT_REQUESTS`，那份請求清單只算 `self.server`）。02 把清單斷言改成「依類別篩選」的地方照 02 的版本；檔案清單與依檔名排序的斷言同時加 `DEBIT_INFO_FILES`／`DEBIT_INFO_DOCUMENTS` 與 `RICHART_DEFAULT_FILES`／`RICHART_DEFAULT_DOCUMENTS`。`assert_failed_page_is_reported` 的 `also_failed` 參數在 02 改寫「Chrome 不存在」測試後沒有呼叫端，已移除；該測試的預期失敗清單加上兩份 richart 文件。合併後第一次完整執行有 2 個失敗（`DebitInfoTests` 的兩個測試列出 `_meta/html`、`_meta/print` 的全部檔案，沒有算進 richart 的 2 份），改預期值後單獨重跑 `DebitInfoTests` 6 個全綠，再完整執行一次。
 
 **紅燈輸出**
 
@@ -56,7 +57,9 @@ FAILED (errors=1)
 
 **最後一次測試輸出**
 
-RESULT_PLACEHOLDER
+- 合併前（只有 ticket 01 的 integration）：下載腳本三個測試檔（`scripts/test_fetch_papers.py scripts/test_fetch_documents.py scripts/test_fetch_taishin.py`）`Ran 264 tests in 591.829s`，`OK`（原 241 個加 23 個新測試）。
+- 合併 ticket 02 之後：同三個測試檔 `Ran 289 tests in 792.990s`，`OK`。合併後第一次執行是 `Ran 289 tests in 795.001s`、`FAILED (failures=2)`，原因見上面的合併說明，改預期值後第二次全綠。
+- 這張沒有動 `rag_lab`，主套件沒有跑。
 
 **沒做到或有疑慮的地方**
 
