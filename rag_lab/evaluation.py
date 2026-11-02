@@ -21,7 +21,7 @@ Dependencies: 僅標準函式庫。
 """
 
 import json
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -35,11 +35,11 @@ QUESTION_TYPES = ("text", "figure", "table", "cross-paper")
 QUESTION_FIELDS = ("id", "question", "reference", "type", "source")
 
 
-def resolve_modes(modes: Sequence[str] | None) -> tuple[str, ...]:
+def resolve_modes(modes: Iterable[str] | None) -> tuple[str, ...]:
     """把使用者指定的檢索模式整理成固定順序、不重複的清單。
 
     Args:
-        modes: 要跑的檢索模式；None 表示全部五種。
+        modes: 要跑的檢索模式（list、tuple、generator 等任何 iterable，只走訪一次）；None 表示全部五種。
 
     Returns:
         依 RETRIEVAL_MODES 的順序排列、去除重複的模式（與使用者給的順序無關，讓不同次 eval 的欄位順序一致）。
@@ -51,11 +51,12 @@ def resolve_modes(modes: Sequence[str] | None) -> tuple[str, ...]:
         return RETRIEVAL_MODES
     if isinstance(modes, str):
         raise ValueError(f"modes 必須是模式名稱的序列，收到字串 {modes!r}")
-    unknown = [mode for mode in modes if mode not in RETRIEVAL_MODES]
-    if unknown or not modes:
+    requested = tuple(modes)
+    unknown = [mode for mode in requested if mode not in RETRIEVAL_MODES]
+    if unknown or not requested:
         problem = f"不認得的模式 {'、'.join(repr(m) for m in unknown)}" if unknown else "沒有指定任何模式"
         raise ValueError(f"{problem}；可用的模式：{'、'.join(RETRIEVAL_MODES)}")
-    return tuple(mode for mode in RETRIEVAL_MODES if mode in modes)
+    return tuple(mode for mode in RETRIEVAL_MODES if mode in requested)
 
 
 class QuestionFileError(ValueError):

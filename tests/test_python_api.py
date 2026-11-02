@@ -55,6 +55,7 @@ from tests.test_pipeline import (
 # 步驟 reject:<檔名>,<檔名>… 一次匯入這些文件，印出拋出的例外類別與訊息（預期不支援的格式整批被拒絕）；
 # 步驟 query_poisoned 問一個題目文字含 Poisoned 的問題，印出拋出的例外類別與訊息（測試讓 rerank 只對這種題目出錯）；
 # 步驟 evaluate_modes:<模式>,<模式>… 以 modes 參數呼叫 evaluate，每一列印出各格答案（失敗印 ERROR）；
+# 步驟 evaluate_iter_modes:<模式>,<模式>… 同上，但 modes 傳的是 generator（只能走訪一次的 iterable）；
 # 步驟 evaluate_bad_modes:<模式>,<模式>…（可為空字串）同樣呼叫 evaluate，印出拋出的例外類別與訊息；
 # 步驟 instances 印出存活的 RAGAnything 實例數，並在最後（Session 已關閉）再印一次；
 # 步驟 second／closed／thread／loop／bad_mode 各做一種誤用並印出例外類別；orphan 讓建立 session 的執行緒
@@ -196,6 +197,10 @@ with pipeline.Session() if use_session else contextlib.nullcontext(pipeline) as 
             chosen = step.removeprefix("evaluate_modes:").split(",")
             for row in api.evaluate(load_questions(questions), chosen):
                 print("evaluate_modes " + " ".join(cell.answer if cell.error is None else "ERROR" for cell in row))
+        elif step.startswith("evaluate_iter_modes:"):
+            chosen = step.removeprefix("evaluate_iter_modes:").split(",")
+            for row in api.evaluate(load_questions(questions), (name for name in chosen)):
+                print("evaluate_iter_modes " + " ".join(cell.answer if cell.error is None else "ERROR" for cell in row))
         elif step.startswith("evaluate_bad_modes:"):
             chosen = [name for name in step.removeprefix("evaluate_bad_modes:").split(",") if name]
             name, message = error_name(lambda: api.evaluate(load_questions(questions), chosen))
@@ -268,7 +273,7 @@ class PythonApiCase(PipelineCase):
         """以子行程在同一個 process 內依序執行步驟。
 
         Args:
-            *steps: ingest、stats:<檔名>、doc:<檔名>、classify:<檔名>,…、sync:<資料夾>[:prune]、into:<檔名>:<資料夾>、bare_prune:<檔名>、cache:<檔名>、rewrite:<檔名>:<標記>、reject:<檔名>,…、query、query_poisoned、evaluate、evaluate_modes:<模式>,…、evaluate_bad_modes:<模式>,…、instances、second、
+            *steps: ingest、stats:<檔名>、doc:<檔名>、classify:<檔名>,…、sync:<資料夾>[:prune]、into:<檔名>:<資料夾>、bare_prune:<檔名>、cache:<檔名>、rewrite:<檔名>:<標記>、reject:<檔名>,…、query、query_poisoned、evaluate、evaluate_modes:<模式>,…、evaluate_iter_modes:<模式>,…、evaluate_bad_modes:<模式>,…、instances、second、
                 closed、thread、loop、bad_mode、orphan、init_fail、forget 的任意序列。
             mode: functions 呼叫模組函式；session 在同一個 Session 裡呼叫。
             question_texts: evaluate 步驟用的題目文字，依序是題目檔的每一題。
@@ -331,7 +336,14 @@ class EvaluateModesTest(PythonApiCase):
         self.requests_before = len(self.server.requests)
 
     def chat_requests(self, keywords: bool) -> list[dict]:
-        """匯入之後送出的答案請求（keywords=False）或關鍵字抽取請求（keywords=True）。"""
+        """匯入之後送出的答案請求（keywords=False）或關鍵字抽取請求（keywords=True）。
+
+        Args:
+            keywords: True 取關鍵字抽取請求（帶 response_format），False 取答案請求。
+
+        Returns:
+            符合的請求紀錄（dict，含 path 與 payload）清單。
+        """
         return [
             r
             for r in self.server.requests[self.requests_before :]
@@ -350,6 +362,17 @@ class EvaluateModesTest(PythonApiCase):
                 self.assertEqual(result.stdout.splitlines(), [f"evaluate_modes {CHAT_REPLY} {CHAT_REPLY}"])
                 self.assertEqual(len(self.chat_requests(keywords=False)), 2)
                 self.assertEqual(len(self.chat_requests(keywords=True)), 1, "naive 不做關鍵字抽取")
+
+    def test_a_one_shot_iterable_of_modes_behaves_like_a_list_in_both_call_styles(self):
+        for style in ("functions", "session"):
+            with self.subTest(style=style):
+                self.requests_before = len(self.server.requests)
+                question = f"What is Fake Entity Alpha? (generator {style})"
+                result = self.run_api("evaluate_iter_modes:mix", mode=style, question_texts=(question,))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stdout.splitlines(), [f"evaluate_iter_modes {CHAT_REPLY}"])
+                self.assertEqual(len(self.chat_requests(keywords=False)), 1)
+                self.assertEqual(len(self.chat_requests(keywords=True)), 1)
 
     def test_an_unknown_or_empty_modes_is_a_value_error_naming_the_available_modes_before_any_request(self):
         for style in ("functions", "session"):

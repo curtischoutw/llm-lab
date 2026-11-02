@@ -154,7 +154,7 @@ import shutil
 import sys
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -1287,7 +1287,7 @@ async def _evaluate(
     return cells
 
 
-def evaluate(questions: list[Question], modes: Sequence[str] | None = None) -> list[list[Cell]]:
+def evaluate(questions: list[Question], modes: Iterable[str] | None = None) -> list[list[Cell]]:
     """對每一題以指定的檢索模式（預設五種）各查詢一次：開一個 Session、跑完全部題目、關閉。
 
     所有模式與所有題目共用同一個 RAGAnything 實例，依題目順序、模式順序（固定依 RETRIEVAL_MODES）依序執行。
@@ -1295,7 +1295,7 @@ def evaluate(questions: list[Question], modes: Sequence[str] | None = None) -> l
 
     Args:
         questions: 已驗證的題目。
-        modes: 要跑的檢索模式；None 表示 RETRIEVAL_MODES 的五種。重複的名稱只算一次，順序以 RETRIEVAL_MODES 為準。
+        modes: 要跑的檢索模式（任何只走訪一次的 iterable 也可以）；None 表示 RETRIEVAL_MODES 的五種。重複的名稱只算一次，順序以 RETRIEVAL_MODES 為準。
 
     Returns:
         cells[i][j] 是第 i 題在 resolve_modes(modes)[j] 的結果；單格失敗記在該格的 error。
@@ -1306,11 +1306,11 @@ def evaluate(questions: list[Question], modes: Sequence[str] | None = None) -> l
         PipelineError: 初始化失敗。
         SessionError: 已有開啟中的 Session，或在不允許的環境呼叫（見 Session）。
     """
-    resolve_modes(modes)
+    resolved = resolve_modes(modes)
     # Session 建構時只檢查 LLM 與 embedding；rerank 在開 Session 之前先檢查
     models.check_reachable("Rerank")
     with Session() as session:
-        return session.evaluate(questions, modes)
+        return session.evaluate(questions, resolved)
 
 
 # ==============================
@@ -1476,7 +1476,7 @@ class Session:
             raise ValueError(f"mode 必須是 {'、'.join(RETRIEVAL_MODES)} 之一，收到 {mode!r}")
         return self._runner.run(_query(self._rag, question, mode, vlm_enhanced, self._settings))
 
-    def evaluate(self, questions: list[Question], modes: Sequence[str] | None = None) -> list[list[Cell]]:
+    def evaluate(self, questions: list[Question], modes: Iterable[str] | None = None) -> list[list[Cell]]:
         """對每一題以指定的檢索模式（預設五種）各查詢一次（見模組函式 evaluate）。
 
         Args:
