@@ -23,7 +23,10 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   紀錄，所以 IngestReport.mark_failed 不設（整批結束後的 _mark_swallowed_failures 只改記 mark_failed 的新文件）；舊版本與
   對照表不變。清除本身失敗或舊版本刪不掉時，錯誤訊息寫出新舊兩個文件 ID。_remove_version 刪除前先查對照表：別的路徑
   還指向同一個文件 ID 時不刪，也不改對照表（呼叫端改寫或移除該路徑那一筆）；`--prune`（後續 ticket）直接重用它。
-  用檔名遷移、prune、答案快取是後續 ticket 的範圍（.scratch/incremental-update/）。
+- 用檔名遷移（_find_legacy_version，spec「匯入端：對照表」規則 3）：對照表沒有這個路徑、這次的 ID 也沒完整匯入時，用檔名
+  到文件狀態找已完整處理、而且沒對照到任何路徑的文件：剛好一份當作舊版本替換，0 份記「新增」，多份拋 PipelineError 列出候選
+  （該篇記成失敗，不替換也不新增，知識庫與對照表都沒動）。文件狀態只記檔名，同名的別份文件也會對到，所以對照表的排除是這條規則的
+  安全網。prune、答案快取是後續 ticket 的範圍（.scratch/incremental-update/）。
 - 重試未完成的文件（上次失敗、被中斷而卡在 processing，或文字完成但多模態沒做完）：先用
   LightRAG 的 adelete_by_doc_id 刪掉舊紀錄與部分結果，再重新匯入。LightRAG 遇到已存在的
   doc ID 不會重新排入，只會另寫一筆 status=failed 的 dup- 紀錄；刪除時保留 LLM 快取，
@@ -534,6 +537,37 @@ async def _discard_new_version(
     )
 
 
+async def _find_legacy_version(rag: RAGAnything, document: Path, known: dict[str, dict[str, str]]) -> str | None:
+    """對照表沒有這個路徑時，用檔名到文件狀態找已完成的舊版本（spec「匯入端：對照表」規則 3 的最後一步）。
+
+    文件狀態只記檔名（RAG-Anything 預設不記完整路徑），所以同名的別份文件也會對到；已經對照到別的路徑的文件 ID
+    不是候選。ASSUMPTION：「已完成」以 `is_document_fully_processed` 判斷（文字與多模態都處理完）。
+
+    Args:
+        rag: 已初始化的 RAGAnything。
+        document: 要匯入的文件（比對它的檔名）。
+        known: 對照表（路徑 → 紀錄），只讀。
+
+    Returns:
+        剛好一份候選時是它的文件 ID（當作舊版本）；沒有候選時是 None（新增）。
+
+    Raises:
+        PipelineError: 對到多份候選；訊息列出候選的文件 ID。不替換也不新增，知識庫與對照表都沒動。
+    """
+    registered = {entry["doc_id"] for entry in known.values()}
+    processed = await rag.lightrag.doc_status.get_docs_by_status(DocStatus.PROCESSED)
+    candidates = []
+    for doc_id, status in sorted(processed.items()):
+        if status.file_path == document.name and doc_id not in registered and await rag.is_document_fully_processed(doc_id):
+            candidates.append(doc_id)
+    if len(candidates) > 1:
+        raise PipelineError(
+            f"{document.name} 不在對照表裡，檔名在知識庫對到 {len(candidates)} 份文件（{', '.join(candidates)}），"
+            f"無法判斷哪一份是舊版本，所以不替換也不新增；請確認後手動處理這些文件"
+        )
+    return candidates[0] if candidates else None
+
+
 async def _ingest_one(rag: RAGAnything, document: Path, known: dict[str, dict[str, str]]) -> IngestReport:
     """匯入單篇文件；已完整處理就略過，先前未完成的先清掉舊紀錄再重匯，內容變了的先匯入新版本再刪舊版本。
 
@@ -574,7 +608,10 @@ async def _ingest_one(rag: RAGAnything, document: Path, known: dict[str, dict[st
             return IngestReport(
                 document, skipped=True, parse_seconds=timer.parse_seconds or 0.0, doc_id=doc_id, outcome=outcome
             )
-        if old_id is not None and await rag.lightrag.doc_status.get_by_id(old_id) is None:
+        if entry is None:
+            # 對照表沒有這個路徑（建立對照表之前匯入的文件，或新的路徑）：用檔名找舊版本，可能拋 PipelineError（對到多份）
+            old_id = await _find_legacy_version(rag, document, known)
+        elif old_id is not None and await rag.lightrag.doc_status.get_by_id(old_id) is None:
             # 對照表記的舊版本已不在知識庫：照一般匯入新版本，不刪任何東西
             old_id = None
         if await rag.lightrag.doc_status.get_by_id(doc_id) is not None:
