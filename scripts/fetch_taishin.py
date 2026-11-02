@@ -4,8 +4,9 @@
 這些內容不進版本控管，所以用這支腳本讓任何機器都能用一個指令重建同一批內容。
 
 用法：
-    python3 scripts/fetch_taishin.py [--out DIR]
+    python3 scripts/fetch_taishin.py [--out DIR] [--update]
     預設輸出到 repo 根目錄下的 data/taishin_credit_card。
+    不加 --update 時，本地已有的文件一律略過；加上 --update 是更新模式（見下面「更新模式」）。
 
 目前涵蓋的類別：
 - 卡片：總覽頁列出的卡片頁，列印成 PDF，放在 DIR/cards/。
@@ -22,6 +23,16 @@
 - DIR/_meta/manifest.jsonl：下載清單，一行一份文件。_meta 不會被匯入。欄位 period 是活動的活動期間
   （YYYY-MM-DD~YYYY-MM-DD，讀不出來是「期間不明」），其他類別為空字串。result 除了已下載、已存在略過、失敗，
   還有「過期略過」（活動）、「格式不支援略過」（活動圖片）、「外部網域略過」與「重複略過」（權益附件）。
+  更新模式另有「內容變更」與「未變」（見下面「更新模式」）。
+
+更新模式（--update，增量更新 spec 的下載端；目前只涵蓋文件下載區的 PDF，其他類別還沒有）：
+- 文件下載區的 PDF：本地已有的檔案重新下載一次並比對 SHA-256。內容不同才換掉原檔，清單記「內容變更」；相同就不碰原檔
+  （位元組與修改時間都不變，清單記「未變」），這樣之後匯入時沒變的文件可以走 RAG-Anything 的解析快取（快取鍵含修改時間與內容雜湊）。
+  新出現的 PDF 沿用「已下載」。下載失敗（HTTP、網路、內容不是 PDF）時原檔不動，清單記「失敗」，結束碼 1。
+- 其他類別（卡片、權益、權益附件、活動、活動圖片）在更新模式下和不加 --update 時一樣：本地已有就略過。
+  網頁類與權益附件的比對、下架（本地有、官網列表沒有）、活動過期與圖片的處理都還沒做。
+- 結束時多印一段「各類別統計」：每個類別每種結果的數量。不加 --update 時不印。
+- 請求間隔、網域限制與轉址規則和不加 --update 時相同。
 
 關鍵設計決策：
 - 直接列印原網址會漏掉收合區與彈窗：2026-10-30 實測 Richart 卡片頁的 PDF 只有 2 頁、1,074 字，
@@ -93,7 +104,8 @@
 - 轉址：腳本自己發出的請求只跟隨原請求網域內的轉址。轉址到其他網域時不跟隨，那一頁記為失敗，原因是
   「轉址到外部網域 <網域>」。2026-10-30 實測，權益頁的 Visa、Mastercard、JCB 子頁會轉址到國際組織的網站。
   「原請求的網域」是環境變數替換後實際請求的網域，所以本機 server 的測試也適用。
-- 再次執行時，本地檔案已存在就略過（不發請求）並記入清單；要更新內容時刪除資料夾後重新下載。
+- 再次執行時（不加 --update），本地檔案已存在就略過（不發請求）並記入清單，內容不會更新；要用這種方式更新內容，
+  刪除資料夾後重新下載。加 --update 時文件下載區的 PDF 會重新下載並比對，見「更新模式」。
 - 請求間隔：腳本自己發出的每個 HTTP 請求之間至少 TAISHIN_REQUEST_INTERVAL_SEC 秒（預設 2）。
   這個環境變數只給測試調小。
 - 三個網域的前綴各用一個環境變數取代，只給測試指向本機假 server 用：TAISHIN_WWW_BASE 取代
@@ -120,8 +132,11 @@
 - 刷卡優惠每個分類的翻頁上限 OFFER_MAX_PAGES（ASSUMPTION：20，2026-10-30 實測 A=5、B=4、I=2 頁，C–H 未實測）。
   翻滿上限仍有新連結時，視為刷卡優惠列表失敗。
 - 圖片只檢查檔頭和副檔名一致，不檢查圖片是否完整、能不能解碼。沒有大小上限（ASSUMPTION）。
-- 活動已存在而再次執行時，不重新判斷是否過期：已下載的活動 PDF 與圖片留著，清單記為已存在略過。
-- 已過期的活動，再次執行時依上次存下的原始 HTML 判斷，不再請求；官網之後延長該活動的期間，要刪除 `_meta/html` 裡那個檔案才會重新下載。
+- 活動已存在而再次執行時（不論有沒有加 --update，更新模式還沒涵蓋活動），不重新判斷是否過期：已下載的活動 PDF 與圖片留著，
+  清單記為已存在略過。
+- 已過期的活動，再次執行時依上次存下的原始 HTML 判斷，不再請求；官網之後延長該活動的期間，要刪除 `_meta/html` 裡那個檔案才會重新下載
+  （更新模式還沒涵蓋活動，加 --update 也一樣）。
+- 更新模式的 PDF 比對把整份回應讀進記憶體再算雜湊（ASSUMPTION：2026-10-30 下載區最大的 PDF 約 6.7 MB，不另外做串流；現有的下載本來就是整份讀進記憶體）。
 - 行內 `style="display:none"` 沒有處理：2026-10-30 實測轉出率 0.93–1.01，沒有因此漏字。
 - 列印前拿掉註解與 <iframe>、樣式表連結，所以 iframe 裡的內容與外部樣式表不會出現在 PDF／.docx；<object>、<embed> 沒有處理
   （Chrome 的 JavaScript 已封鎖，LibreOffice 不執行腳本）。
@@ -221,6 +236,20 @@ RESULT_EXPIRED = "過期略過"
 RESULT_UNSUPPORTED = "格式不支援略過"
 RESULT_EXTERNAL = "外部網域略過"
 RESULT_DUPLICATE = "重複略過"
+RESULT_CHANGED = "內容變更"
+RESULT_UNCHANGED = "未變"
+# 結束時統計的顯示順序
+RESULT_ORDER = (
+    RESULT_DOWNLOADED,
+    RESULT_CHANGED,
+    RESULT_UNCHANGED,
+    RESULT_SKIPPED,
+    RESULT_EXPIRED,
+    RESULT_UNSUPPORTED,
+    RESULT_EXTERNAL,
+    RESULT_DUPLICATE,
+    RESULT_FAILED,
+)
 
 
 class FetchError(Exception):
@@ -929,6 +958,8 @@ class Run:
 
     today 在一次執行開始時取一次（本機日期），活動是否過期、清單的下載日期都用它，所以執行跨過午夜時前後一致。
 
+    update 是更新模式（--update）：已存在而且類別有 refresh 的文件，重新下載後比對內容，不同才換掉。
+
     found 是類別名稱對網址清單，main 在每個類別的 collect 之後填入，讓後面的類別（活動圖片）
     能用前面類別（活動）找到的網址。
     """
@@ -940,6 +971,7 @@ class Run:
     fetcher: Fetcher
     tools: Tools
     today: date
+    update: bool
     found: dict[str, list[str]] = field(default_factory=dict)
 
     def base(self, site: str) -> str:
@@ -977,6 +1009,9 @@ class Category:
     collect 的參數是 (執行設定, 類別)，回傳文件的完整網址（去除重複、保留順序），列表頁失敗時拋出 FetchError。
     produce 的參數是 (執行設定, 類別, 網址, 本地名稱, 最終檔案, 清單紀錄)，把文件寫到最終檔案、
     補上紀錄的 html_sha256（有原始 HTML 的類別），失敗時拋出 FetchError。
+    refresh 只在更新模式下用在本地已有的文件，參數同 produce，回傳 True 表示內容變了、最終檔案已換成新內容，
+    False 表示沒變、最終檔案原封不動；失敗時拋出 FetchError，而且最終檔案不動。None 表示這個類別的更新模式
+    還沒有比對（已存在就略過）。
     local_name 由 name_prefix 和 link_pattern 的各個群組以底線接起來，例如卡片 card_cg047_card001。
     extension 是 None 時，副檔名取自文件網址路徑的最後一個副檔名（小寫），活動圖片是這樣。
     """
@@ -997,6 +1032,7 @@ class Category:
     reads_period: bool
     collect: Callable[["Run", "Category"], list[str]]
     produce: Callable[["Run", "Category", str, str, Path, "Record"], None]
+    refresh: Callable[["Run", "Category", str, str, Path, "Record"], bool] | None
 
     def local_name(self, url: str) -> str:
         """由文件網址組出本地檔名（不含副檔名）。
@@ -1299,6 +1335,39 @@ def web_page_producer(
     return produce
 
 
+def download_pdf(run: Run, url: str) -> bytes:
+    """下載 PDF，確認檔頭是 %PDF-。
+
+    Args:
+        run: 一次執行共用的設定。
+        url: PDF 完整網址。
+
+    Returns:
+        PDF 的位元組。
+
+    Raises:
+        FetchError: 下載失敗，或內容不是以 %PDF- 開頭（例如伺服器回了錯誤頁的 HTML）。
+    """
+    data = run.fetcher.get(url)
+    if not data.startswith(PDF_MAGIC):
+        raise FetchError(f"下載的內容不是 PDF（開頭不是 {PDF_MAGIC.decode()}，共 {len(data)} bytes）")
+    return data
+
+
+def write_pdf(run: Run, data: bytes, target: Path) -> None:
+    """先寫暫時檔，成功才換成最終檔案。
+
+    Args:
+        run: 一次執行共用的設定（暫時檔放在 _meta 底下，與最終檔案同一個檔案系統）。
+        data: PDF 的位元組。
+        target: 最終檔案路徑。
+    """
+    with tempfile.TemporaryDirectory(dir=run.out / "_meta") as tmp:
+        tmp_pdf = Path(tmp) / "download.pdf"
+        tmp_pdf.write_bytes(data)
+        tmp_pdf.replace(target)
+
+
 def save_pdf(run: Run, category: Category, url: str, name: str, target: Path, record: Record) -> None:
     """下載 PDF，確認檔頭是 %PDF- 後原樣存檔（先寫暫時檔，成功才換成最終檔案）。
 
@@ -1313,13 +1382,31 @@ def save_pdf(run: Run, category: Category, url: str, name: str, target: Path, re
     Raises:
         FetchError: 下載失敗，或內容不是以 %PDF- 開頭（例如伺服器回了錯誤頁的 HTML）。
     """
-    data = run.fetcher.get(url)
-    if not data.startswith(PDF_MAGIC):
-        raise FetchError(f"下載的內容不是 PDF（開頭不是 {PDF_MAGIC.decode()}，共 {len(data)} bytes）")
-    with tempfile.TemporaryDirectory(dir=run.out / "_meta") as tmp:
-        tmp_pdf = Path(tmp) / "download.pdf"
-        tmp_pdf.write_bytes(data)
-        tmp_pdf.replace(target)
+    write_pdf(run, download_pdf(run, url), target)
+
+
+def refresh_pdf(run: Run, category: Category, url: str, name: str, target: Path, record: Record) -> bool:
+    """更新模式：重新下載 PDF 並比對 SHA-256，內容不同才換掉原檔；相同時不碰原檔（修改時間不變）。
+
+    Args:
+        run: 一次執行共用的設定。
+        category: PDF 所屬的類別（未使用，為了符合 Category.refresh 的參數）。
+        url: PDF 完整網址。
+        name: 本地名稱（未使用，為了符合 Category.refresh 的參數）。
+        target: 原檔路徑（已存在）。
+        record: 清單紀錄（PDF 沒有原始 HTML，不改它）。
+
+    Returns:
+        內容變了、原檔已換成新內容時為 True；沒變時為 False。
+
+    Raises:
+        FetchError: 下載失敗，或內容不是以 %PDF- 開頭；原檔不動。
+    """
+    data = download_pdf(run, url)
+    if hashlib.sha256(data).hexdigest() == sha256_of(target):
+        return False
+    write_pdf(run, data, target)
+    return True
 
 
 def save_attachment(run: Run, category: Category, url: str, name: str, target: Path, record: Record) -> None:
@@ -1476,6 +1563,7 @@ CARDS = Category(
     produce=web_page_producer(
         lambda tools, html_path, target, work_dir: print_to_pdf(tools.chrome, html_path, target, work_dir)
     ),
+    refresh=None,
 )
 RIGHTS = Category(
     name="權益",
@@ -1497,6 +1585,7 @@ RIGHTS = Category(
     produce=web_page_producer(
         lambda tools, html_path, target, work_dir: convert_to_docx(tools.office, html_path, target, work_dir)
     ),
+    refresh=None,
 )
 DOWNLOADS = Category(
     name="下載",
@@ -1516,6 +1605,7 @@ DOWNLOADS = Category(
     reads_period=False,
     collect=collect_from_paged_downloads,
     produce=save_pdf,
+    refresh=refresh_pdf,
 )
 
 ATTACHMENTS = Category(
@@ -1536,6 +1626,7 @@ ATTACHMENTS = Category(
     reads_period=False,
     collect=collect_attachments,
     produce=save_attachment,
+    refresh=None,
 )
 
 
@@ -1580,6 +1671,7 @@ ACTIVITIES = Category(
         main_content=("class", "page-content"),
         inspect=check_offer_period,
     ),
+    refresh=None,
 )
 IMAGES = Category(
     name="活動圖片",
@@ -1599,6 +1691,7 @@ IMAGES = Category(
     reads_period=False,
     collect=collect_banners,
     produce=save_image,
+    refresh=None,
 )
 CATEGORIES = (CARDS, RIGHTS, DOWNLOADS, ATTACHMENTS, ACTIVITIES, IMAGES)
 
@@ -1621,6 +1714,13 @@ def fetch_document(run: Run, category: Category, url: str, name: str) -> Record:
     target = run.out / category.folder / filename
     raw_path = run.out / "_meta" / "html" / f"{name}.html"
     try:
+        if target.is_file() and run.update and category.refresh is not None:
+            changed = category.refresh(run, category, url, name, target, record)
+            if not changed:
+                record.downloaded_at = date.fromtimestamp(target.stat().st_mtime).isoformat()
+            record.sha256 = sha256_of(target)
+            record.result = RESULT_CHANGED if changed else RESULT_UNCHANGED
+            return record
         if target.is_file():
             record.downloaded_at = date.fromtimestamp(target.stat().st_mtime).isoformat()
             record.sha256 = sha256_of(target)
@@ -1666,6 +1766,20 @@ def write_manifest(out: Path, records: list[Record]) -> None:
     )
 
 
+def print_summary(records: list[Record]) -> None:
+    """印出各類別、各結果的數量（更新模式結束時用）。
+
+    Args:
+        records: 這次執行的紀錄。沒有任何紀錄的類別（例如列表頁失敗）印「沒有文件」。
+    """
+    print("各類別統計：")
+    for category in CATEGORIES:
+        counts = Counter(r.result for r in records if r.category == category.name)
+        order = [*RESULT_ORDER, *(result for result in counts if result not in RESULT_ORDER)]
+        detail = "、".join(f"{result} {counts[result]}" for result in order if counts[result]) or "沒有文件"
+        print(f"  {category.name}：{detail}")
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     """解析命令列參數。
 
@@ -1673,10 +1787,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         argv: 不含程式名稱的參數清單。
 
     Returns:
-        含 out（Path）的 Namespace。
+        含 out（Path）與 update（bool）的 Namespace。
     """
     parser = argparse.ArgumentParser(description="下載台新銀行信用卡官網的內容，作為知識庫的來源文件。")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help=f"輸出資料夾（預設 {DEFAULT_OUT}）")
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        help="更新模式：已存在的下載區 PDF 重新下載並比對內容，不同才換掉；結束時印出各類別、各結果的數量",
+    )
     return parser.parse_args(argv)
 
 
@@ -1705,7 +1824,7 @@ def main(argv: list[str]) -> int:
     if args.out.exists() and not args.out.is_dir():
         print(f"ERROR --out {args.out} 已存在但不是資料夾", file=sys.stderr)
         return 2
-    run = Run(args.out, www, mkpcard, mkp, Fetcher(interval), Tools(chrome, find_office()), date.today())
+    run = Run(args.out, www, mkpcard, mkp, Fetcher(interval), Tools(chrome, find_office()), date.today(), args.update)
 
     records: list[Record] = []
     failed_lists: list[str] = []
@@ -1729,6 +1848,8 @@ def main(argv: list[str]) -> int:
     failed = [r for r in records if r.result == RESULT_FAILED]
     for r in failed:
         print(f"FAILED {r.url}（{r.filename}）：{r.detail}", file=sys.stderr)
+    if args.update:
+        print_summary(records)
     return 1 if failed or failed_lists else 0
 
 

@@ -94,6 +94,7 @@ rag_lab 已經明確傳給 LightRAG／RAG-Anything 的參數對應的變數不�
 - 結果的種類：
   - 已下載；
   - 已存在略過：本地已有同名檔案，不重新下載；
+  - 內容變更、未變：只有更新模式（`--update`）的下載區 PDF 會有，見下方「更新內容」；
   - 過期略過：活動結束日早於下載當天；
   - 外部網域略過：權益子頁連到官網以外網域的 PDF（例如 icash.com.tw 的條款）；
   - 重複略過：權益子頁連到的 PDF 已在文件下載區；
@@ -101,7 +102,14 @@ rag_lab 已經明確傳給 LightRAG／RAG-Anything 的參數對應的變數不�
   - 失敗：會附上原因。有任何失敗時，腳本以非零碼結束，並列出失敗的頁面。
 - 2026-10-30 有 3 筆失敗：權益頁的 Visa、Mastercard、JCB 三個子頁轉址到各國際組織的網站，不是台新的頁面。其中 2 頁找不到主內容區，Mastercard 回 403。
 - 需要 Google Chrome（預設路徑 `/Applications/Google Chrome.app`，可以用 `TAISHIN_CHROME` 指定）與 LibreOffice（PATH 上的 `libreoffice` 或 `soffice`）。
-- **更新權益內容**：已存在的檔案會略過，所以重新執行不會更新內容。要更新時，刪除 `data/taishin_credit_card/` 與 `rag_storage/`，重新下載，再重新匯入。
+- **更新內容**：
+  - 不加 `--update`：已存在的檔案會略過，重新執行不會更新內容。要用這種方式更新時，刪除 `data/taishin_credit_card/` 與 `rag_storage/`，重新下載，再重新匯入。
+  - 加 `--update`（更新模式）：
+    ```sh
+    .venv/bin/python scripts/fetch_taishin.py --update
+    ```
+    目前只涵蓋文件下載區的 PDF（`downloads/`）：已有的 PDF 重新下載並比對 SHA-256，內容不同才換掉原檔，清單記「內容變更」；相同就不碰原檔（位元組與修改時間不變，匯入時走解析快取），清單記「未變」。新出現的 PDF 記「已下載」。下載失敗時原檔不動，清單記「失敗」。結束時印出各類別、各結果的數量。請求間隔與不加 `--update` 相同。
+  - 更新模式還沒涵蓋的：卡片頁、權益子頁、權益附件、活動與活動圖片（已有就略過，和不加 `--update` 一樣），以及官網已下架的文件（本地不會被搬走）。
 - 台新官網的著作權聲明禁止未經授權的重製。下載的原始文件（`data/taishin_credit_card/`）只放在本機，不要推上 GitHub（`data/` 不進版本控管）。
 - 這個 repo 是公開的，有三處引用了部分官網原文，由 repo 擁有者決定公開（2026-11-02）：
   - 題目檔 `eval/questions.taishin.jsonl` 的參考答案；

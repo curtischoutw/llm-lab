@@ -4,10 +4,16 @@
 
 **Blocked by:** 06（含 06 的實測結果；06 把這張改成 needs-info 時，等使用者決定比對範圍）
 
-**Status:** ready-for-agent
+**Status:** needs-info
 
 - [ ] HTML 沒變：不呼叫 Chrome／LibreOffice，文件的位元組與修改時間不變，清單記「未變」。
 - [ ] HTML 變了：重新轉檔；轉檔成功後才換掉 `DIR/_meta/html/`、`DIR/_meta/print/` 的檔案與文件，清單記「內容變更」。
 - [ ] 轉檔失敗：三者都不動，清單記失敗，下次執行會再比對到差異並重試。
 - [ ] 存檔的原始 HTML 在、文件不在（第一次下載時轉檔失敗）：不比對，照新增處理，用這次重新取得的原始 HTML 轉檔，成功記「已下載」；活動的存檔 HTML 讀出的期間已過期時除外，照現行規則記「過期略過」（09）。
 - [ ] 測試沿用假 HTTP server、假 Chrome、假 LibreOffice；現有測試全綠。
+
+## Comments
+
+2026-11-02，06 的實測（見 06 的 Comments）發現主內容區以外有差異：活動頁 `<head>` 裡的 `<meta id="_csrf">` token 和 2026-10-30 存的不同（2 頁都是）。整份 HTML 逐位元組比對會讓活動頁每次執行都被判成內容變更（每次請求都換 token 是推測，沒有同一頁連續請求兩次驗證）。卡片頁與權益子頁的 4 頁，主內容區以外沒有差異。
+
+需要使用者決定：比對範圍是否改成只比主內容區（建議；卡片頁用 `id="centercontainer"`，活動頁用 class 含 `page-content` 的第一個元素），還是維持整份 HTML、或另外排除特定欄位。決定之後 Status 才能改回 ready-for-agent。

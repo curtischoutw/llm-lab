@@ -510,6 +510,7 @@ class ScriptTestCase(unittest.TestCase):
         interval: str = FAST_INTERVAL,
         path: str | None = None,
         extra_env: dict[str, str] | None = None,
+        extra_args: list[str] | None = None,
     ) -> subprocess.CompletedProcess:
         """以假 server、假 Chrome、假 LibreOffice 與 self.out 執行腳本。
 
@@ -518,6 +519,7 @@ class ScriptTestCase(unittest.TestCase):
             interval: TAISHIN_REQUEST_INTERVAL_SEC 的值。
             path: PATH 的完整值；預設是把放了假 LibreOffice 的 self.office_bin 放在原本的 PATH 前面。
             extra_env: 另外加進行程環境變數的項目。
+            extra_args: 接在 --out 後面的命令列參數（例如更新模式的 --update）。
 
         Returns:
             已完成的行程（文字模式）。
@@ -533,12 +535,16 @@ class ScriptTestCase(unittest.TestCase):
             **(extra_env or {}),
         }
         return subprocess.run(
-            [sys.executable, str(SCRIPT), "--out", str(self.out)],
+            [sys.executable, str(SCRIPT), "--out", str(self.out), *(extra_args or [])],
             capture_output=True,
             text=True,
             timeout=60,
             env=env,
         )
+
+    def run_update(self, **kwargs) -> subprocess.CompletedProcess:
+        """以更新模式（--update）執行腳本；其餘參數同 run_script。"""
+        return self.run_script(extra_args=["--update"], **kwargs)
 
     def manifest(self) -> list[dict[str, str]]:
         """讀下載清單，一行一筆。"""
@@ -1076,6 +1082,139 @@ class DownloadAreaRerunTests(ScriptTestCase):
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual([r["result"] for r in self.manifest() if r["category"] == "下載"], ["已下載"])
+
+
+# 把原檔的修改時間設成很久以前：更新模式若重寫沒變的檔案，修改時間就會變成現在
+OLD_MTIME_NS = 1_000_000_000 * 10**9
+
+
+class UpdateModeDownloadAreaTests(ScriptTestCase):
+    def download_once(self, paths: list[str]) -> dict[str, Path]:
+        """第一次下載（不開更新模式）後，把每份 PDF 的修改時間設成很久以前。
+
+        Args:
+            paths: 下載區的 PDF 路徑。
+
+        Returns:
+            PDF 路徑對本地檔案。
+        """
+        self.serve_downloads([paths])
+        self.assertEqual(self.run_script().returncode, 0)
+        saved = {path: self.out / "downloads" / f"download_{path.rsplit('/', 1)[1]}" for path in paths}
+        for file in saved.values():
+            os.utime(file, ns=(OLD_MTIME_NS, OLD_MTIME_NS))
+        self.server.requests.clear()
+        return saved
+
+    def download_records(self) -> dict[str, dict[str, str]]:
+        """下載清單中下載區的紀錄，檔名對紀錄。"""
+        return {r["filename"]: r for r in self.manifest() if r["category"] == "下載"}
+
+    def test_pdf_with_the_same_content_keeps_its_bytes_and_modification_time_and_is_recorded_as_unchanged(self) -> None:
+        saved = self.download_once([APPLICATION])
+        before = saved[APPLICATION].read_bytes()
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(saved[APPLICATION].read_bytes(), before)
+        self.assertEqual(saved[APPLICATION].stat().st_mtime_ns, OLD_MTIME_NS)
+        self.assertIn(APPLICATION, self.server.paths(), "更新模式要重新下載來比對")
+        record = self.download_records()["download_word_CR04131_1150B.pdf"]
+        self.assertEqual(record["result"], "未變")
+        self.assertEqual(record["sha256"], hashlib.sha256(before).hexdigest())
+
+    def test_pdf_with_new_content_replaces_the_file_and_is_recorded_as_changed(self) -> None:
+        saved = self.download_once([APPLICATION, TERMS])
+        new_content = pdf_bytes(APPLICATION) + b"revised\n"
+        self.routes[APPLICATION] = (200, new_content)
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(saved[APPLICATION].read_bytes(), new_content)
+        self.assertEqual(saved[TERMS].read_bytes(), pdf_bytes(TERMS))
+        self.assertEqual(saved[TERMS].stat().st_mtime_ns, OLD_MTIME_NS)
+        records = self.download_records()
+        self.assertEqual(records["download_word_CR04131_1150B.pdf"]["result"], "內容變更")
+        self.assertEqual(records["download_word_CR04131_1150B.pdf"]["sha256"], hashlib.sha256(new_content).hexdigest())
+        self.assertEqual(records["download_word_CR04131_1150B.pdf"]["downloaded_at"], time.strftime("%Y-%m-%d"))
+        self.assertEqual(records["download_terms_1150.pdf"]["result"], "未變")
+        self.assertEqual(
+            sorted(p.name for p in (self.out / "downloads").iterdir()),
+            ["download_terms_1150.pdf", "download_word_CR04131_1150B.pdf"],
+            "換內容時不留暫存檔",
+        )
+
+    def test_pdf_that_is_new_to_the_folder_is_downloaded_as_usual(self) -> None:
+        self.download_once([APPLICATION])
+        self.serve_downloads([[APPLICATION, TERMS]])
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        records = self.download_records()
+        self.assertEqual(records["download_terms_1150.pdf"]["result"], "已下載")
+        self.assertEqual((self.out / "downloads" / "download_terms_1150.pdf").read_bytes(), pdf_bytes(TERMS))
+        self.assertEqual(records["download_word_CR04131_1150B.pdf"]["result"], "未變")
+
+    def test_failed_download_keeps_the_original_file_and_is_recorded_as_failed(self) -> None:
+        saved = self.download_once([APPLICATION, TERMS, FEES])
+        before = {path: file.read_bytes() for path, file in saved.items()}
+        self.routes[APPLICATION] = (500, b"boom")
+        self.routes[TERMS] = (200, b"<html>Service Unavailable</html>")
+        self.routes[FEES] = (200, b"")
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        for path, file in saved.items():
+            self.assertEqual(file.read_bytes(), before[path])
+            self.assertEqual(file.stat().st_mtime_ns, OLD_MTIME_NS)
+        records = self.download_records()
+        for filename in ("download_word_CR04131_1150B.pdf", "download_terms_1150.pdf", "download_fees.pdf"):
+            self.assertEqual(records[filename]["result"], "失敗", filename)
+            self.assertIn(filename, result.stderr)
+        self.assertIn("500", records["download_word_CR04131_1150B.pdf"]["detail"])
+        self.assertIn("不是 PDF", records["download_terms_1150.pdf"]["detail"])
+        self.assertEqual(
+            sorted(p.name for p in (self.out / "downloads").iterdir()),
+            ["download_fees.pdf", "download_terms_1150.pdf", "download_word_CR04131_1150B.pdf"],
+        )
+
+    def test_requests_in_update_mode_are_still_spaced_by_the_configured_interval(self) -> None:
+        self.download_once([APPLICATION, TERMS])
+        interval = 0.3
+        result = self.run_update(interval=str(interval))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        times = [t for _path, t, _ua in self.server.requests]
+        # 總覽頁、權益頁、下載頁 2 頁（第 2 頁重複第 1 頁而停止）、重新下載 PDF 2 份、刷卡優惠列表 9 個分類各 1 頁
+        self.assertEqual(len(times), 15)
+        for earlier, later in zip(times, times[1:]):
+            self.assertGreaterEqual(later - earlier, interval - 0.02)
+
+    def test_prints_the_count_of_each_result_per_category(self) -> None:
+        self.serve_cards({RICHART: card_html("RICHART")})
+        self.download_once([APPLICATION, TERMS, FEES])
+        self.serve_downloads([[APPLICATION, TERMS, FEES, DASH_NAMED]])
+        self.routes[TERMS] = (200, pdf_bytes(TERMS) + b"revised\n")
+        self.routes[FEES] = (500, b"boom")
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("下載：已下載 1、內容變更 1、未變 1、失敗 1", result.stdout)
+        self.assertIn("卡片：已存在略過 1", result.stdout)
+        self.assertIn("活動：沒有文件", result.stdout)
+
+
+class WithoutUpdateModeTests(ScriptTestCase):
+    def test_existing_pdf_with_different_content_is_left_alone_and_no_summary_is_printed(self) -> None:
+        self.serve_downloads([[APPLICATION]])
+        self.assertEqual(self.run_script().returncode, 0)
+        saved = self.out / "downloads" / "download_word_CR04131_1150B.pdf"
+        before = saved.read_bytes()
+        os.utime(saved, ns=(OLD_MTIME_NS, OLD_MTIME_NS))
+        self.routes[APPLICATION] = (200, pdf_bytes(APPLICATION) + b"revised\n")
+        self.server.requests.clear()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(saved.read_bytes(), before)
+        self.assertEqual(saved.stat().st_mtime_ns, OLD_MTIME_NS)
+        self.assertNotIn(APPLICATION, self.server.paths())
+        self.assertEqual([r["result"] for r in self.manifest() if r["category"] == "下載"], ["已存在略過"])
+        self.assertNotIn("各類別統計", result.stdout)
 
 
 def offer_list_path(letter: str, number: int) -> str:
