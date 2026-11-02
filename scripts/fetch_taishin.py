@@ -1885,12 +1885,32 @@ def save_image(run: Run, category: Category, url: str, name: str, target: Path, 
 
 
 def print_with_chrome(tools: Tools, html_path: Path, target: Path, work_dir: Path) -> None:
-    """網頁類的轉檔函式（卡片頁、活動頁）：用 Chrome 列印成 PDF。參數與例外同 print_to_pdf，Chrome 路徑取自 tools。"""
+    """網頁類的轉檔函式（卡片頁、活動頁）：用 Chrome 列印成 PDF。
+
+    Args:
+        tools: 轉檔用的外部命令，取其中的 Chrome 路徑。
+        html_path: 要列印的本機 HTML 檔。
+        target: 最終 PDF 路徑；列印成功才會出現。
+        work_dir: 放暫時資料夾的位置（與 target 同一個檔案系統）。
+
+    Raises:
+        FetchError: Chrome 不存在、列印失敗、逾時或沒有產出 PDF（見 print_to_pdf）。
+    """
     print_to_pdf(tools.chrome, html_path, target, work_dir)
 
 
 def convert_with_office(tools: Tools, html_path: Path, target: Path, work_dir: Path) -> None:
-    """網頁類的轉檔函式（權益子頁）：用 LibreOffice 轉成 .docx。參數與例外同 convert_to_docx，命令取自 tools。"""
+    """網頁類的轉檔函式（權益子頁）：用 LibreOffice 轉成 .docx。
+
+    Args:
+        tools: 轉檔用的外部命令，取其中的 LibreOffice 命令（找不到時為 None）。
+        html_path: 要轉檔的本機 HTML 檔；LibreOffice 輸出的檔名由它的主檔名決定。
+        target: 最終 .docx 路徑（主檔名必須和 html_path 相同）；轉檔成功才會出現。
+        work_dir: 放暫時資料夾的位置（與 target 同一個檔案系統）。
+
+    Raises:
+        FetchError: 找不到 LibreOffice、轉檔失敗、逾時或沒有產出 .docx（見 convert_to_docx）。
+    """
     convert_to_docx(tools.office, html_path, target, work_dir)
 
 

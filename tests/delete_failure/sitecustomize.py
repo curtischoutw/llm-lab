@@ -97,10 +97,26 @@ class _InstallAfterImport(importlib.abc.MetaPathFinder):
     """指定的模組執行完畢後安裝包裝。"""
 
     def __init__(self, module_name, install) -> None:
+        """_InstallAfterImport 的建構。
+
+        Args:
+            module_name: 要等它執行完才安裝包裝的模組全名。
+            install: 安裝函式，參數是剛執行完的模組。
+        """
         self.module_name = module_name
         self.install = install
 
     def find_spec(self, fullname, path, target=None):
+        """import 系統找模組時呼叫：輪到指定的模組時，換掉它的載入函式，執行完再安裝包裝。
+
+        Args:
+            fullname: 正要 import 的模組全名。
+            path: 套件的 `__path__`（頂層模組為 None）；這裡用不到。
+            target: 重新載入時的既有模組；這裡用不到。
+
+        Returns:
+            指定的模組回傳載入函式已被換掉的 ModuleSpec（並把自己從 sys.meta_path 移除）；其他模組回傳 None，交給後面的 finder。
+        """
         if fullname != self.module_name:
             return None
         sys.meta_path.remove(self)
