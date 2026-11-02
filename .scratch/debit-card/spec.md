@@ -62,7 +62,7 @@
   - 相關費用說明頁、常見問題 2 頁（申請篇；刷卡消費／跨國提款篇）。
   - ASSUMPTION：專區列表上的「Richart簽帳金融卡」摘要頁也收（它在同一個列表，內容是三款狗卡的名稱、0.5% 回饋與悠遊卡功能）。
 - richart.tw：簽帳金融卡頁、信用卡頁，以及這兩頁連到的所有優惠細則頁。簽帳金融卡頁連到 14 則（盤點時）；信用卡頁連到幾則還沒查。
-- 存款專區晶片金融卡：介紹頁、卡片介紹、消費扣款與跨國提款，共 3 頁。
+- 存款專區晶片金融卡，共 3 頁：專區首頁（`deposit/debit-card/`）、卡片介紹（`card-list/`）、消費扣款與跨國提款（`overseas-withdraw-cash-and-payment/`）。
 - mkpcard 活動不另外收：現有的 209 個活動已在知識庫，其中 61 頁的主內容寫了適用卡別（「台新信用卡／簽帳金融卡」）。
 - 已知 32 份（卡片頁 5、約定條款 PDF 4、說明頁 7、Richart 卡片頁 2、簽帳金融卡頁連到的細則 14），再加上 Richart 信用卡頁連到、但簽帳金融卡頁沒連到的細則數（盤點時沒查），實數以下載結果為準。
 
@@ -74,7 +74,7 @@
 
   | 類別 | 來源 | 資料夾 | 本地名稱 | 格式 | 更新模式的下架判斷 |
   |---|---|---|---|---|---|
-  | 金融卡卡片頁 | 專區列表頁（`payment/`）上的群組落地頁 `payment/cgXXX/`，再取落地頁的轉址目標 | `debit_cards/` | `debit_card_cgXXX_card01`（依轉址目標的最後一段，`card01` 或 `card001`） | 取 `#centercontainer` 後用 Chrome 列印 | 有；列表頁或任何一個落地頁沒有成功取得時，這次不判斷 |
+  | 金融卡卡片頁 | 專區列表頁（`payment/`）上的群組落地頁 `payment/cgXXX/`，再取落地頁的轉址目標 | `debit_cards/` | `debit_card_cgXXX_card01`（依轉址目標的最後一段，`card01` 或 `card001`） | 取 `#centercontainer` 後用 Chrome 列印 | 有；列表頁或任何一個落地頁沒有成功取得，或列表頁解析出 0 張而本地有檔案時，這次不判斷 |
   | 金融卡約定條款 PDF | 約定條款頁（`notice/TSBankGridPage-000003/`）上指向官網同網域的 PDF 連結 | `debit_terms/` | `debit_term_<PDF 檔名主檔名>` | PDF 原檔 | 有；約定條款頁沒有成功取得，或解析出 0 份而本地有檔案時，這次不判斷 |
   | 金融卡說明頁 | 寫死的網址清單：`notice/TSBankGridPage-000004/`（費用）、`000001/`、`000340/`（常見問題）、`000344/`（Richart 摘要），存款專區 `deposit/debit-card/`、`card-list/`、`overseas-withdraw-cash-and-payment/` | `debit_info/` | `debit_info_<網址最後一段>`（例如 `debit_info_TSBankGridPage-000004`、`debit_info_card-list`） | 取 `#centercontainer` 後用 Chrome 列印 | 沒有（沒有列表可比對）；取不到時記失敗，本地檔案不動 |
   | Richart 卡片頁 | 寫死的兩個網址：`/card/debit-card`、`/card/credit-card` | `richart/` | `richart_debit-card`、`richart_credit-card` | 取主內容區後用 Chrome 列印 | 沒有（寫死的網址）；取不到時記失敗，本地檔案不動 |
@@ -132,7 +132,7 @@
   - 簽帳金融卡：Mastercard 簽帳金融卡（D 卡、遛狗卡）、Visa 簽帳金融卡（綠狗卡、白狗卡），一般消費 0.5% 無上限，遛狗卡與綠狗卡有悠遊卡功能。信用卡：台新 Richart 卡（Mastercard／VISA／JCB），最高 3.8%，6 種可切換方案。
   - 官網簽帳金融卡專區入口：`https://www.taishinbank.com.tw/TSB/personal/credit/intro/payment/`。卡片頁路徑 `payment/cgXXX/card01/`（cg001、cg002、cg003）或 `card001/`（cg006、cg008）。約定條款 `payment/notice/TSBankGridPage-000003/`、費用 `TSBankGridPage-000004/`、常見問題 `TSBankGridPage-000001/` 與 `TSBankGridPage-000340/`、Richart 摘要 `TSBankGridPage-000344/`。4 份 PDF：`payment/notice/_11504.pdf`、`payment/DM23_11110.pdf`、`payment/laborcard_11110.pdf`、`files/creditcard/Debit-11312.pdf`（都在 `/TSB/export/sites/TSB/` 底下）。頁面註明金融卡各項約定事項依「存款業務總約定書」辦理。
   - 晶片金融卡在存款專區 `https://www.taishinbank.com.tw/TSB/personal/deposit/debit-card/`（子頁 `card-list/`、`overseas-withdraw-cash-and-payment/`），只有申請辦法、功能與跨國提款說明，沒有回饋或權益。
-  - 容易搞混的原文：官網 Visa 頁註明晶片金融卡的消費扣款「並非刷卡消費」；蝴蝶悠遊Debit卡自稱「具備金融卡、簽帳卡及悠遊卡功能之晶片金融卡」。
+  - 容易搞混的原文：官網 Visa 頁註明「財金公司提供之晶片金融卡消費扣款功能並非刷卡消費」；蝴蝶悠遊Debit卡自稱「具備金融卡、簽帳卡及悠遊卡功能之晶片金融卡」。
   - 兩個來源的卡款沒有交集；回饋條款文字高度重複（Richart 細則 277 的 14 個長句有 10 個出現在官網 Visa金融卡頁）。
   - mkpcard 活動列表每筆有「適用卡別」欄位（「信用卡」或「信用卡/簽帳金融卡」），各分類第 1 頁 87 筆中 23 筆含簽帳金融卡；不能靠標題判斷。
 - 背景：2026-10-30 使用者提出這個需求時，排定在台新信用卡 spec 的 ticket 09 之後另開 spec，並用增量匯入、同一份題庫前後比對。
