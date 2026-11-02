@@ -179,20 +179,27 @@ class PruneCliTest(PruneCase):
         self.assertEqual(self.section(result, "已刪除"), [str((folder / "solo.pdf").resolve())])
 
     def test_prune_removes_only_the_path_when_another_path_still_uses_the_same_version(self):
+        # 文件 ID 只由解析後的內容算出；textonly 開頭的檔名讓假 mineru 不輸出（含路徑的）圖片，兩個資料夾裡同名的檔案才得到相同的 ID
         first = self.make_folder("first", "keep.pdf")
         second = self.make_folder("second")
-        self.write_version(first / "shared.pdf", "SHARED")
-        self.write_version(second / "shared.pdf", "SHARED")
+        self.write_version(first / "textonly-shared.pdf", "SHARED")
+        self.write_version(second / "textonly-shared.pdf", "SHARED")
         self.assertEqual(self.ingest(first).returncode, 0)
         self.assertEqual(self.ingest(second).returncode, 0)
-        (first / "shared.pdf").unlink()
+        documents = self.read_registry()["documents"]
+        self.assertEqual(
+            documents[str((first / "textonly-shared.pdf").resolve())]["doc_id"],
+            documents[str((second / "textonly-shared.pdf").resolve())]["doc_id"],
+            "兩個路徑要共用同一個文件 ID，才測得到共用版本",
+        )
+        (first / "textonly-shared.pdf").unlink()
 
         result = self.prune(first)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.section(result, "已刪除"), [str((first / "shared.pdf").resolve())], "仍記為已刪除")
+        self.assertEqual(self.section(result, "已刪除"), [str((first / "textonly-shared.pdf").resolve())], "仍記為已刪除")
         self.assertEqual(self.status_count(result, "processed"), 2, "共用的版本還在：keep 與 shared 各一份")
-        self.assertEqual(list(self.read_registry()["documents"]), [str((first / "keep.pdf").resolve()), str((second / "shared.pdf").resolve())])
+        self.assertEqual(list(self.read_registry()["documents"]), [str((first / "keep.pdf").resolve()), str((second / "textonly-shared.pdf").resolve())])
         self.assertIn("SHARED", self.context_of_query("What is Fake Entity Alpha?"))
 
     def test_a_deletion_failure_is_reported_as_a_failure_and_leaves_the_registry_alone(self):

@@ -17,6 +17,7 @@
 Dependencies: 標準函式庫。
 """
 
+import json
 import os
 import shutil
 import signal
@@ -32,6 +33,11 @@ from tests.test_replace import FAIL_FIRST_DELETE_ENV, NEW, OLD
 QUESTION = "What is Fake Entity Alpha?"
 # 等假 mineru 開始解析第二份文件的秒數上限
 STALL_WAIT_SECONDS = 120
+# 讓子行程裡清答案快取的第 1 次刪除失敗的夾具（tests/delete_failure/sitecustomize.py）
+FAIL_FIRST_CACHE_DELETE_ENV = {
+    "PYTHONPATH": str(REPO_ROOT / "tests" / "delete_failure"),
+    "FAIL_NTH_CACHE_DELETE": "1",
+}
 
 
 class AnswerCacheHelpers:
@@ -228,6 +234,60 @@ class AnswerCacheClearedOnFailureCliTest(AnswerCacheCase):
         self.assertIn("broken-b.pdf", result.stderr)
         self.assertEqual(self.cleared_line(result), "清掉答案快取 0 筆")
         self.assert_answer_kept()
+
+
+class AnswerCacheClearFailureCliTest(AnswerCacheCase):
+    """清答案快取本身失敗（儲存寫不進去）時，這份文件與前面文件的收尾仍要做完，例外照樣往上拋。"""
+
+    def doc_status_of(self, filename: str) -> str:
+        """文件狀態裡某個檔名的狀態（processed、failed…）。
+
+        Args:
+            filename: 檔名（文件狀態只記檔名）。
+
+        Returns:
+            狀態字串；知識庫裡沒有這個檔名時測試失敗。
+        """
+        statuses = json.loads((self.working_dir / "kv_store_doc_status.json").read_text(encoding="utf-8"))
+        found = [record["status"] for record in statuses.values() if record["file_path"] == filename]
+        self.assertEqual(len(found), 1, f"{filename} 在文件狀態裡有 {len(found)} 筆：{statuses}")
+        return found[0]
+
+    def ingest_with_failing_cache_clear(self, folder):
+        """對資料夾執行 ingest，其中清答案快取的第 1 次刪除會失敗。
+
+        Args:
+            folder: 資料夾路徑。
+
+        Returns:
+            CompletedProcess。
+        """
+        return run_cli(["ingest", str(folder)], self.env(**FAIL_FIRST_CACHE_DELETE_ENV), timeout=INGEST_TIMEOUT)
+
+    def test_a_failed_cache_clearing_still_marks_the_document_whose_description_failed_as_failed(self):
+        folder = self.make_folder("cards", "a.pdf")
+        self.assertEqual(self.ingest(folder).returncode, 0)
+        self.prime()
+        self.write_version(folder / "b.pdf", "cards-b.pdf")
+        self.server.fail_vision = True
+
+        result = self.ingest_with_failing_cache_clear(folder)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("injected cache deletion failure", result.stderr, "清快取的例外要往上拋，不能被吞掉")
+        self.assertEqual(self.doc_status_of("b.pdf"), "failed", "描述失敗的文件要記成失敗，下次 ingest 才會重試")
+
+    def test_a_failed_cache_clearing_does_not_lose_the_registry_entry_of_the_document_just_imported(self):
+        folder = self.make_folder("cards", "a.pdf")
+        self.assertEqual(self.ingest(folder).returncode, 0)
+        self.prime()
+        self.write_version(folder / "b.pdf", "cards-b.pdf")
+
+        result = self.ingest_with_failing_cache_clear(folder)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("injected cache deletion failure", result.stderr)
+        self.assertIn(str((folder / "b.pdf").resolve()), self.read_registry()["documents"], "已匯入的文件要先記進對照表")
 
 
 class AnswerCacheKeptWhenNothingChangedCliTest(AnswerCacheCase):

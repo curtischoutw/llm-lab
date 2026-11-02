@@ -38,6 +38,20 @@ ASSUMPTION：
 
 範圍外發現：
 
-- 主視覺（`div.banner-image`）在詳情頁主內容區（class 含 `page-content`）的外面，2026-11-02 看一份本機存檔的樣本確認。07 的比對只看主內容區，所以只換主視覺、主內容區沒變的活動，存檔的原始 HTML 不會換，主視覺網址的變動偵測不到，舊圖不會搬、新圖不會補。要偵測的話，比對要加上主視覺網址（會讓 07 的「主內容區以外的差異不算變更」多一個例外），這是使用者的決定，沒有動。已寫進模組說明的已知極限與 README。
+- 無（原本寫在這裡的「只換主視覺偵測不到」已由 grill Q30 的修正解決，見下方 code-review 修正 3；模組說明、README 的已知限制已拿掉）。
 
 2026-11-02，使用者決定（grill Q30）：活動頁的變更判斷除了主內容區，也比主視覺網址；主視覺網址變了就算變更（重新轉檔、舊圖搬走、新圖照補名額規則優先補）。由 code-review 修正批次實作，完成後更新模式說明、README 的已知限制要拿掉這一條。
+
+### code-review 修正 4：活動圖片檔名在三處用同一組網址算（2026-11-02）
+
+`remove_unreferenced_images` 與 `collect_banners_to_fill` 用全部「活動文件仍在」的主視覺網址算 `local_names`，下載時 `main` 卻只用這次要下載的子集合算。兩個主視覺的檔名相同（資料夾或 query 不同）、而這次只下載其中一個時，雜湊後綴有無不同：剛下載的圖在同一次執行被當成孤兒搬走，下次又重新下載。
+
+- 新增 `banner_universe`（全部主視覺網址）與 `local_names_for`；下載、名額判斷、孤兒判斷、非更新模式挑前 8 個都用同一組網址算檔名。
+- 測試：`test_banners_with_the_same_base_name_get_the_same_file_name_in_download_and_in_update`（9 個活動，活動 8、9 的主視覺只有資料夾不同；先紅：第一次下載的檔名沒有後綴；修後綠，更新模式連跑兩次不請求圖片、不搬任何圖片）。
+
+### code-review 修正 3：活動頁也比主視覺網址（grill Q30，2026-11-02）
+
+- `web_page_refresher` 多一個 `also_compare` 參數，活動頁傳入 `banner_of`：主內容區相同、但主視覺網址不同，也算內容變更（重新轉檔、換掉文件／列印用 HTML／存檔的原始 HTML，清單記「內容變更」）。主內容區以外的其他差異（`_csrf` token 等）仍不算。
+- 新舊主視覺網址只有資料夾或 query 不同、檔名相同時，衍生出的本地檔名一樣，新圖原本會被當成「已存在略過」。新增 `replaced_banners`、`remove_replaced_images`：偵測到這種情況，先把本地舊圖搬到 `_meta/removed/<日期>/offer_images/`（記「下架」），新圖再下載（記「已下載」）；`collect_banners_to_fill` 不把它算成已佔名額，並且因為網址變了而排在補名額的最前面。判斷靠「新網址的檔名 == 舊網址單獨存在時的檔名」；舊網址若和別的主視覺同名，新網址會加雜湊後綴，檔名不同，不需要處理。
+- 測試：`test_activity_whose_only_change_is_the_main_visual_url_is_a_content_change_and_its_image_is_replaced`（先紅：活動記「未變」）、`test_new_main_visual_with_the_same_base_name_replaces_the_old_file_instead_of_being_skipped`（先紅：新圖沒下載）。
+- 模組說明、README 拿掉「只換主視覺偵測不到」，改寫成新行為。

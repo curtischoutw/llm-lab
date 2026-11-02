@@ -27,3 +27,10 @@
 - ASSUMPTION：參數名稱 `source_folder`、`prune`、結果欄位 `missing`、`removed`、`remove_failed` 由實作決定（spec 允許）。
 - ASSUMPTION：對照表在 prune 刪除後寫不進去時，立刻拋 `PipelineError`（訊息寫出該文件已從知識庫刪掉、對照表沒更新，重跑同一個 `ingest --prune` 即可，因為刪除回 `not_found` 視為成功），後面的文件不再處理；這時 `IngestSummary` 不會回傳。
 - 範圍外：刪除後清查詢答案快取是 ticket 05；README「還沒做」那一條仍適用。
+
+### code-review 修正 12：共用版本的測試改成真的共用（2026-11-02）
+
+ticket 05 實作者的懷疑成立。`test_prune_removes_only_the_path_when_another_path_still_uses_the_same_version` 用 `shared.pdf`，但假 mineru 的輸出含圖片的絕對路徑，兩個資料夾裡同名的 `shared.pdf` 得到不同的文件 ID（實測：加上「兩個路徑的文件 ID 相同」的前置斷言後，原測資紅燈，`doc-02c9…` 對 `doc-bb3c…`），所以測的是兩份獨立的文件，沒有測到共用版本。它的其餘斷言（processed=2、對照表剩兩筆）在不共用時也成立。
+
+- 測資改成 `textonly-shared.pdf`（`textonly` 開頭的檔名讓假 mineru 不輸出圖片，兩個資料夾裡同名的檔案文件 ID 相同，做法同 tests/test_answer_cache.py 與 tests/test_replace.py），並加上兩個路徑文件 ID 相同的前置斷言。
+- 變異檢查：暫時把 `_remove_version` 的「別的路徑還用同一個版本就不刪」整段拿掉，修正後的測試轉紅（`1 != 2`：共用版本被刪了），還原後綠。

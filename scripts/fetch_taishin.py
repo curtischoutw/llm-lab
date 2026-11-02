@@ -34,6 +34,7 @@
   卡片頁與權益子頁是 id="centercontainer"，活動頁是 class 含 page-content 的第一個元素，取出後拿掉會執行的部分；grill Q29）。
   主內容區相同就不轉檔、不碰文件、列印用 HTML 與存檔的原始 HTML（位元組與修改時間不變，清單記「未變」），
   主內容區以外的差異（例如活動頁 <head> 的 _csrf token，2026-11-02 實測 2 頁都和 10-30 存的不同）不算變更。
+  例外：活動頁的主視覺（div.banner-image，在主內容區外面）網址變了也算變更（grill Q30），照下面的主內容區不同處理（重新轉檔、換存檔）。
   主內容區不同才重新轉檔，轉檔成功後依序換掉文件、列印用 HTML、原始 HTML（原始 HTML 是下次比對的基準，最後換，中途中斷時
   下次還會比對到差異），清單記「內容變更」。下載、轉檔失敗或找不到主內容區時三者都不動，清單記「失敗」，結束碼 1，下次執行會再比對到差異並重試。
   文件不存在（存檔的原始 HTML 在，第一次下載時轉檔失敗留下的狀態）時不比對，照新增處理：用這次取得的原始 HTML 轉檔，成功記「已下載」；
@@ -46,6 +47,8 @@
   - 目的地已有同名檔時，在檔名後加時間（_HHMMSS 加微秒），不覆寫（ASSUMPTION，見增量更新 spec）。
   - 下架清單紀錄的網址是空字串：本地只有檔案，沒有它的網址，不去翻上一次的清單（ASSUMPTION）。
   - 搬移時的檔案系統錯誤，那一份記「失敗」並寫出原因（結束碼 1），其餘文件照常處理。
+  - 本地清單不含不是文件的檔案（`.` 開頭的隱藏檔如 .DS_Store、`~$` 開頭的鎖定檔，規則同 rag_lab/formats.py 的 NOT_A_DOCUMENT_PREFIXES）：
+    它們不會被搬走，「解析出 0 筆」的保護也只算真正的文件。
   - 不設下架數量的比例門檻：列表有 1 筆以上時，其餘本地文件全部算下架。
   - 某個類別的列表頁沒有成功取得（請求失敗、逾時、翻頁失敗），那個類別這次不搬任何檔案，stderr 寫明列表與原因，結束碼 1，其他類別照常。
     列表頁回應成功、卻解析出 0 筆，而本地這個類別資料夾有文件時，也當成列表頁沒有成功取得（官網改版讓解析失效的可能高於整類下架），
@@ -55,13 +58,19 @@
 - 權益附件跟著權益子頁上的連結走：
   - 比對：本地已有的附件重新下載並比對 SHA-256，和下載區 PDF 相同的規則（內容不同才換掉，記「內容變更」；相同記「未變」、
     位元組與修改時間不動；下載失敗時原檔不動，記「失敗」）。
+    本地已有的附件，網址現在也在文件下載區時（和不加 --update 的「重複略過」同一條規則）不請求：清單記「重複略過」並把它當成下架搬走
+    （搬法同下架）。ASSUMPTION：它的內容已由下載區那一份匯入，不搬的話同一份 PDF 會在知識庫裡兩次。
   - 下架：附件的候選是這次所有權益子頁（權益列表裡的）存檔的原始 HTML 連到的 PDF（讀存檔，和不加 --update 時相同；子頁在這次執行裡
     已先換成最新的存檔）。本地 DIR/rights_attachments/ 裡的檔名不在候選算出的檔名之內，才算下架：同一份附件被多個子頁連到時，
     只要還有一頁連到就不算；子頁本身下架（搬走、不在權益列表）時，它不再貢獻候選。搬移方式與上面的下架相同，清單記「下架」。
   - 權益列表沒有成功取得，或任何一個權益子頁處理失敗（請求失敗，或內容變了但轉檔失敗而存檔沒換）時，這次不判斷附件下架，
     不搬任何附件，stderr 寫「權益附件這次不判斷下架」與原因；原因本身已讓結束碼是 1，下次子頁都成功時再判斷。
-  - ASSUMPTION：權益子頁都成功取得、但連到的 PDF 一個也沒有時，本地的附件全部算下架（不像列表類別有 0 筆的防護，因為規格只對列表頁定了這條）。
-    附件下架紀錄的網址是空字串，沿用列表類別下架的做法。
+    例外：失敗原因是「轉址到外部網域」的子頁不算（真實官網的 Visa、Mastercard、JCB 子頁每次都是）：它從來沒有內容，
+    也不會提供附件連結。其他失敗（請求、轉檔、搬移）照樣阻擋。
+  - 權益子頁都成功取得、但解析到的附件連結是 0 個，而本地有附件時，也當成沒有成功取得（官網改版讓解析失效的可能高於所有附件同時下架，
+    做法同列表頁解析出 0 筆）：不搬任何附件，stderr 寫「權益附件這次不判斷下架」與原因。ASSUMPTION：結束碼比照列表頁的 0 筆保護是 1。
+    本地沒有附件時，0 個不算失敗。
+  - 附件下架紀錄的網址是空字串，沿用列表類別下架的做法。
 - 活動過期與活動圖片（更新模式；活動列表沒有成功取得時，這次不判斷活動過期，也不判斷活動圖片，見上面的列表失敗規則）：
   - 過期：每個已有活動文件的活動重新取得詳情頁，期間的結束日早於下載當天就算過期（現有規則，結束日等於當天仍有效），
     不比對、不轉檔，文件連同 _meta/html、_meta/print 的檔案搬到 DIR/_meta/removed/<下載當天>/（搬法同下架），清單記「過期移除」，
@@ -71,7 +80,8 @@
     只有原始 HTML、沒有活動文件的活動，行為不變：存檔的期間已過期記「過期略過」，不請求；否則當成新增轉檔。
   - 圖片的去留在所有活動處理完之後算：圖片資料夾裡，沒有任何「活動文件仍在」（活動 PDF 與存檔的原始 HTML 都在）的活動
     指向的圖片，搬到 DIR/_meta/removed/<下載當天>/offer_images/，清單記「下架」、網址是空字串。共用同一張圖的活動都不在了才搬；
-    活動改版換了主視覺網址時，舊圖搬走。
+    活動改版換了主視覺網址時，舊圖搬走。新舊網址只有資料夾或 query 不同、檔名相同時，本地檔名一樣，那個檔案是舊圖：
+    先把它搬走（清單記「下架」），新圖再下載換上（記「已下載」），不會當成「已存在」略過。
   - 名額：「活動文件仍在」的活動的主視覺網址去除重複後，圖片檔在本地的或副檔名不支援的各佔一個（下載失敗沒有留檔的不佔）。
     少於 IMAGE_LIMIT（8）個時才補，從「活動文件確實存在、有主視覺、主視覺網址還沒有佔名額」的活動補：這次重新取得之前存檔的
     主視覺網址和現在不同的排最前面，其餘依活動被找到的順序。補不滿 8 個時印出「活動圖片名額 N/8，沒有更多候選」。
@@ -131,6 +141,8 @@
   支援的副檔名取自 rag_lab/formats.py 的 FORMATS["圖片"]（專案裡唯一的一份），腳本啟動時把 repo 根目錄放進 sys.path 來 import。
   主視覺網址若是指向官網 mkp 網域的絕對網址，和活動詳情頁連結一樣換成 TAISHIN_MKP_BASE 的前綴（Run.to_mkp），所以用本機
   server 測試時真實格式的主視覺也會向本機請求。
+  活動圖片的本地檔名一律用「活動文件仍在的活動的全部主視覺網址」算（banner_universe），下載（只下載其中前 8 個或名額內補的）、名額判斷、
+  孤兒圖片判斷都用同一組：兩個主視覺網址的檔名相同（只有資料夾或 query 不同）時，兩個都加雜湊後綴，檔名在三處一致。
   圖片是不可信資料：只向 mkp 網域請求（其他網域的主視覺記為失敗，訊息列出該網域與 mkp 網域），存檔前檢查檔頭（magic bytes）和副檔名一致
   （png、jpg／jpeg、bmp、gif、tif／tiff、webp 各有檢查），不符的記為失敗、不存檔。副檔名取自網址，轉成小寫。
 - 權益附件（ASSUMPTION：類別名「權益附件」、資料夾 rights_attachments、檔名前綴 attachment，ticket 11 只指定類別名，
@@ -182,15 +194,12 @@
 - 已過期的活動，不加 --update 再次執行時依上次存下的原始 HTML 判斷，不再請求；官網之後延長該活動的期間，要刪除 `_meta/html`
   裡那個檔案才會重新下載。加 --update 時，沒有文件但有存檔 HTML 的活動，存檔的期間已過期同樣不請求（記過期略過）；
   已經搬到 `_meta/removed/` 的過期活動，之後在活動列表又出現且沒過期，視為新增，重新下載。
-- 活動的主視覺在詳情頁的主內容區外面（div.banner-image 在 class 含 page-content 的元素之前，2026-11-02 看一份本機存檔的樣本確認）。
-  更新模式只比對主內容區，所以只換了主視覺、主內容區沒變的活動，存檔的原始 HTML 不會換，主視覺網址的變動偵測不到
-  （要主內容區也跟著變才會）。
 - 更新模式的 PDF 比對把整份回應讀進記憶體再算雜湊（ASSUMPTION：2026-10-30 下載區最大的 PDF 約 6.7 MB，不另外做串流；現有的下載本來就是整份讀進記憶體）。
 - 行內 `style="display:none"` 沒有處理：2026-10-30 實測轉出率 0.93–1.01，沒有因此漏字。
 - 列印前拿掉註解與 <iframe>、樣式表連結，所以 iframe 裡的內容與外部樣式表不會出現在 PDF／.docx；<object>、<embed> 沒有處理
   （Chrome 的 JavaScript 已封鎖，LibreOffice 不執行腳本）。
 
-Dependencies: 標準函式庫；rag_lab.formats（專案內，只用標準函式庫，取圖片副檔名清單）；
+Dependencies: 標準函式庫；rag_lab.formats（專案內，只用標準函式庫，取圖片副檔名清單與「不是文件」的檔名開頭）；
 列印需要 Google Chrome，轉 .docx 需要 LibreOffice。
 """
 
@@ -219,7 +228,7 @@ from urllib.parse import ParseResult, quote, unquote, urljoin, urlparse, urlunpa
 # 圖片格式的清單沿用專案唯一的一份（rag_lab/formats.py，只用標準函式庫）；腳本在 scripts/ 底下，
 # 要先把 repo 根目錄放進 sys.path 才找得到 rag_lab
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from rag_lab.formats import FORMATS  # noqa: E402
+from rag_lab.formats import FORMATS, NOT_A_DOCUMENT_PREFIXES  # noqa: E402
 
 # ==============================
 # 設定
@@ -277,6 +286,9 @@ CHROME_PREFERENCES = {"profile": {"default_content_setting_values": {"javascript
 
 # 固定的列印用 CSS：圖片不超出頁寬，表格有框線
 PRINT_CSS = "img{max-width:100%;height:auto}table{border-collapse:collapse}td,th{border:1px solid #999;padding:2px}"
+
+# 轉址到外部網域的失敗原因開頭（_SameDomainRedirectHandler 寫入；attachment_removal_blocker 靠它辨認這類失敗）
+EXTERNAL_REDIRECT = "轉址到外部網域"
 
 RESULT_DOWNLOADED = "已下載"
 RESULT_SKIPPED = "已存在略過"
@@ -383,7 +395,7 @@ class _SameDomainRedirectHandler(urllib.request.HTTPRedirectHandler):
         target = urlparse(newurl).netloc
         if target.lower() != self.domain:
             fp.close()
-            raise FetchError(f"轉址到外部網域 {target}，不跟隨")
+            raise FetchError(f"{EXTERNAL_REDIRECT} {target}，不跟隨")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -1068,7 +1080,7 @@ class Category:
     補上紀錄的 html_sha256（有原始 HTML 的類別），失敗時拋出 FetchError。
     refresh 只在更新模式下用在本地已有的文件，參數同 produce，回傳 True 表示內容變了、最終檔案已換成新內容，
     False 表示沒變、最終檔案原封不動；失敗時拋出 FetchError，而且最終檔案不動。活動頁的 refresh 在期間已過期時拋出
-    SkipDocument（檔案不動），由 fetch_document 把活動搬走。None 表示這個類別的更新模式不比對內容（活動圖片：已存在就略過，去留由 remove_unreferenced_images 判斷）。
+    SkipDocument（檔案不動），權益附件的 refresh 在網址已在文件下載區時拋出 SkipDocument（重複），由 fetch_document 把文件搬走。None 表示這個類別的更新模式不比對內容（活動圖片：已存在就略過，去留由 remove_unreferenced_images 判斷）。
     local_name 由 name_prefix 和 link_pattern 的各個群組以底線接起來，例如卡片 card_cg047_card001。
     extension 是 None 時，副檔名取自文件網址路徑的最後一個副檔名（小寫），活動圖片是這樣。
     """
@@ -1396,12 +1408,15 @@ def web_page_refresher(
     convert: Callable[[Tools, Path, Path, Path], None],
     main_content: tuple[str, str] = ("id", "centercontainer"),
     inspect: Callable[[Record, str], None] | None = None,
+    also_compare: Callable[[Run, str, str], object] | None = None,
 ) -> Callable[[Run, Category, str, str, Path, Record], bool]:
     """產生更新模式的 refresh 函式：重新取得網頁，主內容區和存檔的上一份不同才重新轉檔。
 
     Args:
         convert: 轉檔函式，同 web_page_producer。
         main_content: 主內容區怎麼找，必須和同一個類別的 web_page_producer 相同，比對的就是轉檔實際用的那一塊。
+        also_compare: 主內容區以外還要比對的東西，參數是 (執行設定, 網頁網址, 頁面文字)，回傳可比較相等的值；
+            新舊頁面的值不同也算變更（活動頁用它比主視覺網址，主視覺在主內容區外面；grill Q30）。
         inspect: 取得頁面、比對前呼叫，參數是 (清單紀錄, 頁面文字)；可以補紀錄，或拋出 SkipDocument 讓這一頁不比對、不轉檔
             （活動頁用它補活動期間並判斷過期，同 web_page_producer 的 inspect）。
 
@@ -1412,8 +1427,8 @@ def web_page_refresher(
     def refresh(run: Run, category: Category, url: str, name: str, target: Path, record: Record) -> bool:
         """重新取得網頁並比對主內容區；不同才轉檔，轉檔成功後才換掉文件、列印用 HTML 與存檔的原始 HTML。
 
-        比對的是 extract_main_content 的結果（轉檔實際用的那一塊），所以主內容區以外的差異（例如 <head> 的 _csrf token）
-        不算變更，存檔的原始 HTML 也不換。存檔的原始 HTML 不存在（無法比對）時視為變更。
+        比對的是 extract_main_content 的結果（轉檔實際用的那一塊）加上 also_compare 指定的東西，所以其餘的差異
+        （例如 <head> 的 _csrf token）不算變更，存檔的原始 HTML 也不換。存檔的原始 HTML 不存在（無法比對）時視為變更。
         換檔的順序是文件、列印用 HTML、原始 HTML：原始 HTML 是下次比對的基準，最後換，中途中斷時下次還會比對到差異並重試。
 
         Args:
@@ -1440,9 +1455,13 @@ def web_page_refresher(
         content = extract_main_content(page, *main_content)
         if content is None:
             raise FetchError("找不到主內容區")
-        if raw_path.is_file() and extract_main_content(saved_html(raw_path), *main_content) == content:
-            record.html_sha256 = sha256_of(raw_path)
-            return False
+        if raw_path.is_file():
+            saved = saved_html(raw_path)
+            if extract_main_content(saved, *main_content) == content and (
+                also_compare is None or also_compare(run, url, saved) == also_compare(run, url, page)
+            ):
+                record.html_sha256 = sha256_of(raw_path)
+                return False
         for folder in (raw_path.parent, print_path.parent):
             folder.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=run.out / "_meta") as tmp:
@@ -1536,6 +1555,50 @@ def refresh_pdf(run: Run, category: Category, url: str, name: str, target: Path,
     return True
 
 
+def download_area_duplicate(run: Run, url: str) -> SkipDocument | None:
+    """附件的網址若和文件下載區找到的相同，回傳「重複略過」。
+
+    Args:
+        run: 一次執行共用的設定（found 裡要有文件下載區找到的網址；下載區的列表失敗時沒有，無法判斷重複）。
+        url: 附件 PDF 的完整網址。
+
+    Returns:
+        重複時是 result 為 RESULT_DUPLICATE、訊息寫出它在下載區的檔名的 SkipDocument（交給呼叫端拋出）；否則為 None。
+    """
+    downloads = run.found.get(DOWNLOADS.name, [])
+    if url not in downloads:
+        return None
+    in_downloads = f"{DOWNLOADS.local_names(downloads)[url]}.{DOWNLOADS.extension_of(url)}"
+    return SkipDocument(RESULT_DUPLICATE, f"同一個網址已在文件下載區，檔名 {in_downloads}")
+
+
+def refresh_attachment(run: Run, category: Category, url: str, name: str, target: Path, record: Record) -> bool:
+    """更新模式的權益附件：和文件下載區重複就略過，否則同 refresh_pdf（重新下載並比對 SHA-256）。
+
+    ASSUMPTION：已存在的附件若網址現在也在文件下載區，它的內容已由下載區那一份匯入，不搬走的話同一份 PDF 會在知識庫裡兩次，
+    所以由 fetch_document 記「重複略過」並把它當成下架搬走（不請求）。
+
+    Args:
+        run: 一次執行共用的設定。
+        category: 權益附件類別。
+        url: PDF 完整網址。
+        name: 本地名稱。
+        target: 原檔路徑（已存在）。
+        record: 清單紀錄。
+
+    Returns:
+        內容變了、原檔已換成新內容時為 True；沒變時為 False。
+
+    Raises:
+        SkipDocument: 和文件下載區找到的網址相同（不請求，檔案不動）。
+        FetchError: 下載失敗，或內容不是以 %PDF- 開頭；原檔不動。
+    """
+    duplicate = download_area_duplicate(run, url)
+    if duplicate is not None:
+        raise duplicate
+    return refresh_pdf(run, category, url, name, target, record)
+
+
 def save_attachment(run: Run, category: Category, url: str, name: str, target: Path, record: Record) -> None:
     """權益子頁連到的 PDF：只收官網（www）網域的，其他網域略過；文件下載區已有的同一個網址也略過；
     通過後和下載區的 PDF 一樣原樣存檔（save_pdf）。
@@ -1555,10 +1618,9 @@ def save_attachment(run: Run, category: Category, url: str, name: str, target: P
     host, www_host = urlparse(url).netloc.lower(), urlparse(run.www).netloc.lower()
     if host != www_host:
         raise SkipDocument(RESULT_EXTERNAL, f"外部網域 {host}（官網網域是 {www_host}），不下載")
-    downloads = run.found.get(DOWNLOADS.name, [])
-    if url in downloads:
-        in_downloads = f"{DOWNLOADS.local_names(downloads)[url]}.{DOWNLOADS.extension_of(url)}"
-        raise SkipDocument(RESULT_DUPLICATE, f"同一個網址已在文件下載區，檔名 {in_downloads}")
+    duplicate = download_area_duplicate(run, url)
+    if duplicate is not None:
+        raise duplicate
     save_pdf(run, category, url, name, target, record)
 
 
@@ -1646,6 +1708,86 @@ def live_banners(run: Run) -> dict[str, str | None]:
     return live
 
 
+def banner_universe(run: Run) -> list[str]:
+    """活動文件仍在的活動的主視覺網址（去除重複，依活動被找到的順序）；活動圖片的本地檔名都以這一組網址算。
+
+    檔名取決於整批網址（兩個網址的檔名相同時都加雜湊後綴），所以下載、名額判斷與孤兒圖片判斷必須用同一組網址，
+    不能一個用全部、一個只用這次要下載的子集合，否則同一張圖在不同地方的檔名不同。
+
+    Args:
+        run: 一次執行共用的設定（found 裡要有活動類別找到的網址）。
+
+    Returns:
+        主視覺的完整網址；活動列表失敗時為空。
+    """
+    return list(dict.fromkeys(banner for banner in live_banners(run).values() if banner is not None))
+
+
+def local_names_for(run: Run, category: Category, urls: list[str]) -> dict[str, str]:
+    """這次要處理的網址的本地檔名；活動圖片用 banner_universe 算，其他類別用 urls 本身。
+
+    Args:
+        run: 一次執行共用的設定。
+        category: 要處理的類別。
+        urls: 這次要處理的網址（活動圖片時是 banner_universe 的子集合）。
+
+    Returns:
+        網址對本地檔名（不含副檔名）。
+    """
+    if category is IMAGES:
+        return IMAGES.local_names(banner_universe(run))
+    return category.local_names(urls)
+
+
+def replaced_banners(run: Run, live: dict[str, str | None]) -> set[str]:
+    """主視覺網址變了、而且新網址的本地檔名和舊網址的一樣的主視覺網址。
+
+    只有資料夾或 query 不同、檔名相同的新舊網址，衍生出的本地檔名一樣：本地那個檔案是舊圖，不是新圖，
+    不能因為「檔案已存在」就略過。舊網址的檔名以它單獨存在時的檔名算（舊網址不在現在的主視覺網址裡了）；
+    它若和別的主視覺網址同名，新網址會因此加雜湊後綴，檔名就不一樣，不在這裡。
+
+    Args:
+        run: 一次執行共用的設定（previous_banners 是重新取得之前存檔的主視覺網址）。
+        live: live_banners 的結果。
+
+    Returns:
+        新的主視覺網址的集合；沒有主視覺網址變動的活動時為空。
+    """
+    names = IMAGES.local_names(banner_universe(run))
+    replaced: set[str] = set()
+    for activity, banner in live.items():
+        previous = run.previous_banners.get(activity)
+        if banner is None or previous is None or previous == banner:
+            continue
+        if document_filename(IMAGES, banner, names[banner]) == document_filename(
+            IMAGES, previous, IMAGES.local_name(previous)
+        ):
+            replaced.add(banner)
+    return replaced
+
+
+def remove_replaced_images(run: Run, urls: list[str]) -> list[Record]:
+    """更新模式：主視覺網址變了、但新舊網址的本地檔名相同的活動，把本地的舊圖搬到 DIR/_meta/removed/<日期>/offer_images/。
+
+    搬走之後，新圖在下載時才不會被當成「已存在」略過。只處理這次要下載的網址（urls）。
+
+    Args:
+        run: 一次執行共用的設定（found 裡要有活動類別找到的網址）。
+        urls: 這次要處理的主視覺網址（collect_banners_to_fill 的結果）。
+
+    Returns:
+        每一張搬走（或搬移失敗）舊圖的清單紀錄。
+    """
+    replaced = replaced_banners(run, live_banners(run))
+    names = IMAGES.local_names(banner_universe(run))
+    filenames = [document_filename(IMAGES, url, names[url]) for url in urls if url in replaced]
+    return [
+        move_removed(run, IMAGES, filename, reason="活動換了主視覺網址，舊圖搬走")
+        for filename in filenames
+        if (run.out / IMAGES.folder / filename).is_file()
+    ]
+
+
 def collect_banners_to_fill(run: Run) -> list[str]:
     """更新模式：現有的圖片照舊，名額少於 IMAGE_LIMIT 個時才補。
 
@@ -1662,12 +1804,16 @@ def collect_banners_to_fill(run: Run) -> list[str]:
         候選不足 IMAGE_LIMIT 個時，印出名額數寫進報告。活動列表失敗時為空：那個失敗已經回報過。
     """
     live = live_banners(run)
-    banners = list(dict.fromkeys(banner for banner in live.values() if banner is not None))
+    banners = banner_universe(run)
     names = IMAGES.local_names(banners)
+    replaced = replaced_banners(run, live)
     occupied = [
         banner
         for banner in banners
-        if (run.out / IMAGES.folder / document_filename(IMAGES, banner, names[banner])).is_file()
+        if (
+            (run.out / IMAGES.folder / document_filename(IMAGES, banner, names[banner])).is_file()
+            and banner not in replaced
+        )
         or f".{IMAGES.extension_of(banner)}" not in SUPPORTED_IMAGE_EXTENSIONS
     ]
     changed = {
@@ -1701,8 +1847,7 @@ def collect_banners(run: Run, category: Category) -> list[str]:
     """
     if run.update:
         return collect_banners_to_fill(run)
-    banners = dict.fromkeys(banner for banner in live_banners(run).values() if banner is not None)
-    return list(banners)[:IMAGE_LIMIT]
+    return banner_universe(run)[:IMAGE_LIMIT]
 
 
 def save_image(run: Run, category: Category, url: str, name: str, target: Path, record: Record) -> None:
@@ -1740,12 +1885,32 @@ def save_image(run: Run, category: Category, url: str, name: str, target: Path, 
 
 
 def print_with_chrome(tools: Tools, html_path: Path, target: Path, work_dir: Path) -> None:
-    """網頁類的轉檔函式（卡片頁、活動頁）：用 Chrome 列印成 PDF。參數與例外同 print_to_pdf，Chrome 路徑取自 tools。"""
+    """網頁類的轉檔函式（卡片頁、活動頁）：用 Chrome 列印成 PDF。
+
+    Args:
+        tools: 轉檔用的外部命令，取其中的 Chrome 路徑。
+        html_path: 要列印的本機 HTML 檔。
+        target: 最終 PDF 路徑；列印成功才會出現。
+        work_dir: 放暫時資料夾的位置（與 target 同一個檔案系統）。
+
+    Raises:
+        FetchError: Chrome 不存在、列印失敗、逾時或沒有產出 PDF（見 print_to_pdf）。
+    """
     print_to_pdf(tools.chrome, html_path, target, work_dir)
 
 
 def convert_with_office(tools: Tools, html_path: Path, target: Path, work_dir: Path) -> None:
-    """網頁類的轉檔函式（權益子頁）：用 LibreOffice 轉成 .docx。參數與例外同 convert_to_docx，命令取自 tools。"""
+    """網頁類的轉檔函式（權益子頁）：用 LibreOffice 轉成 .docx。
+
+    Args:
+        tools: 轉檔用的外部命令，取其中的 LibreOffice 命令（找不到時為 None）。
+        html_path: 要轉檔的本機 HTML 檔；LibreOffice 輸出的檔名由它的主檔名決定。
+        target: 最終 .docx 路徑（主檔名必須和 html_path 相同）；轉檔成功才會出現。
+        work_dir: 放暫時資料夾的位置（與 target 同一個檔案系統）。
+
+    Raises:
+        FetchError: 找不到 LibreOffice、轉檔失敗、逾時或沒有產出 .docx（見 convert_to_docx）。
+    """
     convert_to_docx(tools.office, html_path, target, work_dir)
 
 
@@ -1827,7 +1992,7 @@ ATTACHMENTS = Category(
     reads_period=False,
     collect=collect_attachments,
     produce=save_attachment,
-    refresh=refresh_pdf,
+    refresh=refresh_attachment,
 )
 
 
@@ -1872,7 +2037,9 @@ ACTIVITIES = Category(
         main_content=("class", "page-content"),
         inspect=check_offer_period,
     ),
-    refresh=web_page_refresher(print_with_chrome, main_content=("class", "page-content"), inspect=check_offer_period),
+    refresh=web_page_refresher(
+        print_with_chrome, main_content=("class", "page-content"), inspect=check_offer_period, also_compare=banner_of
+    ),
 )
 IMAGES = Category(
     name="活動圖片",
@@ -1938,8 +2105,10 @@ def fetch_document(run: Run, category: Category, url: str, name: str) -> Record:
             try:
                 changed = category.refresh(run, category, url, name, target, record)
             except SkipDocument as exc:
-                # 只有活動頁的 refresh 會拋：重新判斷的結果是已過期
-                moved = move_removed(run, category, filename, RESULT_EXPIRED_REMOVED, str(exc))
+                # refresh 拋的略過都要把已存在的文件搬走：活動頁重新判斷的結果是已過期（過期移除），
+                # 權益附件的網址現在也在文件下載區（重複略過）
+                moved_result = {RESULT_EXPIRED: RESULT_EXPIRED_REMOVED, RESULT_DUPLICATE: RESULT_DUPLICATE}[exc.result]
+                moved = move_removed(run, category, filename, moved_result, str(exc))
                 moved.url, moved.period = url, record.period
                 return moved
             if not changed:
@@ -1981,6 +2150,9 @@ def fetch_document(run: Run, category: Category, url: str, name: str) -> Record:
 def local_documents(run: Run, category: Category) -> list[str]:
     """類別資料夾裡現有的文件檔名（ingest 不遞迴，所以只看資料夾第一層的檔案）。
 
+    不是文件的檔案（.DS_Store 等 `.` 開頭的隱藏檔、`~$` 開頭的 Office 鎖定檔，規則同 rag_lab.formats.NOT_A_DOCUMENT_PREFIXES，
+    ingest 也不會匯入它們）不列，所以不會被當成下架搬走，「解析出 0 筆」的保護也不把它們算進本地文件。
+
     Args:
         run: 一次執行共用的設定。
         category: 要看哪個類別的資料夾。
@@ -1991,7 +2163,7 @@ def local_documents(run: Run, category: Category) -> list[str]:
     folder = run.out / category.folder
     if not folder.is_dir():
         return []
-    return sorted(p.name for p in folder.iterdir() if p.is_file())
+    return sorted(p.name for p in folder.iterdir() if p.is_file() and not p.name.startswith(NOT_A_DOCUMENT_PREFIXES))
 
 
 def free_destination(destination: Path) -> Path:
@@ -2085,7 +2257,7 @@ def remove_unreferenced_images(run: Run) -> list[Record]:
     """
     if ACTIVITIES.name not in run.found:
         return []
-    referenced = list(dict.fromkeys(banner for banner in live_banners(run).values() if banner is not None))
+    referenced = banner_universe(run)
     names = IMAGES.local_names(referenced)
     kept = {document_filename(IMAGES, url, names[url]) for url in referenced}
     return [
@@ -2113,6 +2285,8 @@ def attachment_removal_blocker(records: list[Record], failed_lists: list[str]) -
     """權益附件這次能不能判斷下架：權益列表與每個權益子頁都要成功取得。
 
     子頁內容變了但轉檔失敗時存檔的原始 HTML 不換，附件的候選讀的是舊的連結，所以請求失敗與轉檔失敗都算沒有成功取得。
+    例外：失敗原因是轉址到外部網域的子頁（真實官網的 Visa、Mastercard、JCB 權益子頁每次都是）不算：它從來沒有內容，
+    也不會提供附件連結，不影響附件候選。
 
     Args:
         records: 目前為止這次執行的紀錄（權益類別已處理完）。
@@ -2123,7 +2297,11 @@ def attachment_removal_blocker(records: list[Record], failed_lists: list[str]) -
     """
     if RIGHTS.list_name in failed_lists:
         return f"權益列表「{RIGHTS.list_name}」沒有成功取得"
-    failed = [r.filename for r in records if r.category == RIGHTS.name and r.result == RESULT_FAILED]
+    failed = [
+        r.filename
+        for r in records
+        if r.category == RIGHTS.name and r.result == RESULT_FAILED and not r.detail.startswith(EXTERNAL_REDIRECT)
+    ]
     if failed:
         return f"{len(failed)} 個權益子頁請求、轉檔或搬移失敗（{'、'.join(failed)}）"
     return None
@@ -2136,13 +2314,15 @@ def remove_unlinked_attachments(
 
     附件的候選（urls）讀的是權益子頁存檔的原始 HTML；同一份附件被多個子頁連到時，只要還有一頁連到就在候選裡，不算下架。
     權益列表或任何一個權益子頁沒有成功取得時，這次不判斷，stderr 寫明原因（原因本身已讓結束碼是 1）。
+    權益子頁都成功、但解析到的附件連結是 0 個，而本地有附件時，也當成沒有成功取得（官網改版讓解析失效的可能高於所有附件同時下架，
+    做法同列表頁解析出 0 筆）：不搬任何附件，stderr 寫明原因，結束碼 1（ASSUMPTION：結束碼比照列表頁的 0 筆保護）；本地沒有附件時不算失敗。
 
     Args:
         run: 一次執行共用的設定。
         category: 權益附件類別。
         urls: 這次所有權益子頁連到的附件網址（含外部網域與下載區已有的網址，它們沒有本地檔，不影響判斷）。
         records: 目前為止這次執行的紀錄。
-        failed_lists: 目前為止沒有成功取得的列表名稱。
+        failed_lists: 目前為止沒有成功取得的列表名稱；解析到 0 個連結而本地有附件時，這裡會加上附件類別的名稱（結束碼因此是 1）。
 
     Returns:
         每一份下架（或搬移失敗）附件的清單紀錄；不判斷時為空。
@@ -2150,6 +2330,15 @@ def remove_unlinked_attachments(
     blocker = attachment_removal_blocker(records, failed_lists)
     if blocker is not None:
         print(f"ERROR 權益附件這次不判斷下架：{blocker}", file=sys.stderr)
+        return []
+    local = local_documents(run, category)
+    if not urls and local:
+        print(
+            f"ERROR 權益附件這次不判斷下架：權益子頁都成功取得，但解析到的附件連結是 0 個，"
+            f"本地 {category.folder}/ 有 {len(local)} 份附件；當成沒有成功取得，不搬任何附件",
+            file=sys.stderr,
+        )
+        failed_lists.append(category.list_name)
         return []
     names = category.local_names(urls)
     return remove_missing(run, category, {document_filename(category, url, names[url]) for url in urls})
@@ -2259,7 +2448,9 @@ def main(argv: list[str]) -> int:
         run.found[category.name] = urls
         expected = "" if category.expected_count is None else f"（預期 {category.expected_count}）"
         print(f"{category.list_label}找到 {len(urls)} {category.unit}{expected}")
-        names = category.local_names(urls)
+        names = local_names_for(run, category, urls)
+        if run.update and category is IMAGES:
+            records.extend(remove_replaced_images(run, urls))
         records.extend(fetch_document(run, category, url, names[url]) for url in urls)
         if removable:
             listed = {document_filename(category, url, names[url]) for url in urls}

@@ -2977,6 +2977,26 @@ class UpdateModeRemovedFromListTests(ScriptTestCase):
         )
         self.assertFalse((self.out / "_meta" / "removed").exists())
 
+    def test_files_that_are_not_documents_are_never_moved_and_are_not_in_the_manifest(self) -> None:
+        self.download_cards({RICHART: card_html("RICHART")})
+        stray = [self.out / "cards" / ".DS_Store", self.out / "cards" / "~$card.pdf", self.out / "cards" / "._card.pdf"]
+        for file in stray:
+            file.write_bytes(b"not a document")
+        self.serve_cards({RICHART: card_html("RICHART")})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(all(file.is_file() for file in stray))
+        self.assertFalse((self.out / "_meta" / "removed").exists())
+        self.assertEqual([r["filename"] for r in self.manifest()], ["card_cg047_card001.pdf"])
+
+    def test_empty_list_is_fine_when_the_local_folder_has_only_files_that_are_not_documents(self) -> None:
+        (self.out / "cards").mkdir(parents=True)
+        (self.out / "cards" / ".DS_Store").write_bytes(b"not a document")
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("0 筆", result.stderr)
+        self.assertTrue((self.out / "cards" / ".DS_Store").is_file())
+
     def test_empty_activity_list_moves_no_activity_but_empty_list_for_a_category_without_local_documents_is_fine(self) -> None:
         self.serve_offers({"A": [[detail_path(1)]]})
         self.serve_details({detail_path(1): offer_detail_html("OFFER1")})
@@ -3103,6 +3123,48 @@ class UpdateModeAttachmentTests(ScriptTestCase):
         self.assertEqual(records["attachment_dual-card_01.pdf"]["result"], "未變")
         self.assertTrue((self.removed_dir() / "rights_attachments" / "attachment_TSCC-11312.pdf").is_file())
 
+    def test_existing_attachment_that_is_now_in_the_download_area_is_recorded_as_duplicate_and_moved_away(self) -> None:
+        # ASSUMPTION：內容已由下載區那一份匯入，不搬走的話同一份 PDF 會在知識庫裡出現兩次
+        self.first_download({DUAL_PAGE: [DUAL_PDF, DUAL_PDF_2]})
+        before = (self.out / "rights_attachments" / "attachment_dual-card_01.pdf").read_bytes()
+        self.serve_downloads([[DUAL_PDF]])
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.out / "rights_attachments" / "attachment_dual-card_01.pdf").exists())
+        self.assertEqual(
+            (self.removed_dir() / "rights_attachments" / "attachment_dual-card_01.pdf").read_bytes(), before
+        )
+        self.assertTrue((self.out / "downloads" / "download_dual-card_01.pdf").is_file())
+        records = self.attachment_records()
+        self.assertEqual(records["attachment_dual-card_01.pdf"]["result"], "重複略過")
+        self.assertEqual(records["attachment_dual-card_01.pdf"]["url"], self.server.base_url + DUAL_PDF)
+        self.assertIn("download_dual-card_01.pdf", records["attachment_dual-card_01.pdf"]["detail"])
+        self.assertEqual(records["attachment_dual-card_02.pdf"]["result"], "未變")
+        self.assertEqual(self.server.paths().count(DUAL_PDF), 1, "只有下載區那一份請求，附件不重複請求")
+        self.assertIn("權益附件：未變 1、重複略過 1", result.stdout)
+
+    def test_removal_is_not_judged_when_all_subpages_succeed_but_no_attachment_link_is_parsed_while_local_has_attachments(self) -> None:
+        # 官網改版讓連結解析失效的可能高於所有附件同時下架，和列表頁「解析出 0 筆」的保護相同
+        self.first_download({DUAL_PAGE: [DUAL_PDF, DUAL_PDF_2]})
+        self.serve_pages({DUAL_PAGE: []})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        for text in ("權益附件這次不判斷下架", "0 個", "rights_attachments/ 有 2 份"):
+            self.assertIn(text, result.stderr)
+        self.assertEqual(
+            sorted(p.name for p in (self.out / "rights_attachments").iterdir()),
+            ["attachment_dual-card_01.pdf", "attachment_dual-card_02.pdf"],
+        )
+        self.assertFalse(self.removed_dir().exists())
+        self.assertNotIn("下架", {r["result"] for r in self.attachment_records().values()})
+
+    def test_zero_attachment_links_is_fine_when_there_are_no_local_attachments(self) -> None:
+        self.first_download({DUAL_PAGE: []})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("權益附件這次不判斷下架", result.stderr)
+
     def test_removal_is_not_judged_when_a_subpage_request_failed_and_the_report_names_the_reason(self) -> None:
         self.first_download({CO_BRAND_PAGE: [CO_BRAND_PDF], DUAL_PAGE: [DUAL_PDF]})
         self.serve_pages({CO_BRAND_PAGE: [], DUAL_PAGE: [DUAL_PDF]})
@@ -3115,6 +3177,20 @@ class UpdateModeAttachmentTests(ScriptTestCase):
         self.assertFalse(self.removed_dir().exists())
         self.assertIn("權益附件這次不判斷下架", result.stderr)
         self.assertIn("rights_right_right0704.docx", result.stderr)
+
+    def test_subpage_that_always_redirects_to_another_domain_does_not_block_the_removal_judgement(self) -> None:
+        # 真實官網的 Visa、Mastercard、JCB 權益子頁每次都轉址到國際組織網站：它從來沒有內容，也不提供附件連結
+        pages = {DUAL_PAGE: [DUAL_PDF, DUAL_PDF_2], INSURANCE: []}
+        self.serve_pages(pages)
+        self.server.redirects[INSURANCE] = self.mkp_server.base_url + "/outside/page/"
+        self.assertEqual(self.run_script().returncode, 1, "轉址到外部網域的子頁讓結束碼是 1，是既有行為")
+        self.serve_pages({DUAL_PAGE: [DUAL_PDF], INSURANCE: []})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("權益附件這次不判斷下架", result.stderr)
+        self.assertFalse((self.out / "rights_attachments" / "attachment_dual-card_02.pdf").exists())
+        self.assertTrue((self.removed_dir() / "rights_attachments" / "attachment_dual-card_02.pdf").is_file())
+        self.assertEqual(self.attachment_records()["attachment_dual-card_02.pdf"]["result"], "下架")
 
     def test_removal_is_not_judged_when_a_subpage_conversion_failed_and_is_judged_on_the_next_successful_run(self) -> None:
         self.first_download({DUAL_PAGE: [DUAL_PDF, DUAL_PDF_2]})
@@ -3295,6 +3371,46 @@ class UpdateModeOfferImageTests(ScriptTestCase):
         self.assertEqual(records[new_name]["result"], "已下載")
         self.assertEqual(records[self.image_name(1)]["result"], "下架")
 
+    def test_activity_whose_only_change_is_the_main_visual_url_is_a_content_change_and_its_image_is_replaced(self) -> None:
+        self.first_download({1: banner_path(1)})
+        html_path = self.out / "_meta" / "html" / f"offer_{wm(1)}.html"
+        new_banner = banner_path(1).replace("banner_image", "banner_image_v2")
+        # 主內容區和第一次完全相同（同一個 OFFER1），只有主內容區外的主視覺網址不同
+        self.serve_details({detail_path(1): offer_detail_html("OFFER1", banner=self.mkp_server.base_url + new_banner)})
+        self.serve_images({new_banner: PNG_BYTES + b"new"})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        activity = next(r for r in self.manifest() if r["category"] == "活動")
+        self.assertEqual(activity["result"], "內容變更")
+        self.assertIn(new_banner.encode(), html_path.read_bytes(), "存檔的原始 HTML 換成新的")
+        new_name = self.image_name(1).replace("banner_image", "banner_image_v2")
+        self.assertEqual([p.name for p in (self.out / "offer_images").iterdir()], [new_name])
+        self.assertEqual([p.name for p in self.removed_images_dir().iterdir()], [self.image_name(1)])
+        self.assertEqual(self.image_records()[new_name]["result"], "已下載")
+        self.assertEqual(self.image_requests(), [new_banner])
+
+    def test_new_main_visual_with_the_same_base_name_replaces_the_old_file_instead_of_being_skipped(self) -> None:
+        self.first_download({1: banner_path(1)})
+        old_bytes = (self.out / "offer_images" / self.image_name(1)).read_bytes()
+        # 新舊網址只有資料夾不同，檔名一樣，所以衍生出的本地檔名一樣
+        new_banner = banner_path(1).replace(UPLOAD_PREFIX, UPLOAD_PREFIX + "v2/")
+        self.assertEqual(new_banner.rsplit("/", 1)[1], banner_path(1).rsplit("/", 1)[1])
+        self.serve_details({detail_path(1): offer_detail_html("OFFER1", banner=self.mkp_server.base_url + new_banner)})
+        self.serve_images({new_banner: PNG_BYTES + b"new"})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.image_requests(), [new_banner])
+        self.assertEqual((self.out / "offer_images" / self.image_name(1)).read_bytes(), PNG_BYTES + b"new")
+        self.assertEqual((self.removed_images_dir() / self.image_name(1)).read_bytes(), old_bytes)
+        results = [r["result"] for r in self.manifest() if r["category"] == "活動圖片"]
+        self.assertEqual(sorted(results), ["下架", "已下載"])
+        # 下一次執行：主視覺網址沒變，不再請求
+        self.mkp_server.requests.clear()
+        again = self.run_update()
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertEqual(self.image_requests(), [])
+        self.assertEqual((self.out / "offer_images" / self.image_name(1)).read_bytes(), PNG_BYTES + b"new")
+
     def test_banner_of_a_still_valid_activity_with_the_same_url_is_not_requested_and_not_touched(self) -> None:
         banners = {1: banner_path(1), 2: banner_path(2)}
         self.first_download(banners)
@@ -3366,6 +3482,25 @@ class UpdateModeOfferImageTests(ScriptTestCase):
             [p.name for p in (self.out / "offer_images").iterdir()],
         )
         self.assertNotIn(self.image_name(9), [p.name for p in (self.out / "offer_images").iterdir()])
+
+    def test_banners_with_the_same_base_name_get_the_same_file_name_in_download_and_in_update(self) -> None:
+        # 活動 8、9 的主視覺只有資料夾不同、檔名相同：兩個都要加雜湊後綴；第一次下載只取前 8 個（只有活動 8），
+        # 但檔名要用全部活動的主視覺網址算，更新模式才認得剛下載的圖，不會搬走又重新下載
+        banners = {n: banner_path(n) for n in range(1, 8)}
+        banners[8] = f"{UPLOAD_PREFIX}dirB/dup_banner.png"
+        banners[9] = f"{UPLOAD_PREFIX}dirC/dup_banner.png"
+        self.first_download(banners)
+        folder = self.out / "offer_images"
+        names = sorted(p.name for p in folder.iterdir())
+        self.assertEqual(len(names), 8)
+        self.assertRegex(names[-1], r"^offer_image_dup_banner_[0-9a-f]{8}\.png$")
+        for _ in range(2):
+            result = self.run_update()
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(self.image_requests(), [])
+            self.assertEqual(sorted(p.name for p in folder.iterdir()), names)
+            self.assertFalse((self.out / "_meta" / "removed").exists() and list((self.out / "_meta" / "removed").rglob("*.png")))
+            self.assertEqual(self.image_records()[names[-1]]["result"], "已存在略過")
 
     def test_report_says_so_when_there_are_not_enough_candidates_to_fill_8_slots(self) -> None:
         self.first_download({1: banner_path(1), 2: banner_path(2), 3: None})

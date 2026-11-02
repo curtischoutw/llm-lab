@@ -33,3 +33,29 @@ ASSUMPTION：
 範圍外發現：
 
 - 無。
+
+### code-review 修正 1：轉址到外部網域的子頁不阻擋附件下架（2026-11-02）
+
+真實官網的 Visa、Mastercard、JCB 權益子頁每次都記「失敗：轉址到外部網域…，不跟隨」（主 checkout 的 `data/taishin_credit_card/_meta/manifest.jsonl`），原本會讓 `attachment_removal_blocker` 永遠回傳原因，附件下架因此永遠不會執行。
+
+- `attachment_removal_blocker` 不再把失敗原因是「轉址到外部網域」的權益子頁算進去：這類子頁從來沒有內容，也不提供附件連結。請求失敗、轉檔失敗、搬移失敗照樣阻擋。失敗原因開頭的字串抽成常數 `EXTERNAL_REDIRECT`，轉址處理與判斷共用。
+- 測試：`test_subpage_that_always_redirects_to_another_domain_does_not_block_the_removal_judgement`（先紅：stderr 出現「權益附件這次不判斷下架」；修後綠）。
+
+範圍外發現：這三個子頁讓每次執行的結束碼都是 1，是既有行為，沒有改。
+
+### code-review 修正 5：更新模式的附件也做「和下載區重複」檢查（2026-11-02）
+
+更新模式原本對已存在的附件走 `refresh_pdf`，跳過了 `save_attachment` 的重複檢查（上面「實作結果」ASSUMPTION 的最後一條）。
+
+- 新增 `download_area_duplicate`（`save_attachment` 與新的 `refresh_attachment` 共用）；`ATTACHMENTS.refresh` 改用 `refresh_attachment`：網址現在也在文件下載區時不請求，`fetch_document` 把它當成下架搬到 `_meta/removed/<日期>/rights_attachments/`，清單記「重複略過」，網址是附件網址，原因寫出它在下載區的檔名。
+- ASSUMPTION（使用者指定）：它的內容已由下載區那一份匯入，不搬的話同一份 PDF 會在知識庫裡兩次。
+- 外部網域的略過不加進更新模式：外部網域的附件從來沒有本地檔。
+- 測試：`test_existing_attachment_that_is_now_in_the_download_area_is_recorded_as_duplicate_and_moved_away`（先紅：附件還在附件資料夾；修後綠）。
+
+### code-review 修正 6：解析到 0 個附件連結而本地有附件時不判斷下架（2026-11-02，使用者同意改掉上面的 ASSUMPTION）
+
+原本的 ASSUMPTION「權益子頁都成功取得、但連到的 PDF 一個也沒有時，本地的附件全部算下架」作廢。改成：權益子頁都成功、但解析到的附件連結是 0 個，而本地 `rights_attachments/` 有附件時，當成沒有成功取得，不搬任何附件，stderr 寫「權益附件這次不判斷下架」與原因（做法同列表頁「解析出 0 筆」的保護）；本地沒有附件時，0 個不算失敗。
+
+- `remove_unlinked_attachments` 在 `attachment_removal_blocker` 之後多一個 0 個連結的檢查；並把附件類別名稱加進 `failed_lists`。
+- ASSUMPTION：結束碼比照列表頁的 0 筆保護是 1（使用者只說「做法和列表頁相同」，沒有明講結束碼）。
+- 測試：`test_removal_is_not_judged_when_all_subpages_succeed_but_no_attachment_link_is_parsed_while_local_has_attachments`（先紅：2 份附件被搬走）、`test_zero_attachment_links_is_fine_when_there_are_no_local_attachments`（本來就綠，守住「本地沒有附件不算失敗」）。

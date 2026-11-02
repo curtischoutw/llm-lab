@@ -16,6 +16,7 @@ Dependencies: 標準函式庫。
 import json
 import re
 import shutil
+from pathlib import Path
 
 from tests.test_replace import NEW, OLD, ReplaceApiCase, ReplaceCase
 
@@ -161,6 +162,42 @@ class MigrateCliTest(MigrateHelpers, ReplaceCase):
         self.assertIn("1/2 篇匯入失敗", result.stderr)
         self.assertIn("新增 1 份", result.stdout)
         self.assertEqual(list(json.loads(self.registry_path.read_text(encoding="utf-8"))["documents"]), [str(fresh.resolve())])
+
+
+class MigrateStatusLoadsCliTest(MigrateHelpers, ReplaceCase):
+    """用檔名遷移要找已處理的文件：整批只載入一次文件狀態，不是每份文件載入一次（否則總工作量是 O(N²)）。"""
+
+    def processed_loads(self, folder_name: str, *documents: str) -> int:
+        """對資料夾執行一次 ingest，回傳這次行程載入「已處理文件的狀態」的次數。
+
+        Args:
+            folder_name: tmp 底下的資料夾名稱。
+            *documents: 資料夾裡要新增的文件檔名。
+
+        Returns:
+            夾具記錄的 processed 載入次數。
+        """
+        folder = self.tmp / folder_name
+        folder.mkdir(parents=True, exist_ok=True)
+        for name in documents:
+            self.write_version(folder / name, f"{folder_name}-{name}")
+        log = self.tmp / f"loads-{folder_name}.log"
+        env = {
+            "PYTHONPATH": str(Path(__file__).parent / "delete_failure"),
+            "COUNT_STATUS_LOADS_FILE": str(log),
+        }
+        result = self.ingest(folder, **env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"新增 {len(documents)} 份", result.stdout)
+        return log.read_text(encoding="utf-8").splitlines().count("processed")
+
+    def test_the_processed_documents_are_loaded_once_per_batch_whatever_the_number_of_new_documents(self):
+        baseline = self.processed_loads("one", "a.pdf")
+        self.assertGreaterEqual(baseline, 1, "夾具要數得到載入")
+
+        many = self.processed_loads("many", "b.pdf", "c.pdf", "d.pdf", "e.pdf")
+
+        self.assertEqual(many, baseline, "4 份新文件的整批，載入次數和 1 份新文件的整批相同")
 
 
 class MigratePythonApiTest(MigrateHelpers, ReplaceApiCase):

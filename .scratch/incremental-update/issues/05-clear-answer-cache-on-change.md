@@ -28,3 +28,12 @@
 - ASSUMPTION：清除失敗（例如寫檔失敗）不吞掉，例外往上拋，整個 ingest 失敗。
 - 測試夾具踩到的點：兩個資料夾的同名檔案要用 `textonly` 開頭才會得到相同的文件 ID（不然圖片路徑不同，ID 就不同），沒用的話「共用版本」的測試實際上測的是兩份不同的文件。
 - 範圍外：`tests/test_prune.py` 的「prune 只移除這個路徑」測試用 `shared.pdf`（沒有 `textonly` 前綴），依本張測試一開始的實測（同樣的建檔方式，新路徑被當成真的新文件、清掉了答案快取），兩個路徑應該得到不同的文件 ID，沒有真的測到共用版本（這是推論，沒有另外驗證；它的斷言在兩種情況下都成立）；`tests/test_answer_cache.py` 有用 `textonly` 的版本。README 沒有 ticket 03（用檔名遷移）的說明，原本那句「用檔名遷移……還沒做」已隨這張 ticket 一起拿掉。
+
+### code-review 修正 7：清答案快取丟例外時不漏收尾（2026-11-02）
+
+`_ingest` 在逐份文件的迴圈裡先清答案快取、再記對照表。`_clear_answer_cache` 丟出例外時，會跳過目前這份文件的 `_record_success`，也跳過整批結束時的 `_mark_swallowed_failures`：描述失敗的新文件會留在 `processed`，下次 ingest 當成已完成略過。
+
+- 改成先 `append` 報告、記對照表，再清答案快取；整個迴圈包在 `try/finally`，`finally` 做 `_mark_swallowed_failures`。例外照樣往上拋（CLI 印「OSError: …」、結束碼 1），沒有吞掉。對照表寫不進去時，仍先清這份文件的答案快取再中止。
+- 夾具：`tests/delete_failure/sitecustomize.py` 多支援 `FAIL_NTH_CACHE_DELETE`（第 N 次刪除 `llm_response_cache` 的項目時拋 OSError）。
+- 測試：`AnswerCacheClearFailureCliTest` 兩個（描述失敗的文件仍記成 failed；已匯入的文件仍在對照表，先紅後綠）。
+- 沒測到的：清快取在「第二份文件」失敗、而第一份文件有描述失敗的組合。原因：快取的查詢項目在第一份文件處理完就被一次清光，第二份文件沒有可刪的項目，夾具無從讓它失敗；這個組合與測試的情境走同一段程式（`finally` 對整批 reports 做收尾）。
