@@ -26,6 +26,9 @@ rag_lab.graph_report 後格式化輸出。
   （eval_YYYYMMDD-HHMMSS.md），在查詢開始前就以獨佔模式建立（撞名時加 -1、-2 序號），所以不會
   覆蓋既有結果，資料夾不可寫也會在查詢前就失敗。失敗的格會在表中標示，並把
   「第幾題、哪個模式、原因」印到 stderr；有任何失敗格時整體以 1 結束，結果檔仍然寫出。
+- eval 的 `--modes` 可給一種或多種檢索模式，只跑那幾種；結果檔與統計只含指定的模式，欄位順序固定依
+  rag_lab.evaluation.RETRIEVAL_MODES（與命令列順序無關，重複的名稱算一次）。不給時五種都跑，輸出和沒有這個選項之前相同。
+  不存在的模式名稱由 argparse 以結束碼 2 拒絕並列出可用的模式，在連任何端點之前。
 - 結果（耗時、答案、結果檔路徑）印 stdout；進度與 LightRAG／RAG-Anything 的 log 在 stderr。
 
 Dependencies: 標準函式庫、rag_lab.config、rag_lab.evaluation；ingest／query／eval 執行時才載入
@@ -40,7 +43,7 @@ from datetime import datetime
 from pathlib import Path
 
 from rag_lab.config import ConfigError, get_settings
-from rag_lab.evaluation import RETRIEVAL_MODES, QuestionFileError, load_questions, render_report
+from rag_lab.evaluation import RETRIEVAL_MODES, QuestionFileError, load_questions, render_report, resolve_modes
 from rag_lab.formats import describe_supported, is_office, is_supported, list_folder
 
 # ==============================
@@ -113,8 +116,14 @@ def build_parser() -> argparse.ArgumentParser:
     graph.add_argument("--sample", type=_positive_int, default=DEFAULT_GRAPH_SAMPLE, help="抽樣實體數（預設 10）")
     graph.add_argument("--seed", type=int, default=DEFAULT_GRAPH_SEED, help="抽樣種子（預設 0；同種子輸出相同）")
 
-    evaluate = sub.add_parser("eval", help="對題目檔批次比較五種檢索模式")
+    evaluate = sub.add_parser("eval", help="對題目檔批次比較檢索模式（預設五種）")
     evaluate.add_argument("questions", help="JSONL 題目檔路徑")
+    evaluate.add_argument(
+        "--modes",
+        nargs="+",
+        choices=QUERY_MODES,
+        help="只跑這幾種檢索模式（可給多個；結果檔的欄位依固定順序排列）；不給時五種都跑",
+    )
     evaluate.add_argument(
         "--output-dir",
         default=DEFAULT_EVAL_OUTPUT_DIR,
@@ -272,12 +281,13 @@ def _reserve_result_file(out_dir: Path, generated_at: datetime) -> Path:
         return path
 
 
-def _run_eval(questions_path: str, output_dir: str) -> int:
-    """對題目檔的每一題跑五種檢索模式，寫出 Markdown 對照表。
+def _run_eval(questions_path: str, output_dir: str, requested_modes: Sequence[str] | None) -> int:
+    """對題目檔的每一題跑指定的檢索模式（預設五種），寫出 Markdown 對照表。
 
     Args:
         questions_path: 題目檔（JSONL）路徑。
         output_dir: 結果檔資料夾。
+        requested_modes: --modes 的值；None 表示五種都跑。
 
     Returns:
         結束碼：0 全部成功；EXIT_USAGE 題目檔讀不到或格式錯誤；EXIT_FAILURE 有任何一格失敗
@@ -295,12 +305,13 @@ def _run_eval(questions_path: str, output_dir: str) -> int:
 
     from rag_lab import pipeline
 
+    modes = resolve_modes(requested_modes)
     settings = get_settings()
     generated_at = datetime.now()
     # 結果檔在查詢前就建好並佔住檔名：跑了幾十分鐘才發現寫不進去或撞名，結果就白費了
     result_path = _reserve_result_file(Path(output_dir).expanduser(), generated_at)
     try:
-        cells = pipeline.evaluate(questions)
+        cells = pipeline.evaluate(questions, modes)
     except BaseException:
         # 沒跑完就不留下預先建立的空結果檔（例外照常往外拋）
         result_path.unlink(missing_ok=True)
@@ -319,16 +330,16 @@ def _run_eval(questions_path: str, output_dir: str) -> int:
         ("EMBED_MODEL", settings.embed_model),
         ("RERANK_MODEL", settings.rerank_model),
     ]
-    result_path.write_text(render_report(questions, cells, meta, generated_at), encoding="utf-8")
+    result_path.write_text(render_report(questions, cells, modes, meta, generated_at), encoding="utf-8")
     print(f"對照表：{result_path.resolve()}")
 
     failures = [
         (question.id, mode, cell.error)
         for question, row in zip(questions, cells, strict=True)
-        for mode, cell in zip(RETRIEVAL_MODES, row, strict=True)
+        for mode, cell in zip(modes, row, strict=True)
         if cell.failed
     ]
-    total = len(questions) * len(RETRIEVAL_MODES)
+    total = len(questions) * len(modes)
     print(f"完成：{total} 格，失敗 {len(failures)} 格")
     for question_id, mode, error in failures:
         print(f"失敗：{question_id} / {mode}：{error}", file=sys.stderr)
@@ -375,7 +386,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         if args.command == "eval":
-            return _run_eval(args.questions, args.output_dir)
+            return _run_eval(args.questions, args.output_dir, args.modes)
         if args.command == "ingest":
             return _run_ingest(args.path, args.prune)
         if args.command == "graph":
