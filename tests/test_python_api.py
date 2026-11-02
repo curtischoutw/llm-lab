@@ -50,6 +50,7 @@ from tests.test_pipeline import (
 # summary.missing、summary.removed 與 summary.remove_failed 的檔名（用 | 分隔），拋出例外時改印例外類別與訊息；
 # 步驟 into:<檔名>:<資料夾> 匯入文件旁邊的這個檔案，並指定文件旁邊的那個資料夾為來源資料夾；
 # 步驟 bare_prune:<檔名> 匯入文件旁邊的這個檔案、加 prune 但不指定來源資料夾，印出拋出的例外類別與訊息；
+# 步驟 cache:<檔名> 匯入文件旁邊的另一個檔案，印出 summary.answer_cache_cleared；
 # 步驟 rewrite:<檔名>:<標記> 把文件旁邊的這個 PDF 替身改寫成帶有版本標記的新內容（假 mineru 的 `% fake version:` 行，文件 ID 隨之改變）；
 # 步驟 reject:<檔名>,<檔名>… 一次匯入這些文件，印出拋出的例外類別與訊息（預期不支援的格式整批被拒絕）；
 # 步驟 query_poisoned 問一個題目文字含 Poisoned 的問題，印出拋出的例外類別與訊息（測試讓 rerank 只對這種題目出錯）；
@@ -170,6 +171,9 @@ with pipeline.Session() if use_session else contextlib.nullcontext(pipeline) as 
             name = step.removeprefix("bare_prune:")
             outcome, message = error_name(lambda: api.ingest([document.parent / name], prune=True))
             print(f"bare_prune {outcome} {' '.join(message.split())}")
+        elif step.startswith("cache:"):
+            summary = api.ingest([document.parent / step.removeprefix("cache:")])
+            print(f"cache cleared={summary.answer_cache_cleared}")
         elif step.startswith("rewrite:"):
             name, marker = step.removeprefix("rewrite:").split(":")
             (document.parent / name).write_bytes(f"%PDF-1.4 fake\\n% fake version: {marker}\\n".encode())
@@ -254,7 +258,7 @@ class PythonApiCase(PipelineCase):
         """以子行程在同一個 process 內依序執行步驟。
 
         Args:
-            *steps: ingest、stats:<檔名>、doc:<檔名>、classify:<檔名>,…、sync:<資料夾>[:prune]、into:<檔名>:<資料夾>、bare_prune:<檔名>、rewrite:<檔名>:<標記>、reject:<檔名>,…、query、query_poisoned、evaluate、instances、second、
+            *steps: ingest、stats:<檔名>、doc:<檔名>、classify:<檔名>,…、sync:<資料夾>[:prune]、into:<檔名>:<資料夾>、bare_prune:<檔名>、cache:<檔名>、rewrite:<檔名>:<標記>、reject:<檔名>,…、query、query_poisoned、evaluate、instances、second、
                 closed、thread、loop、bad_mode、orphan、init_fail、forget 的任意序列。
             mode: functions 呼叫模組函式；session 在同一個 Session 裡呼叫。
             question_texts: evaluate 步驟用的題目文字，依序是題目檔的每一題。

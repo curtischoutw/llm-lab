@@ -17,6 +17,7 @@ rag_lab.graph_report 後格式化輸出。
   Word 的鎖定檔）不算文件，不匯入也不列出；
 - 匯入報告在原有的逐篇耗時與統計之後，另列分類的數量與清單（「新增」「替換」「沒變」，資料夾還有「來源已不在（未刪）」「已刪除」；分類由 rag_lab.pipeline 依
   對照表判斷，見 rag_lab.registry）。對照表壞掉或寫不進去時 pipeline 拋 PipelineError，由 main 轉成結束碼 1。
+- 報告另有一行「清掉答案快取 N 筆」：知識庫有改動的文件處理完就清掉查詢答案的快取（規則見 rag_lab.pipeline）。
 - `--prune` 只用於資料夾：單一檔案加 `--prune` 以結束碼 2 結束。「來源已不在（未刪）」不影響結束碼，刪除失敗以結束碼 1 結束。
   資料夾不存在或沒有支援的文件照原有規則以結束碼 2 結束，所以路徑打錯不會進到刪除。
 - 匯入報告的解析階段標籤：Office 格式（rag_lab.formats.is_office）寫「解析（含 Office 轉 PDF）」，其餘寫「解析」；
@@ -210,6 +211,7 @@ def _run_ingest(raw_path: str, prune: bool) -> int:
         print(f"{label} {len(paths)} 份")
         for path in paths:
             print(f"  {path}")
+    print(f"清掉答案快取 {summary.answer_cache_cleared} 筆")
     stuck = summary.status_counts.get("handling", 0)
     if stuck:
         print(f"注意：{stuck} 篇文件停在 handling（先前匯入在多模態階段被中斷）；對該文件重新執行 ingest 會重試")

@@ -3,7 +3,7 @@
 為什麼存在：官網撤下的文件要離開知識庫（spec：.scratch/incremental-update/spec.md「匯入端：替換與移除」「匯入端：介面」），
 但路徑打錯或指到別的資料夾時不能刪光。這裡驗證 ticket 04 的範圍：只列出不刪、`--prune` 只刪來源資料夾等於這次資料夾的紀錄、
 刪除前先查共用版本、資料夾不存在或沒有文件時不做移除、單一檔案不檢查移除、刪除失敗的回報，以及對照表的來源資料夾
-記的是 `ingest <資料夾>` 的那個資料夾。答案快取是 ticket 05 的範圍。
+記的是 `ingest <資料夾>` 的那個資料夾。答案快取見 tests/test_answer_cache.py。
 
 關鍵設計決策：
 - 縫與其他 ingest 測試相同：CLI 子行程（`python -m rag_lab`）與 Python API（子行程內呼叫模組函式與 Session），
