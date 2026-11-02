@@ -292,6 +292,14 @@ ln -sf ../papers/2410.05779.pdf ../papers/2404.16130.pdf ../papers/2510.12323.pd
 .venv/bin/python -m rag_lab eval eval/questions.example.jsonl
 ```
 
+`--modes` 可以只跑指定的檢索模式（`naive`、`local`、`global`、`hybrid`、`mix`，給一種或多種）。結果檔與統計只含這幾種模式，欄位順序固定依上面的順序，與命令列的順序無關，重複的名稱算一次；不給時五種都跑，輸出不變。模式名稱不在這五種之內時以結束碼 2 結束，訊息列出可用的模式。例如只跑 `mix`，一題只送 1 個答案請求，不是 5 個：
+
+```sh
+.venv/bin/python -m rag_lab eval eval/questions.example.jsonl --modes mix
+```
+
+Python API 的 `rag_lab.pipeline.evaluate(questions, modes)` 與 `Session.evaluate(questions, modes)` 有同樣的 `modes` 參數（模式名稱的序列，預設 `None` 表示五種）；名稱不認得或是空序列時拋 `ValueError`，傳回的 `cells[i][j]` 是第 `i` 題在排序後第 `j` 種模式的結果。
+
 `eval` 結果只有在 LLM 快取沒有舊答案時才可比較：快取的 key 由模式、問題文字與查詢參數（含 `enable_rerank`）算出，不含 `RERANK_MODEL`、`LLM_MODEL`，也不含檢索到的內容。換了 `RERANK_MODEL` 或 `LLM_MODEL` 之後，同一份題目檔重跑會直接命中舊答案（跑得很快，但那是舊模型的答案）。換模型後要先從 `WORKING_DIR` 的 `kv_store_llm_response_cache.json` 刪掉 key 含 `:query:` 的項目，再跑 `eval`。
 
 在 Python 裡呼叫（設定一樣讀 `.env`）。在同一個 `Session` 裡問多題，知識庫只載入一次：
