@@ -20,7 +20,7 @@
   - 兩個欄位都是空陣列但格式正確（合法 JSON）→ 不算失敗，照現在交給 LightRAG（問題少於 50 字元時 LightRAG 改用整題當關鍵字，50 字元以上回固定的 `fail_response`，`operate.py:3228–3233`）。這個行為不在這張票改。
 - 失敗時拋 `models.EndpointError`（和現在 LLM 失敗相同的類別與格式「LLM 端點 <位址> 失敗：<原因>」），原因寫「抽關鍵字的輸出不是合法的 JSON：」加輸出開頭最多 200 字元，不含 API key。所以 `query` 結束碼 1、`eval` 記成該格的失敗、Python API 拋例外，捕捉點都不用改。
 - 不加重試，不改 temperature 等生成參數。其他 LLM 呼叫（實體抽取、答案生成、VLM 增強）不受影響。
-- 依賴：rag_lab 會直接 import `json_repair`（LightRAG 的相依套件，已安裝；`requirements.txt` 的慣例是由 raganything 帶入的套件不另列）。開工前需使用者同意新增這個直接依賴。
+- 依賴：rag_lab 會直接 import `json_repair`（LightRAG 的相依套件，已安裝；`requirements.txt` 的慣例是由 raganything 帶入的套件不另列）。使用者 2026-11-03 同意新增這個直接依賴。
 
 ## 驗收
 
@@ -32,3 +32,5 @@
 - [ ] `docs/architecture.md` 描述查詢流程與 `models.py` 的段落同步。
 
 ## Comments
+
+- 2026-11-03 使用者同意 rag_lab 直接 import `json_repair`（不列入 `requirements.txt`，沿用由 raganything 帶入的慣例）。
