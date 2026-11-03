@@ -154,12 +154,13 @@ import shutil
 import sys
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 from rag_lab.config import Settings, get_settings, reject_unmanaged_library_env
-from rag_lab.evaluation import RETRIEVAL_MODES, Cell, Question
+from rag_lab.evaluation import RETRIEVAL_MODES, Cell, Question, resolve_modes
 from rag_lab.formats import describe_supported, is_office, is_supported, list_folder
 
 # 必須在 import lightrag 與 raganything 之前：它們在 import 時就讀環境變數當預設值（見 rag_lab.config）
@@ -1255,16 +1256,19 @@ def query(question: str, mode: str, vlm_enhanced: bool = False) -> str:
 # ==============================
 
 
-async def _evaluate(rag: RAGAnything, questions: list[Question], settings: Settings) -> list[list[Cell]]:
+async def _evaluate(
+    rag: RAGAnything, questions: list[Question], modes: tuple[str, ...], settings: Settings
+) -> list[list[Cell]]:
     """在已初始化的 RAGAnything 上依題目、模式順序逐格查詢；單格失敗記在該格。
 
     Args:
         rag: 已完成 _initialize 的實例。
         questions: 已驗證的題目。
+        modes: 已整理過的檢索模式（見 resolve_modes）。
         settings: 已驗證的設定。
 
     Returns:
-        cells[i][j] 是第 i 題在 RETRIEVAL_MODES[j] 的結果。
+        cells[i][j] 是第 i 題在 modes[j] 的結果。
 
     Raises:
         EndpointError: LLM、embedding 或 rerank 端點在開始前就不可達。
@@ -1273,7 +1277,7 @@ async def _evaluate(rag: RAGAnything, questions: list[Question], settings: Setti
     cells: list[list[Cell]] = []
     for question in questions:
         row: list[Cell] = []
-        for mode in RETRIEVAL_MODES:
+        for mode in modes:
             try:
                 row.append(Cell(answer=await _answer(rag, question.question, mode, settings)))
             except Exception as exc:
@@ -1283,27 +1287,30 @@ async def _evaluate(rag: RAGAnything, questions: list[Question], settings: Setti
     return cells
 
 
-def evaluate(questions: list[Question]) -> list[list[Cell]]:
-    """對每一題以五種檢索模式各查詢一次：開一個 Session、跑完全部題目、關閉。
+def evaluate(questions: list[Question], modes: Iterable[str] | None = None) -> list[list[Cell]]:
+    """對每一題以指定的檢索模式（預設五種）各查詢一次：開一個 Session、跑完全部題目、關閉。
 
-    五個模式與所有題目共用同一個 RAGAnything 實例，依題目順序、模式順序依序執行。
+    所有模式與所有題目共用同一個 RAGAnything 實例，依題目順序、模式順序（固定依 RETRIEVAL_MODES）依序執行。
     查詢固定 vlm_enhanced=False、enable_rerank=True，並沿用 query 的三個查詢 token 上限。
 
     Args:
         questions: 已驗證的題目。
+        modes: 要跑的檢索模式（任何只走訪一次的 iterable 也可以）；None 表示 RETRIEVAL_MODES 的五種。重複的名稱只算一次，順序以 RETRIEVAL_MODES 為準。
 
     Returns:
-        cells[i][j] 是第 i 題在 RETRIEVAL_MODES[j] 的結果；單格失敗記在該格的 error。
+        cells[i][j] 是第 i 題在 resolve_modes(modes)[j] 的結果；單格失敗記在該格的 error。
 
     Raises:
+        ValueError: modes 是空的或含有不認得的模式（在任何連線檢查之前拋出）。
         EndpointError: LLM、embedding 或 rerank 端點在開始前就不可達。
         PipelineError: 初始化失敗。
         SessionError: 已有開啟中的 Session，或在不允許的環境呼叫（見 Session）。
     """
+    resolved = resolve_modes(modes)
     # Session 建構時只檢查 LLM 與 embedding；rerank 在開 Session 之前先檢查
     models.check_reachable("Rerank")
     with Session() as session:
-        return session.evaluate(questions)
+        return session.evaluate(questions, resolved)
 
 
 # ==============================
@@ -1469,21 +1476,23 @@ class Session:
             raise ValueError(f"mode 必須是 {'、'.join(RETRIEVAL_MODES)} 之一，收到 {mode!r}")
         return self._runner.run(_query(self._rag, question, mode, vlm_enhanced, self._settings))
 
-    def evaluate(self, questions: list[Question]) -> list[list[Cell]]:
-        """對每一題以五種檢索模式各查詢一次（見模組函式 evaluate）。
+    def evaluate(self, questions: list[Question], modes: Iterable[str] | None = None) -> list[list[Cell]]:
+        """對每一題以指定的檢索模式（預設五種）各查詢一次（見模組函式 evaluate）。
 
         Args:
             questions: 已驗證的題目。
+            modes: 要跑的檢索模式；None 表示五種。
 
         Returns:
-            cells[i][j] 是第 i 題在 RETRIEVAL_MODES[j] 的結果；單格失敗記在該格的 error。
+            cells[i][j] 是第 i 題在 resolve_modes(modes)[j] 的結果；單格失敗記在該格的 error。
 
         Raises:
+            ValueError: modes 是空的或含有不認得的模式。
             SessionError: Session 已關閉，或從不允許的執行緒／環境呼叫。
             EndpointError: LLM、embedding 或 rerank 端點在開始前就不可達。
         """
         self._check_usable()
-        return self._runner.run(_evaluate(self._rag, questions, self._settings))
+        return self._runner.run(_evaluate(self._rag, questions, resolve_modes(modes), self._settings))
 
     def close(self) -> None:
         """寫回儲存、關閉限流 worker、重置 LightRAG 共用狀態並釋放 event loop；重複呼叫不做事。

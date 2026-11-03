@@ -54,6 +54,9 @@ from tests.test_pipeline import (
 # 步驟 rewrite:<檔名>:<標記> 把文件旁邊的這個 PDF 替身改寫成帶有版本標記的新內容（假 mineru 的 `% fake version:` 行，文件 ID 隨之改變）；
 # 步驟 reject:<檔名>,<檔名>… 一次匯入這些文件，印出拋出的例外類別與訊息（預期不支援的格式整批被拒絕）；
 # 步驟 query_poisoned 問一個題目文字含 Poisoned 的問題，印出拋出的例外類別與訊息（測試讓 rerank 只對這種題目出錯）；
+# 步驟 evaluate_modes:<模式>,<模式>… 以 modes 參數呼叫 evaluate，每一列印出各格答案（失敗印 ERROR）；
+# 步驟 evaluate_iter_modes:<模式>,<模式>… 同上，但 modes 傳的是 generator（只能走訪一次的 iterable）；
+# 步驟 evaluate_bad_modes:<模式>,<模式>…（可為空字串）同樣呼叫 evaluate，印出拋出的例外類別與訊息；
 # 步驟 instances 印出存活的 RAGAnything 實例數，並在最後（Session 已關閉）再印一次；
 # 步驟 second／closed／thread／loop／bad_mode 各做一種誤用並印出例外類別；orphan 讓建立 session 的執行緒
 # 沒關閉就結束，再由主執行緒關閉；init_fail 讓開 session 失敗一次；
@@ -190,6 +193,18 @@ with pipeline.Session() if use_session else contextlib.nullcontext(pipeline) as 
             cells = api.evaluate(load_questions(questions))
             for row in cells:
                 print("evaluate " + " ".join(cell.answer if cell.error is None else "ERROR" for cell in row))
+        elif step.startswith("evaluate_modes:"):
+            chosen = step.removeprefix("evaluate_modes:").split(",")
+            for row in api.evaluate(load_questions(questions), chosen):
+                print("evaluate_modes " + " ".join(cell.answer if cell.error is None else "ERROR" for cell in row))
+        elif step.startswith("evaluate_iter_modes:"):
+            chosen = step.removeprefix("evaluate_iter_modes:").split(",")
+            for row in api.evaluate(load_questions(questions), (name for name in chosen)):
+                print("evaluate_iter_modes " + " ".join(cell.answer if cell.error is None else "ERROR" for cell in row))
+        elif step.startswith("evaluate_bad_modes:"):
+            chosen = [name for name in step.removeprefix("evaluate_bad_modes:").split(",") if name]
+            name, message = error_name(lambda: api.evaluate(load_questions(questions), chosen))
+            print(f"evaluate_bad_modes {name} {' '.join(message.split())}")
         elif step == "instances":
             print(f"instances {instances()}")
         elif step == "second":
@@ -258,7 +273,7 @@ class PythonApiCase(PipelineCase):
         """以子行程在同一個 process 內依序執行步驟。
 
         Args:
-            *steps: ingest、stats:<檔名>、doc:<檔名>、classify:<檔名>,…、sync:<資料夾>[:prune]、into:<檔名>:<資料夾>、bare_prune:<檔名>、cache:<檔名>、rewrite:<檔名>:<標記>、reject:<檔名>,…、query、query_poisoned、evaluate、instances、second、
+            *steps: ingest、stats:<檔名>、doc:<檔名>、classify:<檔名>,…、sync:<資料夾>[:prune]、into:<檔名>:<資料夾>、bare_prune:<檔名>、cache:<檔名>、rewrite:<檔名>:<標記>、reject:<檔名>,…、query、query_poisoned、evaluate、evaluate_modes:<模式>,…、evaluate_iter_modes:<模式>,…、evaluate_bad_modes:<模式>,…、instances、second、
                 closed、thread、loop、bad_mode、orphan、init_fail、forget 的任意序列。
             mode: functions 呼叫模組函式；session 在同一個 Session 裡呼叫。
             question_texts: evaluate 步驟用的題目文字，依序是題目檔的每一題。
@@ -309,6 +324,69 @@ class ExistingIndexTest(PythonApiCase):
         # 題目檔 1 題，五種模式各一格
         every_mode = " ".join([CHAT_REPLY] * 5)
         self.assertEqual(result.stdout.splitlines(), [f"evaluate {every_mode}", f"query {CHAT_REPLY}"])
+
+
+class EvaluateModesTest(PythonApiCase):
+    """evaluate 的 modes 參數：模組函式與 Session 行為相同，只跑指定的模式。"""
+
+    def setUp(self):
+        super().setUp()
+        ingested = self.ingest()
+        self.assertEqual(ingested.returncode, 0, ingested.stdout + ingested.stderr)
+        self.requests_before = len(self.server.requests)
+
+    def chat_requests(self, keywords: bool) -> list[dict]:
+        """匯入之後送出的答案請求（keywords=False）或關鍵字抽取請求（keywords=True）。
+
+        Args:
+            keywords: True 取關鍵字抽取請求（帶 response_format），False 取答案請求。
+
+        Returns:
+            符合的請求紀錄（dict，含 path 與 payload）清單。
+        """
+        return [
+            r
+            for r in self.server.requests[self.requests_before :]
+            if r["path"] == "/v1/chat/completions" and bool(r["payload"].get("response_format")) == keywords
+        ]
+
+    def test_only_the_chosen_modes_are_queried_in_both_call_styles(self):
+        for style in ("functions", "session"):
+            with self.subTest(style=style):
+                self.requests_before = len(self.server.requests)
+                # 題目文字依呼叫方式不同：同一題同一模式的答案會命中 LLM 快取，第二輪就不再送請求
+                question = f"What is Fake Entity Alpha? ({style})"
+                result = self.run_api("evaluate_modes:mix,naive", mode=style, question_texts=(question,))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                # 欄位順序固定依 naive、local、global、hybrid、mix，與給的順序無關
+                self.assertEqual(result.stdout.splitlines(), [f"evaluate_modes {CHAT_REPLY} {CHAT_REPLY}"])
+                self.assertEqual(len(self.chat_requests(keywords=False)), 2)
+                self.assertEqual(len(self.chat_requests(keywords=True)), 1, "naive 不做關鍵字抽取")
+
+    def test_a_one_shot_iterable_of_modes_behaves_like_a_list_in_both_call_styles(self):
+        for style in ("functions", "session"):
+            with self.subTest(style=style):
+                self.requests_before = len(self.server.requests)
+                question = f"What is Fake Entity Alpha? (generator {style})"
+                result = self.run_api("evaluate_iter_modes:mix", mode=style, question_texts=(question,))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stdout.splitlines(), [f"evaluate_iter_modes {CHAT_REPLY}"])
+                self.assertEqual(len(self.chat_requests(keywords=False)), 1)
+                self.assertEqual(len(self.chat_requests(keywords=True)), 1)
+
+    def test_an_unknown_or_empty_modes_is_a_value_error_naming_the_available_modes_before_any_request(self):
+        for style in ("functions", "session"):
+            for chosen in ("mix,bypass", ""):
+                with self.subTest(style=style, chosen=chosen):
+                    self.requests_before = len(self.server.requests)
+                    result = self.run_api(f"evaluate_bad_modes:{chosen}", mode=style)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    (line,) = result.stdout.splitlines()
+                    self.assertTrue(line.startswith("evaluate_bad_modes ValueError "), line)
+                    for name in ("naive", "local", "global", "hybrid", "mix"):
+                        self.assertIn(name, line)
+                    if style == "functions":
+                        self.assertEqual(self.server.requests[self.requests_before :], [])
 
 
 class QueryBudgetTest(PythonApiCase):
