@@ -59,3 +59,4 @@ ASSUMPTION（票裡「推測」的部分，用測試確認）：
 ## Comments
 
 - 2026-11-03 使用者同意 rag_lab 直接 import `json_repair`（不列入 `requirements.txt`，沿用由 raganything 帶入的慣例）。
+- 2026-11-03 使用者同意 rag_lab 直接 import `openai`（用公開函式 `pydantic_function_tool` 產生 schema；lightrag 的相依，不列入 `requirements.txt`）。
