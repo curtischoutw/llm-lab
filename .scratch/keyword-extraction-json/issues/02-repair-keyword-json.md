@@ -26,7 +26,7 @@
 
 - [x] 測試沿用假 OpenAI server 的縫（CLI 子行程＋Python API）。假 server 現在以「請求帶 `response_format`」辨識關鍵字請求（`tests/fake_openai_server.py:232`），改完後請求仍帶 `response_format`，辨識方式不變。
 - [x] 假 server 對關鍵字請求回「`low_level_keywords` 陣列少了 `]`」的輸出時，`query` 結束碼 0；Python API 同樣成功。
-- [x] 回無法解析成物件的內容（例如純文字）時，`query` 結束碼 1，stderr 含「抽關鍵字的輸出不是合法的 JSON」與輸出開頭；`eval` 記成該格失敗；Python API 拋 `EndpointError`。
+- [x] 回無法解析成物件的內容（例如純文字）時，`query` 結束碼 1，stderr 含「抽關鍵字的輸出不是合法的 JSON」與輸出開頭；`eval` 記成該格失敗；Python API 拋 `PipelineError`，訊息含 `EndpointError` 的完整文字（2026-11-03 更正：原寫 `EndpointError`；查詢途中的 LLM 失敗在 Python API 一向拋 `PipelineError`，見實作結果）。
 - [x] 假 server 收到的關鍵字請求仍帶 `response_format`，schema 的欄位與現在相同。
 - [x] 現有測試全綠。既有測試的預期值若因這張票的行為改變而要改，在 ticket 的實作結果逐項寫明改了哪個測試、為什麼，不放寬判斷。
 - [x] `docs/architecture.md` 描述查詢流程與 `models.py` 的段落同步。
