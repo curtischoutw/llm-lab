@@ -26,6 +26,8 @@ ticket 的 CLI 測試都共用它。涵蓋 chat、vision、embeddings、rerank �
 - fail_chat_containing 只讓訊息文字含指定字串的 chat 請求失敗（模擬單一題目失敗）；
   fail_keywords 只讓關鍵字抽取請求（帶 response_format）失敗，naive 模式不做關鍵字抽取，
   所以只有其餘四種檢索模式的查詢會失敗（模擬單一模式失敗）。
+- keywords_reply 設為字串時，關鍵字抽取請求（帶 response_format）的回覆內容改成該字串（原樣放進 message.content），
+  讓測試造出模型輸出不合法的 JSON（例如陣列少了 `]`）或根本不是 JSON 的情況；None 時回合法的 KEYWORDS_REPLY。
 - fail_embed_containing 讓輸入文字含指定字串的 embeddings 請求回 500（模擬某個 chunk 寫入索引時 embedding 失敗，
   其餘文字的 embedding 正常）。
 - rerank_fault 讓 rerank 請求出錯："http500" 回 500、"empty" 回 200 與空的 results、"out_of_range" 回 200，
@@ -256,11 +258,11 @@ class _Handler(BaseHTTPRequestHandler):
             },
         )
 
-    @staticmethod
-    def _chat_reply(payload: dict[str, Any], messages: list[dict[str, Any]], has_image: bool) -> str:
-        """依請求類型選回覆：關鍵字 JSON、實體抽取、圖表描述 JSON、圖片或純文字。"""
+    def _chat_reply(self, payload: dict[str, Any], messages: list[dict[str, Any]], has_image: bool) -> str:
+        """依請求類型選回覆：關鍵字 JSON（可由 keywords_reply 改寫）、實體抽取、圖表描述 JSON、圖片或純文字。"""
         if payload.get("response_format"):
-            return KEYWORDS_REPLY
+            override = self.server.keywords_reply
+            return KEYWORDS_REPLY if override is None else override
         if "Knowledge Graph Specialist" in _message_text(messages, "system"):
             return EXTRACTION_REPLY
         prompt = _message_text(messages)
@@ -358,6 +360,7 @@ class _Server(ThreadingHTTPServer):
         self.fail_vision = False
         self.fail_chat_containing: str | None = None
         self.fail_keywords = False
+        self.keywords_reply: str | None = None
         self.fail_embed_containing: str | None = None
         self.rerank_fault: str | None = None
         self.rerank_fault_query: str | None = None
@@ -473,6 +476,15 @@ class FakeOpenAIServer:
     @fail_keywords.setter
     def fail_keywords(self, value: bool) -> None:
         self._server.fail_keywords = value
+
+    @property
+    def keywords_reply(self) -> str | None:
+        """設為字串時，關鍵字抽取請求（帶 response_format）的回覆內容改成該字串；None 為合法的 KEYWORDS_REPLY。"""
+        return self._server.keywords_reply
+
+    @keywords_reply.setter
+    def keywords_reply(self, value: str | None) -> None:
+        self._server.keywords_reply = value
 
     @property
     def fail_embed_containing(self) -> str | None:

@@ -9,6 +9,12 @@ rerank_model_func。這裡用 lightrag 內建的 OpenAI 相容 helper 與通用 
 - embedding 用非對稱：文件端不加前綴，查詢端加 EMBED_QUERY_PREFIX
   （LightRAG 以 context="document"／"query" 區分）。
 - vision 呼叫明確帶 max_tokens，避免 server 的預設值截斷圖表描述。
+- 抽關鍵字（LightRAG 傳 keyword_extraction=True）的請求照樣帶 response_format（同一份 JSON schema），讓 .env 換成
+  支援限制輸出格式的後端時照常收到 schema；但 response_format 傳 dict 而不是 pydantic 類別。LightRAG 的 openai binding
+  傳類別時，SDK 的 chat.completions.parse() 會用 pydantic 嚴格驗證回應，輸出有小錯（例如陣列少了 `]`）就拋
+  ValidationError，擋在 LightRAG 自己的 json_repair 之前；傳 dict 時 SDK 不解析，rag_lab 拿到模型原文，
+  再照 LightRAG 的步驟（remove_think_tags、json_repair.loads）解析並整理成關鍵字格式。解析不出關鍵字格式時拋
+  EndpointError（不重試、不改 temperature）。
 - 三個函式的失敗都包成 EndpointError，訊息帶端點名稱（LLM／VLM／Embedding）與位址：
   LightRAG 匯入失敗的訊息只含原例外文字，不指出是哪個端點。原例外以 __cause__ 保留，
   訊息內含原例外文字；API 金鑰不會出現在例外文字中，也不會被寫進訊息。
@@ -39,17 +45,20 @@ rerank_model_func。這裡用 lightrag 內建的 OpenAI 相容 helper 與通用 
 已知極限：描述只計數 caption 呼叫本身的例外；呼叫成功但回覆內容解析失敗（RAG-Anything 內部另有 fallback）
 不會被計到。寫入只計批次處理的失敗，備援的逐項處理自己的單項失敗不計。
 
-Dependencies: lightrag-hku、raganything（由 raganything 帶入）；tenacity 為 lightrag 的相依。
+Dependencies: lightrag-hku、raganything（由 raganything 帶入）；tenacity、json_repair、openai 為 lightrag 的相依。
 """
 
 import base64
+import json
 import math
 import socket
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
+import json_repair
 import numpy as np
+import openai
 from tenacity import RetryError
 
 from rag_lab.config import get_settings, reject_unmanaged_library_env
@@ -59,7 +68,8 @@ reject_unmanaged_library_env()
 
 from lightrag.llm.openai import openai_complete_if_cache, openai_embed  # noqa: E402
 from lightrag.rerank import generic_rerank_api  # noqa: E402
-from lightrag.utils import EmbeddingFunc  # noqa: E402
+from lightrag.types import GPTKeywordExtractionFormat  # noqa: E402
+from lightrag.utils import EmbeddingFunc, remove_think_tags  # noqa: E402
 from raganything.image_signature import image_mime_type  # noqa: E402
 
 # ==============================
@@ -235,13 +245,94 @@ def describe_failures(description_failed: int, write_failed: int) -> str:
 # ==============================
 
 
+KEYWORD_OUTPUT_HEAD_CHARS = 200
+
+# 抽關鍵字請求帶的 response_format：和 openai SDK 由 pydantic 類別產生的內容逐字相同（name、strict、schema）。
+# 傳 dict 而不是類別，SDK 就不會用 pydantic 嚴格驗證回應，rag_lab 才拿得到模型原文（見 _parse_keyword_output）。
+# pydantic_function_tool 是 SDK 的公開函式，產生的 parameters 與 SDK 內部送出的 schema 相同。
+KEYWORD_RESPONSE_FORMAT: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": GPTKeywordExtractionFormat.__name__,
+        "schema": openai.pydantic_function_tool(GPTKeywordExtractionFormat)["function"]["parameters"],
+        "strict": True,
+    },
+}
+
+
+def _parse_keyword_output(output: str) -> str | None:
+    """把抽關鍵字的模型原文整理成 LightRAG 要的格式；解析步驟和 LightRAG 相同（先去 think 標籤，再 json_repair）。
+
+    解析結果必須是物件，且 high_level_keywords、low_level_keywords 至少有一個是陣列。陣列只保留字串項目；
+    欄位不存在或不是陣列時當成空陣列。兩個欄位都是空陣列但格式正確不算失敗，照現在交給 LightRAG 處理。
+
+    Args:
+        output: 模型回覆的原文。
+
+    Returns:
+        整理後的 JSON 字串（兩個欄位都是字串陣列）；解析不出關鍵字的格式時為 None。
+    """
+    try:
+        data = json_repair.loads(remove_think_tags(output))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    fields = ("high_level_keywords", "low_level_keywords")
+    if not any(isinstance(data.get(field), list) for field in fields):
+        return None
+    keywords = {
+        field: [item for item in data[field] if isinstance(item, str)] if isinstance(data.get(field), list) else []
+        for field in fields
+    }
+    return json.dumps(keywords, ensure_ascii=False)
+
+
 async def llm_model_func(
     prompt: str,
     system_prompt: str | None = None,
     history_messages: list[dict[str, Any]] | None = None,
     **kwargs: Any,
 ) -> str:
-    """文字 LLM 呼叫（實體抽取、答案生成）。
+    """文字 LLM 呼叫（實體抽取、答案生成、抽關鍵字）。
+
+    抽關鍵字（LightRAG 傳 keyword_extraction=True）的請求照樣帶 response_format，但回應不經 SDK 嚴格驗證：
+    LightRAG 的 openai binding 傳 pydantic 類別時，SDK 會用 pydantic 驗證回應，輸出有小錯（例如陣列少了 `]`）
+    就拋 ValidationError，擋在 LightRAG 自己的 json_repair 之前。這裡改傳 dict 形式的同一份 schema，
+    拿到模型原文後用 json_repair 解析、整理成關鍵字格式再交給 LightRAG。
+
+    Args:
+        prompt: 使用者提示。
+        system_prompt: 系統提示。
+        history_messages: 歷史訊息。
+        **kwargs: 轉給 openai_complete_if_cache；keyword_extraction=True 時改走上述抽關鍵字路徑。
+
+    Returns:
+        模型回覆文字；抽關鍵字時是整理後的關鍵字 JSON 字串。
+
+    Raises:
+        EndpointError: LLM 呼叫失敗；或抽關鍵字的輸出解析不出關鍵字格式（訊息附輸出開頭最多
+            KEYWORD_OUTPUT_HEAD_CHARS 字元）。
+    """
+    if kwargs.pop("keyword_extraction", False):
+        kwargs["response_format"] = KEYWORD_RESPONSE_FORMAT
+        output = await _complete(prompt, system_prompt, history_messages, **kwargs)
+        parsed = _parse_keyword_output(output)
+        if parsed is None:
+            raise EndpointError(
+                "LLM", get_settings().llm_base_url, f"抽關鍵字的輸出不是合法的 JSON：{output[:KEYWORD_OUTPUT_HEAD_CHARS]}"
+            )
+        return parsed
+    return await _complete(prompt, system_prompt, history_messages, **kwargs)
+
+
+async def _complete(
+    prompt: str,
+    system_prompt: str | None,
+    history_messages: list[dict[str, Any]] | None,
+    **kwargs: Any,
+) -> str:
+    """送一次 LLM 呼叫，失敗時包成 EndpointError。
 
     Args:
         prompt: 使用者提示。
