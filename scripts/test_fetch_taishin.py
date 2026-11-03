@@ -325,20 +325,29 @@ def debit_info_html(path: str) -> str:
 
 
 def discount_href(discount_id: str) -> str:
-    """richart.tw 優惠細則頁的連結（相對路徑，和真實頁面一樣）。"""
+    """richart.tw 優惠細則頁的連結（相對路徑，和真實頁面一樣）。
+
+    Args:
+        discount_id: 優惠細則的 id（網址 query 的 discount 值）。
+
+    Returns:
+        細則頁的相對路徑（含 query）。
+    """
     return RICHART_DISCOUNT_FORMAT.format(id=discount_id)
 
 
-def richart_page_html(label: str, hrefs: list[str]) -> str:
+def richart_page_html(label: str, hrefs: list[str], switch_plans: str | None = None) -> str:
     """產生 richart.tw 的卡片頁：主內容區是 id="main-container"，含優惠細則連結，導覽與頁尾在主內容區外。
 
     Args:
         label: 放進主內容區的文字，讓各頁內容不同。
         hrefs: 主內容區裡的連結（優惠細則、優惠列表、外部網域的連結等，原樣放進 href）。
+        switch_plans: 「可每日切換方案」彈窗（id="modalSwitchPlans"）的文字，放在主內容區外面、不巢狀；None 表示頁面沒有這個彈窗。
 
     Returns:
         卡片頁的 HTML。
     """
+    modal = "" if switch_plans is None else f'<div class="modal fade" id="modalSwitchPlans">{switch_plans}</div>'
     links = "".join(f'<a class="btn" href="{href}">看優惠詳情</a>' for href in hrefs)
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>Richart</title>
@@ -349,6 +358,7 @@ def richart_page_html(label: str, hrefs: list[str]) -> str:
   <div class="section"><h1>{label}</h1><img src="data:image/png;base64,AAAA">{links}</div>
   <script>var RICHART_INNER_SCRIPT_TEXT = 1;</script>
 </div>
+{modal}
 <div class="modal fade" id="modalOutside">RICHART-OUTSIDE-MODAL-TEXT</div>
 <div class="main-footer">RICHART-FOOTER-TEXT</div>
 </body></html>"""
@@ -1857,6 +1867,38 @@ class RichartCardPageTests(ScriptTestCase):
         for text in ("RICHART_SCRIPT_TEXT", "RICHART_INNER_SCRIPT_TEXT", "RICHART-NAV-TEXT", "RICHART-OUTSIDE-MODAL-TEXT", "RICHART-FOOTER-TEXT"):
             self.assertNotIn(text, received)
         self.assertIn(f'<base href="{self.richart_server.base_url}{RICHART_DEBIT_PATH}">', received)
+
+    def test_switch_plans_modal_outside_the_main_container_is_printed_after_the_main_content(self) -> None:
+        self.richart_routes[RICHART_CREDIT_PATH] = (
+            200,
+            richart_page_html("RICHART-CREDIT", [], switch_plans="SWITCH-PLANS-STORE-LIST").encode(),
+        )
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        credit = (self.out / "richart" / "richart_credit-card.pdf").read_text(encoding="utf-8", errors="replace")
+        self.assertLess(credit.index("RICHART-CREDIT"), credit.index("SWITCH-PLANS-STORE-LIST"))
+        self.assertNotIn("RICHART-OUTSIDE-MODAL-TEXT", credit)
+        debit = (self.out / "richart" / "richart_debit-card.pdf").read_text(encoding="utf-8", errors="replace")
+        self.assertIn("RICHART-DEBIT", debit)
+        self.assertNotIn("SWITCH-PLANS", debit)
+
+    def test_changing_only_the_switch_plans_modal_counts_as_a_content_change_in_update_mode(self) -> None:
+        self.richart_routes[RICHART_CREDIT_PATH] = (
+            200,
+            richart_page_html("RICHART-CREDIT", [], switch_plans="STORES-V1").encode(),
+        )
+        self.assertEqual(self.run_script().returncode, 0)
+        self.richart_routes[RICHART_CREDIT_PATH] = (
+            200,
+            richart_page_html("RICHART-CREDIT", [], switch_plans="STORES-V2").encode(),
+        )
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        records = {r["filename"]: r["result"] for r in self.manifest() if r["category"] == "Richart 卡片頁"}
+        self.assertEqual(records, {"richart_debit-card.pdf": "未變", "richart_credit-card.pdf": "內容變更"})
+        credit = (self.out / "richart" / "richart_credit-card.pdf").read_text(encoding="utf-8", errors="replace")
+        self.assertIn("STORES-V2", credit)
+        self.assertNotIn("STORES-V1", credit)
 
     def test_page_without_the_main_container_is_a_failure_and_the_other_page_is_still_downloaded(self) -> None:
         self.richart_routes[RICHART_CREDIT_PATH] = (200, card_html_without_main_content().encode())

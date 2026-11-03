@@ -136,3 +136,24 @@
   - 兩個來源的卡款沒有交集；回饋條款文字高度重複（Richart 細則 277 的 14 個長句有 10 個出現在官網 Visa金融卡頁）。
   - mkpcard 活動列表每筆有「適用卡別」欄位（「信用卡」或「信用卡/簽帳金融卡」），各分類第 1 頁 87 筆中 23 筆含簽帳金融卡；不能靠標題判斷。
 - 背景：2026-10-30 使用者提出這個需求時，排定在台新信用卡 spec 的 ticket 09 之後另開 spec，並用增量匯入、同一份題庫前後比對。
+
+## Comments
+
+### code-review 修正（2026-11-03）
+
+使用者同意修正以下 7 項：
+
+1. `rag_lab/evaluation.py` `resolve_modes`：開頭先把 modes 轉成 tuple 再檢查，generator 等只能走訪一次的 iterable 與 list 行為相同；型別標註改 `Iterable[str]`。新增 Python API 測試（`EvaluateModesTest`）。
+2. `rag_lab/pipeline.py` 模組函式 `evaluate`：把 `resolve_modes` 的結果傳給 `Session.evaluate`，不再傳原始輸入。ASSUMPTION：`Session.evaluate` 是公開方法，仍會自己呼叫 `resolve_modes`；對已整理過的 tuple 再呼叫一次得到相同結果，錯誤訊息與結束碼不變。CLI `_run_eval` 本來就傳整理後的 tuple（它也要用同一份 modes 排報表欄位），沒有改動。
+3. `scripts/fetch_taishin.py` `find_redirect_target`：只在落地頁 `id="centercontainer"` 內找 `location.replace`；沒有 `centercontainer` 時記為找不到轉址目標。新增 `extract_element`（原樣取元素，不拿掉 `<script>`，因為轉址就在 `<script>` 裡）。
+4. Richart 卡片頁轉檔與更新模式比對同時取 `main-container` 與 `modalSwitchPlans`（`extract_main_content` 的 `also_include`，依頁面順序）；沒有彈窗的頁照常。優惠細則類別不變。ASSUMPTION：彈窗與主內容區重疊（巢狀）時只收先出現的那個，不重複收；找不到彈窗不算失敗。
+5. `docs/architecture.md`：補 `evaluate`／`Session.evaluate` 的 `modes` 參數、`resolve_modes`、`ValueError`。
+6. `tests/test_python_api.py` `chat_requests`：docstring 補 Args／Returns。
+7. `scripts/test_fetch_taishin.py` `discount_href`：docstring 補 Args／Returns。
+
+不修的 4 項：
+
+- 轉址 scheme／斜線：是推測的情境，而且失敗時不會下載錯頁。
+- Richart 卡片頁重複請求：每次執行多 2 個請求，約 4 秒；已在模組說明記為 ASSUMPTION。
+- `run.collect_failures` 旁路：屬重構，使用者沒同意，不動。
+- 收集函式重複：屬重構，使用者沒同意，不動。

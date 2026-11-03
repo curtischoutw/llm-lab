@@ -198,6 +198,8 @@
   取出的文字量是簽帳金融卡頁約 1,918 字、信用卡頁約 2,276 字、細則 277 約 1,673 字（整頁含導覽與頁尾約 2,592／4,572／2,234 字）。
   頁面是伺服器端直接渲染的 HTML，不用 JS 就有內容；簽帳金融卡頁的 592,344 字元中有 4 張 base64 內嵌圖片，圖片留在主內容區裡，
   不影響文字，交給 Chrome 時是本機 HTML 裡的 data: 網址，不是額外的請求。找不到 main-container 的頁面記為失敗（同其他網頁類）。
+  Richart 卡片頁（不含優惠細則）轉檔時，除了 main-container 還收 id="modalSwitchPlans"，兩者依頁面上的順序放進列印的 HTML，
+  沒有這個彈窗的頁照常只收 main-container；更新模式比對的主內容也包含彈窗，彈窗變了就重新轉檔。
 - Richart 優惠細則的連結收集（find_discount_links）不用 find_page_links，因為後者只收沒有 query 的連結，而細則的 id 在 query 裡
   （?discount=<id>）。兩個卡片頁的所有 <a href> 都看，連結以卡片頁網址解析；只收網域和 richart.tw 前綴相同（環境變數替換後以替換值為準）、
   路徑是 /TSDIB_RichartWeb/discount/discount-details、query 有 discount=<數字> 的連結，網址整理成只留 discount 一個 query
@@ -228,9 +230,9 @@
 - 下載的內容是不可信資料：腳本不執行它們；外部命令用參數列表呼叫。
 
 已知極限：
-- Richart 信用卡頁的「可每日切換方案」彈窗（id="modalSwitchPlans"，各方案的適用商店清單，共 7 段，約 2,100 字）在 id="main-container"
-  外面，不在 PDF 裡；頁面上的方案摘要（方案名稱與最高回饋）在主內容區內。簽帳金融卡頁與細則頁沒有這類主內容區外的內文
-  （2026-11-02 盤點的三份 HTML）。
+- Richart 卡片頁只額外收信用卡頁的「可每日切換方案」彈窗（id="modalSwitchPlans"，各方案的適用商店清單，共 7 段，約 2,100 字、
+  HTML 約 12,600 字元），它在 id="main-container" 外面、不巢狀（2026-11-02 盤點的信用卡頁）。主內容區外的其他元素（導覽、頁尾、
+  其他彈窗）不收。簽帳金融卡頁與細則頁沒有這類主內容區外的內文（盤點的三份 HTML）。
 - 收集 Richart 優惠細則的連結時，簽帳金融卡頁與信用卡頁各請求一次，和 Richart 卡片頁類別下載同兩頁的請求分開
   （ASSUMPTION：不為了省 2 個請求，在兩個類別之間傳遞頁面內容）。每次執行都有這 2 個請求，包括不加 --update 而本地已有卡片頁時；
   每個頁面（簽帳金融卡頁約 650 KB）最多請求 2 次。
@@ -782,8 +784,8 @@ def strip_active_content(fragment: str) -> str:
     return "".join(stripper.parts)
 
 
-def extract_element(page_html: str, attr: str, value: str) -> str | None:
-    """取出第一個符合條件的元素（含自身），內容原樣保留（含 <script>）。
+def _find_element_span(page_html: str, attr: str, value: str) -> tuple[int, int] | None:
+    """找出第一個符合條件的元素（含自身）在原始 HTML 裡的起訖位置。
 
     Args:
         page_html: 原始 HTML。
@@ -791,7 +793,7 @@ def extract_element(page_html: str, attr: str, value: str) -> str | None:
         value: 屬性值或 class 名稱。
 
     Returns:
-        元素的原始 HTML；找不到、或元素沒有結束標籤時為 None。
+        (起點, 終點) 字元位置，page_html[起點:終點] 是元素本身；找不到、或元素沒有結束標籤時為 None。
     """
     finder = _MainContentFinder(attr, value)
     finder.feed(page_html)
@@ -803,24 +805,55 @@ def extract_element(page_html: str, attr: str, value: str) -> str | None:
         offsets.append(offsets[-1] + len(line) + 1)
     begin = offsets[finder.start[0] - 1] + finder.start[1]
     close = offsets[finder.end[0] - 1] + finder.end[1]
-    stop = page_html.index(">", close) + 1
-    return page_html[begin:stop]
+    return begin, page_html.index(">", close) + 1
 
 
-def extract_main_content(page_html: str, attr: str, value: str) -> str | None:
+def extract_element(page_html: str, attr: str, value: str) -> str | None:
+    """取出第一個符合條件的元素（含自身），內容原樣保留（含 <script>）。
+
+    Args:
+        page_html: 原始 HTML。
+        attr: 用哪個屬性找：id（屬性值等於 value）或 class（class 含 value 這個名稱）。
+        value: 屬性值或 class 名稱。
+
+    Returns:
+        元素的原始 HTML；找不到、或元素沒有結束標籤時為 None。
+    """
+    span = _find_element_span(page_html, attr, value)
+    return None if span is None else page_html[span[0] : span[1]]
+
+
+def extract_main_content(
+    page_html: str, attr: str, value: str, also_include: tuple[tuple[str, str], ...] = ()
+) -> str | None:
     """取出第一個符合條件的元素（含自身），並拿掉會執行或載入外部內容的部分（strip_active_content）。
 
     Args:
         page_html: 原始 HTML。
         attr: 主內容區用哪個屬性找：id（屬性值等於 value）或 class（class 含 value 這個名稱）。
         value: 屬性值或 class 名稱。
+        also_include: 還要一起收的其他元素，每個是 (屬性, 值)，找法同主內容區；依元素在頁面上的順序和主內容區排在一起，
+            找不到的不收（不算失敗），位置落在已收的元素裡面的不重複收。
 
     Returns:
-        主內容區的 HTML（不含 <script>、<style>、<iframe>、樣式表連結、事件屬性與 javascript: 網址）；
-        找不到、或元素沒有結束標籤時為 None。
+        主內容區（加上 also_include 找到的元素）的 HTML（不含 <script>、<style>、<iframe>、樣式表連結、
+        事件屬性與 javascript: 網址），元素之間以換行隔開；主內容區找不到、或沒有結束標籤時為 None。
     """
-    element = extract_element(page_html, attr, value)
-    return None if element is None else strip_active_content(element)
+    main = _find_element_span(page_html, attr, value)
+    if main is None:
+        return None
+    spans = [main]
+    for extra_attr, extra_value in also_include:
+        extra = _find_element_span(page_html, extra_attr, extra_value)
+        if extra is not None:
+            spans.append(extra)
+    parts: list[str] = []
+    covered_until = -1
+    for begin, stop in sorted(spans):
+        if begin >= covered_until:
+            parts.append(page_html[begin:stop])
+            covered_until = stop
+    return strip_active_content("\n".join(parts))
 
 
 def build_print_html(main_content: str, base_url: str) -> str:
@@ -1650,6 +1683,7 @@ def web_page_producer(
     convert: Callable[[Tools, Path, Path, Path], None],
     main_content: tuple[str, str] = ("id", "centercontainer"),
     inspect: Callable[[Record, str], None] | None = None,
+    also_include: tuple[tuple[str, str], ...] = (),
 ) -> Callable[[Run, Category, str, str, Path, Record], None]:
     """產生「下載網頁、取出主內容區、轉檔」的 produce 函式。
 
@@ -1658,6 +1692,7 @@ def web_page_producer(
         main_content: 主內容區怎麼找，(屬性, 值)，傳給 extract_main_content；預設是 id="centercontainer"。
         inspect: 原始 HTML 存檔後、取主內容區前呼叫，參數是 (清單紀錄, 頁面文字)；可以補紀錄，
             或拋出 SkipDocument 讓這一頁不轉檔。
+        also_include: 主內容區以外還要一起轉檔的元素，傳給 extract_main_content（Richart 信用卡頁主內容區外的彈窗）。
 
     Returns:
         可放進 Category.produce 的函式。
@@ -1688,7 +1723,7 @@ def web_page_producer(
         page = decode_page(raw)
         if inspect is not None:
             inspect(record, page)
-        content = extract_main_content(page, *main_content)
+        content = extract_main_content(page, *main_content, also_include)
         if content is None:
             raise FetchError("找不到主內容區")
         print_path.write_text(build_print_html(content, url), encoding="utf-8")
@@ -1702,6 +1737,7 @@ def web_page_refresher(
     main_content: tuple[str, str] = ("id", "centercontainer"),
     inspect: Callable[[Record, str], None] | None = None,
     also_compare: Callable[[Run, str, str], object] | None = None,
+    also_include: tuple[tuple[str, str], ...] = (),
 ) -> Callable[[Run, Category, str, str, Path, Record], bool]:
     """產生更新模式的 refresh 函式：重新取得網頁，主內容區和存檔的上一份不同才重新轉檔。
 
@@ -1712,6 +1748,7 @@ def web_page_refresher(
             新舊頁面的值不同也算變更（活動頁用它比主視覺網址，主視覺在主內容區外面；grill Q30）。
         inspect: 取得頁面、比對前呼叫，參數是 (清單紀錄, 頁面文字)；可以補紀錄，或拋出 SkipDocument 讓這一頁不比對、不轉檔
             （活動頁用它補活動期間並判斷過期，同 web_page_producer 的 inspect）。
+        also_include: 主內容區以外還要一起轉檔、一起比對的元素，必須和同一個類別的 web_page_producer 相同。
 
     Returns:
         可放進 Category.refresh 的函式。
@@ -1720,7 +1757,7 @@ def web_page_refresher(
     def refresh(run: Run, category: Category, url: str, name: str, target: Path, record: Record) -> bool:
         """重新取得網頁並比對主內容區；不同才轉檔，轉檔成功後才換掉文件、列印用 HTML 與存檔的原始 HTML。
 
-        比對的是 extract_main_content 的結果（轉檔實際用的那一塊）加上 also_compare 指定的東西，所以其餘的差異
+        比對的是 extract_main_content 的結果（轉檔實際用的那一塊，含 also_include 的元素）加上 also_compare 指定的東西，所以其餘的差異
         （例如 <head> 的 _csrf token）不算變更，存檔的原始 HTML 也不換。存檔的原始 HTML 不存在（無法比對）時視為變更。
         換檔的順序是文件、列印用 HTML、原始 HTML：原始 HTML 是下次比對的基準，最後換，中途中斷時下次還會比對到差異並重試。
 
@@ -1745,12 +1782,12 @@ def web_page_refresher(
         page = decode_page(raw)
         if inspect is not None:
             inspect(record, page)
-        content = extract_main_content(page, *main_content)
+        content = extract_main_content(page, *main_content, also_include)
         if content is None:
             raise FetchError("找不到主內容區")
         if raw_path.is_file():
             saved = saved_html(raw_path)
-            if extract_main_content(saved, *main_content) == content and (
+            if extract_main_content(saved, *main_content, also_include) == content and (
                 also_compare is None or also_compare(run, url, saved) == also_compare(run, url, page)
             ):
                 record.html_sha256 = sha256_of(raw_path)
@@ -2414,6 +2451,8 @@ DEBIT_INFO = Category(
     produce=web_page_producer(print_with_chrome),
     refresh=web_page_refresher(print_with_chrome),
 )
+# Richart 信用卡頁主內容區（main-container）外的「可每日切換方案」彈窗，卡片頁轉檔時一起收
+RICHART_EXTRA_CONTENT = (("id", "modalSwitchPlans"),)
 RICHART_CARDS = Category(
     name="Richart 卡片頁",
     list_label="寫死的網址",
@@ -2430,8 +2469,8 @@ RICHART_CARDS = Category(
     keeps_html=True,
     reads_period=False,
     collect=collect_richart_cards,
-    produce=web_page_producer(print_with_chrome, main_content=("id", "main-container")),
-    refresh=web_page_refresher(print_with_chrome, main_content=("id", "main-container")),
+    produce=web_page_producer(print_with_chrome, main_content=("id", "main-container"), also_include=RICHART_EXTRA_CONTENT),
+    refresh=web_page_refresher(print_with_chrome, main_content=("id", "main-container"), also_include=RICHART_EXTRA_CONTENT),
 )
 RICHART_DISCOUNTS = Category(
     name="Richart 優惠細則",
