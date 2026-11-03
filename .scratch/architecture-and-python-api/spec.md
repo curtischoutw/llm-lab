@@ -104,7 +104,7 @@ rag-anything-lab 的 7 張 ticket 都已結案，知識庫（3 篇論文）也�
 - 範例裡的錯誤處理示範、回傳結構整理、檢索模式比較。
 - 依函式逐一說明的 API 參考文件。
 - 之前記下的其他範圍外問題：
-  - 經由 symlink 重複 ingest 時，parse cache 不會命中；
+  - 經由 symlink 重複 ingest 時，parse cache 不會命中（2026-11-03 實測修正：同一條路徑重複匯入會命中，換一條路徑才不命中，見 README 第 4 節已知限制）；
   - `eval` 表格跳脫只處理 `\n`、`\r`；
   - 記憶體 watchdog 腳本沒有執行權限；
   - ticket 04 驗收條件原文仍是舊的 30B 寫法。
