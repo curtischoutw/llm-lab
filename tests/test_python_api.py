@@ -53,6 +53,7 @@ from tests.test_pipeline import (
 # 步驟 cache:<檔名> 匯入文件旁邊的另一個檔案，印出 summary.answer_cache_cleared；
 # 步驟 rewrite:<檔名>:<標記> 把文件旁邊的這個 PDF 替身改寫成帶有版本標記的新內容（假 mineru 的 `% fake version:` 行，文件 ID 隨之改變）；
 # 步驟 reject:<檔名>,<檔名>… 一次匯入這些文件，印出拋出的例外類別與訊息（預期不支援的格式整批被拒絕）；
+# 步驟 query_error 問固定的問題，印出拋出的例外類別與訊息（沒有例外時類別印 ok）；
 # 步驟 query_poisoned 問一個題目文字含 Poisoned 的問題，印出拋出的例外類別與訊息（測試讓 rerank 只對這種題目出錯）；
 # 步驟 evaluate_modes:<模式>,<模式>… 以 modes 參數呼叫 evaluate，每一列印出各格答案（失敗印 ERROR）；
 # 步驟 evaluate_iter_modes:<模式>,<模式>… 同上，但 modes 傳的是 generator（只能走訪一次的 iterable）；
@@ -186,6 +187,9 @@ with pipeline.Session() if use_session else contextlib.nullcontext(pipeline) as 
             print(f"reject {name} {message}")
         elif step == "query":
             print(f"query {api.query('What is Fake Entity Alpha?', mode='mix')}")
+        elif step == "query_error":
+            name, message = error_name(lambda: api.query("What is Fake Entity Alpha?", mode="mix"))
+            print(f"query_error {name} {' '.join(message.split())}")
         elif step == "query_poisoned":
             name, message = error_name(lambda: api.query("Poisoned: what is Fake Entity Beta?", mode="mix"))
             print(f"query_poisoned {name} {' '.join(message.split())}")
@@ -273,7 +277,7 @@ class PythonApiCase(PipelineCase):
         """以子行程在同一個 process 內依序執行步驟。
 
         Args:
-            *steps: ingest、stats:<檔名>、doc:<檔名>、classify:<檔名>,…、sync:<資料夾>[:prune]、into:<檔名>:<資料夾>、bare_prune:<檔名>、cache:<檔名>、rewrite:<檔名>:<標記>、reject:<檔名>,…、query、query_poisoned、evaluate、evaluate_modes:<模式>,…、evaluate_iter_modes:<模式>,…、evaluate_bad_modes:<模式>,…、instances、second、
+            *steps: ingest、stats:<檔名>、doc:<檔名>、classify:<檔名>,…、sync:<資料夾>[:prune]、into:<檔名>:<資料夾>、bare_prune:<檔名>、cache:<檔名>、rewrite:<檔名>:<標記>、reject:<檔名>,…、query、query_error、query_poisoned、evaluate、evaluate_modes:<模式>,…、evaluate_iter_modes:<模式>,…、evaluate_bad_modes:<模式>,…、instances、second、
                 closed、thread、loop、bad_mode、orphan、init_fail、forget 的任意序列。
             mode: functions 呼叫模組函式；session 在同一個 Session 裡呼叫。
             question_texts: evaluate 步驟用的題目文字，依序是題目檔的每一題。
