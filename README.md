@@ -243,7 +243,8 @@ VLM、embedding 與 reranker（同一個 server，port 8081）：
 - 圖片的已知限制：沒有文字的圖片，MinerU 能抽出的內容很少，內容主要來自 VLM 的描述。實測 2 張圖片時（第 5 節），流程圖的 VLM 描述寫出了各節點的名稱，截圖的文字也被 OCR 出來，但兩張圖片各自的題目在 mix 模式都沒有答對，因為這些切塊沒有被選進查詢的 context。
 - 重複匯入同一張圖片會略過，不呼叫模型；匯入中斷後重新執行會重試，不會留下重複的紀錄。行為和 PDF 相同。
 - 太大的表格：RAG-Anything 把整張表放進同一個描述 prompt 與同一個 chunk。道路救援 PDF（`attachment_SPECIAL_2026.pdf`）的一張 80 列 × 21 欄表格，描述 prompt 達 20,731 token，`mlx_lm.server` 因此記憶體不足而停止產生。從 ticket 12 開始，`table_body` 超過 800 token（用 LightRAG 的 tokenizer 計算）的表格，匯入前先拿掉值為 1 的 `rowspan`／`colspan`（儲存格文字與合併儲存格不變）；縮短後仍超過就依列切成小表，每張小表重複表頭列（假設第一列是表頭）、各自描述、各自成為一個 chunk，原表每一列都在某一張小表裡。上限值的算法在 `rag_lab/tables.py` 的 docstring。那張道路救援的表縮短後 13,061 token，切成 25 張小表，最大的一張 780 token。800 token 以內的表格不改，送去描述的內容和以前相同；文件 ID、解析快取、已完整匯入的文件重新匯入時略過的行為都不變。已知限制：只處理 HTML 的 `table_body`（MinerU 的格式）；切開 `rowspan` 跨過的列時，跨列的儲存格會在下一張小表的第一列補一份，文字因此出現兩次。
-- 目前的台新知識庫裡，ticket 12 之前匯入的文件沒有切表：2,065 個 chunk 中有 32 個超過 2,000 token，全是表格分析 chunk，分布在 22 份文件（文件狀態的建立時間是 2026-10-29～31，都早於 ticket 12；最大 6,312 token）。查詢時 LightRAG 依 rerank 後的順序累加 chunk，遇到第一個放不下的就停，所以一個大表格 chunk 會擋住排在它後面的 chunk（terms-02 的原因）。重匯這 22 份的調查在 `.scratch/chunk-truncation/issues/01-investigate-oversized-chunk-blocks-context.md`。
+- 台新知識庫在 2026-11-03 重匯了 ticket 12 之前匯入、沒有切表的 22 份文件（第 5 節）：超過 2,000 token 的 chunk 從 32 個降到 2 個（最大 2,374 token）。查詢時 LightRAG 依 rerank 後的順序累加 chunk，遇到第一個放不下的就停（`lightrag/utils.py` 的 `truncate_list_by_token_size`）；重匯前一個大表格 chunk 會擋住排在它後面的 chunk；重匯後 eval 的 20 題都沒有被超過 2,000 token 的 chunk 擋住。terms-02 需要的 chunk 仍沒進 context，原因變成 rerank 排在第 12 名、累計 token 超過上限。調查在 `.scratch/chunk-truncation/issues/01-investigate-oversized-chunk-blocks-context.md`。
+- 解析快取與 symlink：RAG-Anything 解析快取的 key 含檔案的絕對路徑，不解析 symlink。`ingest <資料夾>` 傳給它的是資料夾底下的路徑（symlink 不解析），`ingest <單一檔案>` 傳的是解析過的實體路徑。所以同一份文件先用資料夾裡的 symlink、再用實體路徑匯入時，解析快取不命中（反過來的順序沒實測，依 key 的算法推論也不命中），多跑一次 MinerU（實測一份活動 PDF 23 秒），知識庫內容與對照表都不變（記「沒變」）；同一條路徑重複匯入會命中。
 - 圖、表、公式的描述失敗，或描述後的內容寫入知識庫失敗（例如 embedding 端點回 500）：RAG-Anything 會吞掉這些錯誤，仍把文件標成已完成。`ingest` 改為把那份文件記成失敗（文件狀態 `failed`），報告的 `匯入失敗` 一行寫出原因與端點，結束碼 1，同一批的其他文件照常匯入。修好端點後重新執行同一個 `ingest` 就會重試那份文件，先清掉舊紀錄再重匯，上次已成功的 LLM 呼叫命中快取；不需要刪除 `WORKING_DIR` 或 `PARSER_OUTPUT_DIR`。（ticket 12 之前的版本會把這種文件標成已完成，重新執行時略過；那時匯入的文件如果描述失敗過，現在仍是已完成，要重匯得先從知識庫刪掉那份文件的紀錄。）
 - Office 文件（PPT、Word、Excel，含舊格式 .ppt .doc .xls）：RAG-Anything 呼叫 LibreOffice 轉成 PDF，再交給 MinerU。轉出的 PDF 寫在 `PARSER_OUTPUT_DIR/office/` 底下，不會留在來源資料夾，所以下次匯入同一個資料夾時不會被當成新文件。需要先安裝 LibreOffice（第 1 節）。Office 文件的匯入報告，解析階段標籤是「解析（含 Office 轉 PDF）」，轉檔時間包含在裡面，沒有另外計時；PDF 和圖片的標籤是「解析」。
 - 匯入報告的時間：每份文件的耗時，以及解析、建圖、多模態三個階段的時間，都用 `time.perf_counter` 量，**不含電腦睡眠的時間**。同一份文件的三個階段時間加總不會超過它的耗時，差額是階段之外的步驟（查文件狀態、清除舊紀錄等）。2026-10-31 以前的報告，階段時間來自 RAG-Anything 回報的牆上時間，包含睡眠，不能和文件耗時比較（那次 `attachment_SPECIAL_2026.pdf` 的多模態階段 11,333.6 s、文件耗時 2,911.5 s）。
@@ -402,6 +403,14 @@ with Session() as session:
   - terms-02 需要的 chunk 一直沒進 context。
   - 跨卡題拆成每張卡各查一次（方案 C）的實驗：加 rerank 後，子問題的 context 合起來 cross-01、cross-02 都有 3/3 個關鍵字句，但答案仍沒有 ✓（cross-01 △、cross-02 最好 △）。錯在各卡的答案：別張卡的條款混進來，或看錯不回饋清單的例外。所以沒有實作，見 `.scratch/taishin-credit-card-kb/proposal-cross-card-subquestions.md`。
 - 驗收：mix 7 類中 5 類通過，沒有達到每類至少 1 題 ✓ 的標準。使用者在 2026-11-01 決定接受這個結果並結案（ticket 09）；標準與題目都沒有改。
+
+### 台新信用卡知識庫：重匯 22 份（2026-11-03）
+
+ticket 12（大表格切成小表）之前匯入的 22 份文件沒有切表。在知識庫副本上刪掉這 22 份、用現在的程式重新匯入（解析快取保留，沒有重跑 MinerU），量測後用副本取代正式知識庫。log 與腳本在 `output/chunk_trunc/`，原本的知識庫備份在 `output/kb_backups/rag_storage-20261103-before-reingest22/`。
+
+- 22 份全部成功，牆上時間 7 小時 53 分（匯入耗時加總 6 小時 47 分），每份 157–3,674 秒；VLM 呼叫 178 次全部成功；wired 記憶體最高 19 GB。
+- chunk 2,065 → 2,212 個，超過 2,000 token 的 32 → 2 個；實體 15,747 → 16,839，關係 31,239 → 34,218。文件仍是 311 份。
+- 只跑檢索的 20 題（mix＋rerank）：每題平均放進 context 的 chunk 6.35 → 8.2 個、涵蓋的文件 3.55 → 4.8 份；參考答案的關鍵字句進 context 的數量不變（50/60；60 句中 1 句在知識庫裡沒有這個字串），terms-02 仍是 0/3。答案沒有重跑 eval。
 
 ### 前一版知識庫
 
