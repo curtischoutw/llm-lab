@@ -21,24 +21,41 @@ td.l{text-align:left}</style></head><body>
 <tr><td class='l'>加入後卡別說錯題至少 1 題 ✓</td><td>0／2</td><td>0／2</td><td class='fail'>未通過</td></tr>
 <tr><td class='l'>有搞混句子的題數（28 題，不設門檻）</td><td>7</td><td>6</td><td>只記錄</td></tr></table></div>
 <h2>驗收沒通過的原因</h2>
-<p class='small'>下面「看得到的現象」都來自答案原文與判讀；「推測」沒有驗證過，因為這次沒有查各題實際送進模型的 context（檢索結果），所以還不能確定錯誤發生在檢索還是生成。</p>
+<p class='small'>依據：答案原文、兩位判讀者的判讀，以及 2026-11-04 的 context 檢查（見下一節）。</p>
 <h3>各題怎麼沒拿到 ✓</h3><ul>
-<li><a href='#debit-wrongcard-01'>debit-wrongcard-01</a>（✗）：問題把「Richart 卡」（信用卡，一般消費 0.3%）說成一般消費 0.5% 無上限。答案開頭寫「是的」，並說明 0.5% 是 Richart 簽帳金融卡的權益，也就是把使用者講的「Richart 卡」當成簽帳金融卡，沒有指出卡別說錯。答案還寫信用卡卡片頁 richart_credit-card.pdf「也說明一般消費享 0.5%」，這和該卡 0.3% 不符。</li>
-<li><a href='#debit-wrongcard-02'>debit-wrongcard-02</a>（✗）：切換刷（含 Pay著刷）只有信用卡台新 Richart 卡有，Visa金融卡沒有。答案照問題的前提寫出「把 Visa金融卡切換到 Pay著刷」的 5 個步驟，並說可享 3.8%。答案有引用 Richart 卡的卡片頁 card_cg047_card001.pdf，但沒有用它指出卡別錯誤。</li>
-<li><a href='#debit-confuse-01'>debit-confuse-01</a>（✗）：信用卡掛失 200 元、簽帳金融卡掛失補發 100 元。答案寫兩種卡的掛失手續費都是新臺幣 200 元、「兩者相同」，並說「適用於所有類型的台新銀行卡片」。寫 100 元的 debit_info_TSBankGridPage-000004.pdf 不在答案的引用清單裡。</li>
+<li><a href='#debit-wrongcard-01'>debit-wrongcard-01</a>（✗）：問題把「Richart 卡」（信用卡，一般消費 0.3%）說成一般消費 0.5% 無上限。答案開頭寫「是的」，並說明 0.5% 是 Richart 簽帳金融卡的權益，也就是把使用者講的「Richart 卡」當成簽帳金融卡，沒有指出卡別說錯。答案還寫信用卡頁 richart_credit-card.pdf「也說明一般消費享 0.5%」：這個網頁的「你是不是還想看」區塊確實列了「Richart Mastercard 簽帳金融卡 一般消費享0.5%無上限」，這段也進了 context。寫 0.3% 的信用卡段落有在 context 裡（第 4 段）。</li>
+<li><a href='#debit-wrongcard-02'>debit-wrongcard-02</a>（✗）：切換刷（含 Pay著刷）只有信用卡台新 Richart 卡有，Visa金融卡沒有。答案照問題的前提寫出「把 Visa金融卡切換到 Pay著刷」的 5 個步驟，並說可享 3.8%。加入前，寫明「切換刷」且含「信用卡」的 card_cg047_card001.pdf 段落在 context 第 3 段，答案一樣是 ✗；加入後這段被金融卡文件的段落換掉，留下的 card_cg047_card001.pdf 段落只寫「Pay著刷」，沒有「切換刷」，也沒有「信用卡」或「金融卡」字樣。</li>
+<li><a href='#debit-confuse-01'>debit-confuse-01</a>（✗）：信用卡掛失 200 元、簽帳金融卡掛失補發 100 元。答案寫兩種卡的掛失手續費都是新臺幣 200 元、「兩者相同」，並說「適用於所有類型的台新銀行卡片」。寫 100 元的 debit_info_TSBankGridPage-000004.pdf 段落有在 context 裡（第 5 段），答案沒有用它，也不在答案的引用清單裡。</li>
 <li><a href='#debit-confuse-02'>debit-confuse-02</a>（內容 ✓，最終 △）：兩個費用都答對，但「預借現金手續費」段和兩則註記沒有寫「信用卡」等卡別字樣，依卡別規則降為 △。兩位判讀者都標為邊界：若把這段視為接續開頭提到信用卡的那句，就不會降分，混淆題就會通過。</li></ul>
 <h3>共同的原因</h3><ul>
-<li>問題的前提錯了，答案照前提回答：卡別說錯題 2 題都沒有反駁使用者，rag_lab 沒有在回答時加上「先確認問題裡講的卡別」這類要求。</li>
-<li>名稱相近：「Richart 卡」（信用卡）和「Richart 簽帳金融卡」、「Richart Mastercard 簽帳金融卡」名稱只差幾個字。debit-wrongcard-01 與 cross-02（把台新雙幣卡寫成簽帳金融卡）的答案都同時引用了 richart_credit-card.pdf 和 richart_debit-card.pdf。</li>
-<li>不同卡片同一個項目的數字被合成一個：debit-confuse-01 把兩種卡的掛失手續費寫成同一個金額。</li>
-<li>推測（未驗證）：知識庫切成的段落與抽出的實體不一定帶有卡別。例如一段只寫「一般消費 0.5% 無上限」、沒寫是哪張卡，模型拿到這段時無法從段落本身判斷卡別。</li></ul>
+<li>多數錯誤發生在生成：debit-confuse-01、debit-wrongcard-01 的正確資料在加入後的 context 裡，debit-wrongcard-02 在加入前的 context 裡，模型仍照問題的前提回答，或把兩種卡的數字合成一個。rag_lab 沒有在回答時加上「先確認問題裡講的卡別」這類要求；回答模型是 Qwen3-4B-Instruct-2507-4bit。</li>
+<li>網頁的非主內容區塊混進了別種卡的資料：Richart 信用卡頁含簽帳金融卡的推薦區塊。這和 ticket 04 記下的金融卡卡片頁「信用卡優惠」輪播區是同一類問題。</li>
+<li>段落沒有卡別：知識庫的段落只有解析出來的原文，另外記著檔名。金融卡與 Richart 相關的 201 段中有 62 段沒有「信用卡」也沒有「金融卡」；信用卡卡片頁的檔名（例如 card_cg047_card001.pdf）也看不出卡別。</li>
+<li>名稱相近：「Richart 卡」（信用卡）和「Richart 簽帳金融卡」、「Richart Mastercard 簽帳金融卡」名稱只差幾個字。</li></ul>
+<h2>context 檢查（2026-11-04）</h2>
+<p class='small'>對 8 題分別在加入前（備份 output/kb_backups/rag_storage-20261104-before-debit05 的複本）與加入後的知識庫各跑一次 mix，取出 LightRAG 實際送進模型的實體、關係與段落（output/debit05/context_check.py，結果在 output/debit05/context/，只在本機）。16 個答案中有 16 個和 eval 結果檔相同：答案來自 eval 時寫入的快取；知識庫與查詢關鍵字（也有快取）沒變，所以這裡的 context 應該就是 eval 當時的 context（推論，eval 當時沒有存 context）。</p>
+<div class='wrap'><table><tr><th>題目</th><th>關鍵事實</th><th>加入前</th><th>加入後</th><th>換掉的段落數</th><th>判斷</th></tr>
+<tr><td class='l'><a href='#debit-wrongcard-01'>debit-wrongcard-01</a></td><td class='l'>信用卡 Richart 卡一般消費 0.3%</td><td>第 1 段／9 段</td><td>第 4 段／8 段</td><td>5</td><td class='l'>生成：0.3% 在 context 裡；排在前面的 3 段都寫 0.5% 無上限，其中一段來自信用卡頁的金融卡推薦區塊</td></tr>
+<tr><td class='l'><a href='#debit-wrongcard-02'>debit-wrongcard-02</a></td><td class='l'>Richart 卡頁寫明「切換刷」的段落</td><td>第 3 段／9 段</td><td>沒有／8 段</td><td>6</td><td class='l'>加入前：段落在 context 裡仍答錯（生成）；加入後：這段被金融卡段落換掉（檢索）</td></tr>
+<tr><td class='l'><a href='#debit-confuse-01'>debit-confuse-01</a></td><td class='l'>簽帳金融卡掛失補發 100 元</td><td>沒有／8 段</td><td>第 5 段／9 段</td><td>1</td><td class='l'>生成：加入後 100 元在 context 裡，答案仍寫兩種卡都是 200 元</td></tr>
+<tr><td class='l'><a href='#debit-confuse-02'>debit-confuse-02</a></td><td class='l'>簽帳金融卡跨國提款 1.5% 加 70 元</td><td>沒有／8 段</td><td>第 1 段／9 段</td><td>1</td><td class='l'>加入後檢索到，內容答對</td></tr>
+<tr><td class='l'><a href='#cross-02'>cross-02</a></td><td class='l'>台新雙幣卡國外消費 2.5%</td><td>沒有／8 段</td><td>沒有／8 段</td><td>4</td><td class='l'>檢索：雙幣卡頁 card_cg039 與昇恆昌頁 card_cg009 兩次都沒被檢索到</td></tr>
+<tr><td class='l'><a href='#rule-03'>rule-03</a></td><td class='l'>點數清除日 2030/1/31</td><td>第 1 段／8 段</td><td>第 1 段／8 段</td><td>2</td><td class='l'>生成：兩次都在第 1 段，加入後答成 2028/12/31</td></tr>
+<tr><td class='l'><a href='#switch-02'>switch-02</a></td><td class='l'>Chill刷 2026/7/8 起開放</td><td>第 5 段／10 段</td><td>第 5 段／8 段</td><td>5</td><td class='l'>生成：兩次都在 context 裡，兩次答案都沒寫</td></tr>
+<tr><td class='l'><a href='#switch-03'>switch-03</a></td><td class='l'>大筆刷通路清單（含遠東百貨，不含高鐵）</td><td>第 1 段／10 段</td><td>第 1 段／9 段</td><td>3</td><td class='l'>生成：兩次都在第 1 段，加入後寫高鐵 3.3%、遠東百貨 0.3%，參考答案是高鐵 0.3%、遠東百貨 3.3%</td></tr>
+</table></div>
+<ul>
+<li>token 預算：rerank 後保留 20 段，但 QUERY_MAX_TOTAL_TOKENS 12000 只放得進 8～10 段。加入金融卡後，8 題各有 1～6 段和加入前不同（見上表「換掉的段落數」，以段落 ID 比較）；rule-03、switch-02、switch-03 的關鍵段落沒有被換掉。</li>
+<li>信用卡 3 題變差：關鍵段落兩次都在 context 裡，前後 context 相近、答案不同，看起來是生成不穩定，不是知識庫少了資料。每次 eval 只跑一次，沒有量同一個知識庫重跑的差異。</li>
+<li>查詢關鍵字：LightRAG 把中文問題的關鍵字譯成英文，而且有譯錯（「台新」→ Taiwan New Bank、「簽帳金融卡」→ Signing account card、Handshake card），每題只對到 1～3 個實體，圖譜對檢索的幫助很小，段落主要由向量搜尋選出。知識庫 17151 個實體中有 10926 個名稱全由 ASCII 字元組成（英文字母、數字、標點）；另有 LightRAG 抽取提示詞的範例實體（Noah Carter、World Athletics Championship 等）各連到 300 多個段落，那些段落的內文都沒有這些字。這些問題在加入金融卡前就有，對答案的影響沒有量過。</li></ul>
 <h2>之後可以做的事（建議，本次沒有實作）</h2><ol>
-<li><b>先查 context</b>：對 debit-wrongcard-01、debit-confuse-01、cross-02 取出實際送進模型的段落，確認寫 100 元、0.3% 的段落有沒有被檢索到。有檢索到就是生成的問題，先做 2；沒有檢索到就是檢索的問題，先做 3、4。</li>
-<li><b>改回答的提示詞</b>：要求先判斷問題講的是哪一種卡；問題的卡別或前提與資料不符時，第一句先指出；答案中講權益或費用的每一段都寫出卡別；兩種卡數字不同時分開列，不要合成一個。</li>
-<li><b>匯入時把卡別寫進每一段</b>：依 GLOSSARY 的分類（信用卡／簽帳金融卡／晶片金融卡），在每份文件切出的段落前加上卡別與卡名，讓檢索與生成都看得到卡別。這需要重新匯入受影響的文件。</li>
-<li><b>查詢前整理問題</b>：把「Richart 卡」這類簡稱對應到 GLOSSARY 的正式卡名與卡別；問題同時提到兩種卡時，分別檢索再合併。</li>
-<li><b>評估方式</b>：卡別規則目前以 &lt;br&gt;&lt;br&gt; 分段逐字比對，debit-confuse-02 這類接續前文的段落是否算「沒寫卡別」有爭議；下次改規則前可以先把這個情況寫明。</li></ol>
-<p class='small'>2～4 都會改變回答方式，超出這份 spec 的範圍（grill Q9），要做時需要另開 spec，並用同一份 28 題題庫比較前後結果。</p>
+<li><b>改回答的提示詞</b>（影響的題目最多：debit-confuse-01、debit-wrongcard-01、debit-wrongcard-02（加入前），以及關鍵段落在 context 裡卻答錯的 rule-03、switch-02、switch-03）：要求先判斷問題講的是哪一種卡；問題的卡別或前提與資料不符時，第一句先指出；答案中講權益或費用的每一段都寫出卡別；兩種卡數字不同時分開列，不要合成一個。也可以比較更大的回答模型。</li>
+<li><b>清掉網頁的非主內容區塊</b>：Richart 信用卡頁的簽帳金融卡推薦區塊、金融卡卡片頁的「信用卡優惠」輪播區。改下載程式後要重新轉檔、重新匯入這些頁面。</li>
+<li><b>匯入時把卡別寫進每一段</b>：依 GLOSSARY 的分類（信用卡／簽帳金融卡／晶片金融卡），在每份文件切出的段落前加上卡別與卡名。要先做 2，否則信用卡頁裡的金融卡推薦會被標成信用卡；一份活動文件講好幾張卡時，不能整份標一個卡別。需要重新匯入。</li>
+<li><b>查詢關鍵字與實體的語言</b>：查出 LightRAG 為什麼把中文問題的關鍵字譯成英文、實體名稱多半是英文，以及能不能改成中文；改實體語言需要重新匯入。</li>
+<li><b>查詢前整理問題</b>：把「Richart 卡」這類簡稱對應到 GLOSSARY 的正式卡名與卡別；問題同時比較幾張卡時（例如 cross-02），分別檢索再合併。</li>
+<li><b>評估方式</b>：判讀時的卡別規則（grill Q22）目前以 &lt;br&gt;&lt;br&gt; 分段逐字比對，debit-confuse-02 這類接續前文的段落是否算「沒寫卡別」有爭議；下次改規則前可以先把這個情況寫明。</li></ol>
+<p class='small'>1～5 都會改變回答方式或知識庫，超出這份 spec 的範圍（grill Q9），要做時需要另開 spec，並用同一份 28 題題庫比較前後結果。</p>
 <h2>過程</h2><ul>
 <li>收錄 30 份：金融卡卡片頁 5、金融卡約定條款 PDF 4、金融卡說明頁 6、Richart 卡片頁 2、Richart 優惠細則 13（存款專區晶片金融卡首頁找不到主內容區，沒收）。</li>
 <li>加入前 eval：04:40:44～05:12:26（31 分 42 秒），28 格成功，知識庫 294 份，wired 最高 20 GB。</li>
