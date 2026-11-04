@@ -84,11 +84,11 @@ rag_lab 已經明確傳給 LightRAG／RAG-Anything 的參數對應的變數不�
 | 權益附件 | 權益子頁連到的 PDF（聯名卡、雙幣卡、企業卡的約定條款等）；只收官網網域，和下載區相同的網址略過 | `rights_attachments/` | PDF（原樣） | 17（2026-10-31：權益子頁連到 20 份 PDF，`_202003.pdf` 官網回 404，1 份已在下載區、1 份在外部網域 icash.com.tw 而略過） |
 | 活動 | 刷卡優惠列表分類 A–I 的活動詳情頁 | `offers/` | PDF（Chrome 列印） | 200（另 1 個過期略過）；2026-10-31 重跑時列表有 209 個，新增 8 份，共 208 |
 | 活動圖片 | 前 8 個有主視覺的活動頁的主視覺 | `offer_images/` | JPG、PNG | 8 |
-| 金融卡卡片頁 | 官網簽帳金融卡專區列表頁（`payment/`）上的群組落地頁，再取落地頁 JS 轉址目標的卡片頁（`card01/` 或 `card001/`） | `debit_cards/` | PDF（Chrome 列印） | 盤點時 5 張（Visa金融卡、元氣Visa金融卡、財富管理Visa金融卡、勞動保障卡、蝴蝶悠遊Debit卡），尚未實機下載 |
-| 金融卡約定條款 PDF | 約定條款頁（`payment/notice/TSBankGridPage-000003/`）上指向官網同網域的 PDF 連結；約定條款頁本身不存成文件，指向悠遊卡公司等外部網域的連結略過 | `debit_terms/` | PDF（原樣） | 盤點時 4 份（簽帳金融卡用卡須知、簽帳金融卡權益手冊、勞動保障卡約定事項、悠遊 Debit 卡特別約定條款），尚未實機下載 |
-| 金融卡說明頁 | 寫死的 7 個網址：`payment/notice/` 的 `TSBankGridPage-000004`（費用）、`000001`、`000340`（常見問題）、`000344`（Richart 摘要），存款專區 `deposit/debit-card/`、`card-list/`、`overseas-withdraw-cash-and-payment/`（晶片金融卡） | `debit_info/` | PDF（Chrome 列印） | 7，尚未實機下載（`deposit/debit-card/` 首頁盤點時沒抓過，沒有主內容區時記失敗） |
-| Richart 卡片頁 | richart.tw 的簽帳金融卡頁（`/TSDIB_RichartWeb/card/debit-card`）與信用卡頁（`/TSDIB_RichartWeb/card/credit-card`），寫死的兩個網址 | `richart/` | PDF（Chrome 列印） | 2，尚未實機下載 |
-| Richart 優惠細則 | 上面兩頁連到的 `/TSDIB_RichartWeb/discount/discount-details?discount=<id>`，同一個 id 只下載一次 | `richart_discounts/` | PDF（Chrome 列印） | 盤點時兩頁連到同一批 14 則，尚未實機下載 |
+| 金融卡卡片頁 | 官網簽帳金融卡專區列表頁（`payment/`）上的群組落地頁，再取落地頁 JS 轉址目標的卡片頁（`card01/` 或 `card001/`） | `debit_cards/` | PDF（Chrome 列印） | 5 張（Visa金融卡、元氣Visa金融卡、財富管理Visa金融卡、勞動保障卡、蝴蝶悠遊Debit卡；2026-11-03 首次實機下載） |
+| 金融卡約定條款 PDF | 約定條款頁（`payment/notice/TSBankGridPage-000003/`）上指向官網同網域的 PDF 連結；約定條款頁本身不存成文件，指向悠遊卡公司等外部網域的連結略過 | `debit_terms/` | PDF（原樣） | 4 份（簽帳金融卡用卡須知、簽帳金融卡權益手冊、勞動保障卡約定事項、悠遊 Debit 卡特別約定條款；2026-11-03 實機下載）。權益手冊 `debit_term_DM23_11110.pdf` 是 2 頁圖片，沒有文字層，匯入時由 MinerU OCR |
+| 金融卡說明頁 | 寫死的 7 個網址：`payment/notice/` 的 `TSBankGridPage-000004`（費用）、`000001`、`000340`（常見問題）、`000344`（Richart 摘要），存款專區 `deposit/debit-card/`、`card-list/`、`overseas-withdraw-cash-and-payment/`（晶片金融卡） | `debit_info/` | PDF（Chrome 列印） | 6（2026-11-03 實機下載）；`deposit/debit-card/` 首頁找不到主內容區，2026-11-03～04 三次下載都記失敗 |
+| Richart 卡片頁 | richart.tw 的簽帳金融卡頁（`/TSDIB_RichartWeb/card/debit-card`）與信用卡頁（`/TSDIB_RichartWeb/card/credit-card`），寫死的兩個網址 | `richart/` | PDF（Chrome 列印） | 2（2026-11-03 實機下載） |
+| Richart 優惠細則 | 上面兩頁連到的 `/TSDIB_RichartWeb/discount/discount-details?discount=<id>`，同一個 id 只下載一次 | `richart_discounts/` | PDF（Chrome 列印） | 13（2026-11-03 實機下載；兩頁連到同一批細則，盤點時 14 則，這次沒有 `380`） |
 
 - 資料夾雖然叫 `taishin_credit_card`，裡面也有金融卡：金融卡卡片頁放在 `debit_cards/`，檔名以 `debit_` 開頭（例如 `debit_card_cg003_card01.pdf`）。官網簽帳金融卡專區的群組編號（cg003、cg008）和信用卡卡片頁重複，`debit_` 前綴讓同編號的兩種卡片頁不會撞名（信用卡是 `card_cg003_…`）。資料夾名稱不改，已匯入的信用卡文件在對照表裡的路徑不變。
 - 金融卡卡片頁的群組落地頁（`payment/cgXXX/`）只有一段 `location.replace` 轉址，腳本讀出轉址目標，不執行 JS。轉址目標不在官網網域、或不在同一個 `payment/cgXXX/` 底下時，當成找不到轉址目標：那一張記成失敗並寫明原因，其他卡照常，更新模式下這次整個金融卡卡片頁類別不判斷下架。每次執行都要請求每個落地頁（本地名稱取決於轉址目標），所以已下載的卡也會多一次落地頁請求。
@@ -422,6 +422,24 @@ ticket 12（大表格切成小表）之前匯入的 22 份文件沒有切表。�
 - 內容變更 30 份活動只有 29 份替換：另 1 份只改了第一行標題，MinerU 的解析結果不含這一行，文件 ID 不變，記「沒變」。
 - `--prune` 刪除 23 份，24 分鐘；之後文件 294 份。
 - 依新舊兩版的文字差異出 7 題，用 mix 查詢：7 題答案都用到新值，沒有出現舊值。`eval/questions.taishin.jsonl` 的 20 題沒有因這次改版過時。
+
+### 台新知識庫：加入金融卡（2026-11-04）
+
+在知識庫加入金融卡相關文件，量測答案把信用卡和金融卡搞混的程度（金融卡 spec 的 ticket 05）。題庫加了 8 題金融卡題（`debit-` 開頭，共 28 題），加入前後各跑一次 mix。log 在 `output/debit05/`，紀錄在 `.scratch/debit-card/issues/05-baseline-ingest-and-measure.md`，加入前的知識庫備份在 `output/kb_backups/rag_storage-20261104-before-debit05/`。
+
+- 收錄範圍（第 2 節表格）：金融卡卡片頁 5、金融卡約定條款 PDF 4、金融卡說明頁 6、Richart 卡片頁 2、Richart 優惠細則 13，共 30 份。存款專區晶片金融卡首頁 `deposit/debit-card/` 找不到主內容區，沒有收。
+- 匯入：5 個資料夾逐一 `ingest`，30 份全部成功，牆上時間 2 小時 20 分；VLM 呼叫 114 次全部成功；wired 記憶體最高 19 GB。文件 294 → 324 份。
+- eval（28 題，mix）：加入前 31 分 42 秒，加入後 28 分 51 秒，都沒有失敗。加入後第一次執行時 server 已連續執行約 12 小時，第 2 題的生成讓 wired 達到 22 GB，watchdog 停掉 server；重啟 server 後重跑，wired 最高 15 GB。
+- 判讀規則多了一條：答案講權益或費用的段落沒寫「信用卡」「金融卡」「簽帳金融卡」「晶片金融卡」或帶卡別的卡名，最多算 △。所以這兩次的分數不能和 2026-11-01 的 mix ✓9 比較。
+
+| | 加入前 ✓ | 加入後 ✓ |
+|---|---|---|
+| 現有 20 題 | 1 | 0 |
+| 金融卡 8 題 | 0 | 2 |
+| 有搞混句子的題數（28 題） | 7 | 6 |
+
+- 驗收：現有 20 題少 1 題，符合「最多少 1 題」；金融卡四種題型中，事實題、否定題各 1 題 ✓，混淆題與卡別說錯題都是 0 題，沒有達到「每種至少 1 題」。
+- 加入後，卡別說錯題「我的 Richart 卡一般消費回饋是 0.5% 無上限，對嗎？」的答案變成「是的」，引用了 Richart 信用卡頁與簽帳金融卡頁；加入前的答案是否定。
 
 ### 前一版知識庫
 
