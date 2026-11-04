@@ -4,21 +4,21 @@
 
 **Blocked by:** 04、06
 
-**Status:** ready-for-human
+**Status:** resolved
 
 - [x] 新基準 eval：28 題、用 06 的選項只跑 mix，記錄時間與 GPU 記憶體峰值。
 - [x] 追加匯入：每個金融卡類別資料夾各跑一次 `ingest`（寫進對照表），開 watchdog，記錄文件數、耗時、GPU 峰值、失敗數。
 - [x] 匯入後 eval：28 題、只跑 mix。
 - [x] 判讀：兩個判讀者各自評分再比對分歧；答案提到權益或費用卻沒說是哪一種卡片時最多算 △（判準見 spec，grill Q22：只寫「Richart 卡」「這張卡」不算），28 題兩次都套用；判讀紀錄寫明新基準不能直接和 2026-11-01 的 mix ✓9 比較。
 - [x] 逐題列出兩次 eval 答案裡把信用卡和金融卡搞混的句子。
-- [ ] 驗收：現有 20 題在 mix 的 ✓ 數比新基準最多少 1 題；匯入後金融卡四種題型各至少 1 題 ✓。沒過時寫明哪一條、差多少，由使用者決定。
+- [x] 驗收：現有 20 題在 mix 的 ✓ 數比新基準最多少 1 題；匯入後金融卡四種題型各至少 1 題 ✓。沒過時寫明哪一條、差多少，由使用者決定。（沒有全部通過；使用者 2026-11-04 接受結果並結案）
 - [x] README 補上金融卡的收錄範圍、匯入紀錄與 eval 結論。
 
 ## 結果（2026-11-04）
 
 檔案在 `output/debit05/`（gitignore）：新基準 `eval_baseline/eval_20261104-044044.md`、匯入後 `eval_after/eval_20261104-074606.md`、第一次匯入後 eval（server 被 watchdog 停掉）`eval_after_killed/`、匯入腳本 `ingest_debit.sh` 與 log `ingest_*.log`、判讀 `judge_baseline_a.md`／`judge_baseline_b.md`／`judge_after_a.md`／`judge_after_b.md`、裁決 `judgement.md`。匯入前的知識庫備份在 `output/kb_backups/rag_storage-20261104-before-debit05/`。
 
-**驗收結果：沒有全部通過，等使用者決定。** 現有 20 題通過；金融卡四種題型中 debit-confuse- 與 debit-wrongcard- 各 0 題 ✓，各差 1 題。
+**驗收結果：沒有全部通過；使用者 2026-11-04 接受結果並結案，標準與題目都不改。** 沒通過的原因與之後可以做的事（都沒有實作）寫在 `docs/debit-card-eval.html`。 現有 20 題通過；金融卡四種題型中 debit-confuse- 與 debit-wrongcard- 各 0 題 ✓，各差 1 題。
 
 ### 新基準 eval（事實）
 
