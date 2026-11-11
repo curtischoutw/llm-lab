@@ -12,7 +12,7 @@
   table、cross-paper；id 不可重複。多出來的欄位視為錯誤（ASSUMPTION：避免欄名拼錯被默默忽略）。
 - 對照表每題一列：id、type、source、question、reference 與所跑的每種模式各一欄（模式順序固定依 RETRIEVAL_MODES，與指定順序無關）。儲存格內的 `|`
   跳脫、換行換成 `<br>`，確保一題永遠只佔一行。失敗的格寫「失敗」與原因，不留空白。
-- 表頭註明固定的查詢設定（vlm_enhanced=False、enable_rerank=True）與 reranker 模型名稱（RERANK_MODEL），
+- 表頭註明固定的查詢設定（vlm_enhanced=False、enable_rerank=True）、回答附加指示全文與 reranker 模型名稱（RERANK_MODEL），
   讓日後翻結果檔時知道檢索模式是當時唯一的變因、比較不同次 eval 時知道用了哪個 reranker。
 
 已知極限：reference 只是給人工對照的參考答案，不做任何自動評分（spec 明定不使用 LLM 評審）。

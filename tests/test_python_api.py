@@ -25,6 +25,7 @@ from tests.fake_openai_server import CHAT_REPLY
 from tests.test_cli import OPTIONAL_FIELDS, REPO_ROOT, REQUIRED_FIELDS, SECRET
 from tests.test_pipeline import (
     ALPHA_DESCRIPTION,
+    CARD_TYPE_INSTRUCTION,
     INGEST_TIMEOUT,
     LINK_DESCRIPTION,
     RERANK_BUDGET_ENV,
@@ -438,6 +439,15 @@ class QueryBudgetTest(PythonApiCase):
                     self.assertTrue([p for p in no_relations if ALPHA_DESCRIPTION in p])
                     for prompt in no_relations:
                         self.assertNotIn(LINK_DESCRIPTION, prompt)
+
+    def test_query_and_evaluate_prompts_carry_the_card_type_instructions(self):
+        for mode in ("functions", "session"):
+            for step in ("query", "evaluate"):
+                with self.subTest(mode=mode, step=step):
+                    prompts = self.prompts(step, mode)
+                    self.assertTrue(prompts)
+                    for prompt in prompts:
+                        self.assertIn(CARD_TYPE_INSTRUCTION, prompt)
 
 
 class QueryRerankTest(PythonApiCase):

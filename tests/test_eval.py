@@ -26,6 +26,7 @@ from tests.fake_openai_server import CHAT_REPLY
 from tests.test_cli import REPO_ROOT, SECRET, run_cli
 from tests.test_pipeline import (
     ALPHA_DESCRIPTION,
+    CARD_TYPE_INSTRUCTION,
     INGEST_TIMEOUT,
     LINK_DESCRIPTION,
     RERANK_BUDGET_ENV,
@@ -316,6 +317,20 @@ class EvalRunTest(IngestedEvalCase):
         self.assertIn("chunk_top_k=20", preamble)
         self.assertIn("fake-llm", preamble)
         self.assertIn("- RERANK_MODEL：fake-rerank", preamble)
+
+    def test_every_answer_prompt_and_the_header_carry_the_card_type_instructions(self):
+        result = self.run_eval(self.write_questions(question_line()))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        prompts = query_prompts(self.eval_requests())
+        self.assertEqual(len(prompts), 5)
+        for prompt in prompts:
+            self.assertIn(CARD_TYPE_INSTRUCTION, prompt)
+        preamble = self.result_files()[0].read_text(encoding="utf-8").split("| id |")[0]
+        lines = [l for l in preamble.splitlines() if l.startswith("- 回答附加指示：")]
+        self.assertEqual(len(lines), 1, preamble)
+        self.assertIn(CARD_TYPE_INSTRUCTION, lines[0])
+        self.assertIn("4. 兩種卡的數字不同時分開列", lines[0], "指示全文要在同一行")
+        self.assertNotIn("user_prompt", preamble, "指示另列一行，不擠在固定查詢設定裡")
 
     def test_pipes_and_newlines_in_fields_cannot_break_the_row(self):
         path = self.write_questions(
