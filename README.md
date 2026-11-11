@@ -161,28 +161,47 @@ rag_lab 已經明確傳給 LightRAG／RAG-Anything 的參數對應的變數不�
 
 ## 3. 啟動本地模型 server
 
-兩個 server 各開一個終端機，在 repo 根目錄執行。
+預設設定用一個 server（port 8081）同時提供 LLM、VLM、embedding 與 reranker。LLM 與 VLM 是同一個模型 `mlx-community/gemma-4-26b-a4b-it-4bit`（權重 15.3 GB），在 repo 根目錄執行。
 
-LLM（port 8080）：
+先關掉其他軟體，再把 GPU 記憶體上限設為 26000 MB（要 sudo，在一般終端機執行；重開機會恢復成系統預設，所以每次開機後都要再設一次）：
+
+```sh
+sudo sysctl iogpu.wired_limit_mb=26000; sysctl iogpu.wired_limit_mb
+```
+
+```sh
+~/.local/share/pipx/venvs/mlx-vlm/bin/python scripts/vlm_server.py --mlx-cache-limit-gb 1 \
+  --host 127.0.0.1 --port 8081 \
+  --model mlx-community/gemma-4-26b-a4b-it-4bit \
+  --embedding-model mlx-community/Qwen3-Embedding-0.6B-8bit \
+  --reranker-model BAAI/bge-reranker-v2-m3 \
+  --max-tokens 4096
+```
+
+- thinking：`mlx_vlm.server` 沒給 `--enable-thinking` 時不開，Gemma 4 的 chat template 預設 `enable_thinking=false`；回應的 `reasoning_content` 是 null。
+- `--max-tokens 4096`：只在請求沒帶 `max_tokens` 時生效；rag_lab 每個請求都會帶（`LLM_MAX_TOKENS`、`VLM_MAX_TOKENS`）。
+- 記憶體（2026-11-11 實測，gemma4-switch ticket 01、02，32 GB M2 Pro，`iogpu.wired_limit_mb=26000`）：28 題 mix eval 的全系統 wired 峰值 22 GB（含 macOS 本身約 2.5 GB）。預設 GPU 上限下，第一次 mix 查詢在 rerank 時 wired 就到 22 GB。
+- 已知限制：`query --vlm-enhanced`（約 11k token 的 prompt 加 1 張圖片）在 prefill 時 wired 到 27 GB，超過記憶體監控的門檻，沒有完成；用 Gemma 4 匯入（ingest）沒有實測過。
+- 已建好的知識庫圖譜是 Qwen3-4B 抽取的，換成 Gemma 4 後沒有重新抽取。
+
+品質（同一份知識庫、`eval/questions.taishin.jsonl` 28 題、只跑 mix、兩位判讀者各自評分）：內容 ✓ 從 Qwen3-4B 的 8 題增加到 15 題（信用卡題 4 → 11、金融卡題 4 → 4），套用卡別規則後的最終 ✓ 從 2 題增加到 6 題。判讀與逐題對照在 `.scratch/gemma4-switch/issues/02-eval-against-qwen-baseline.md`。
+
+**改回 Qwen3-4B**（兩個 server 各開一個終端機；`.env` 的 `LLM_BASE_URL` 改回 `http://127.0.0.1:8080/v1`，`LLM_MODEL`、`VLM_MODEL` 改回 Qwen 的模型名稱）：
 
 ```sh
 mlx_lm.server --host 127.0.0.1 --port 8080 \
   --model mlx-community/Qwen3-4B-Instruct-2507-4bit \
   --max-tokens 4096 --prompt-cache-bytes 4GB
-```
 
-- `--max-tokens 4096`：`mlx_lm.server` 預設輸出上限 512 token，會截斷實體抽取的輸出。
-- `--prompt-cache-bytes 4GB`：限制 prompt cache 的大小，實測最高用到 3.7 GB。
-
-VLM、embedding 與 reranker（同一個 server，port 8081）：
-
-```sh
 ~/.local/share/pipx/venvs/mlx-vlm/bin/python scripts/vlm_server.py --mlx-cache-limit-gb 1 \
   --host 127.0.0.1 --port 8081 \
   --model mlx-community/Qwen3-VL-4B-Instruct-4bit \
   --embedding-model mlx-community/Qwen3-Embedding-0.6B-8bit \
   --reranker-model BAAI/bge-reranker-v2-m3
 ```
+
+- `--max-tokens 4096`：`mlx_lm.server` 預設輸出上限 512 token，會截斷實體抽取的輸出。
+- `--prompt-cache-bytes 4GB`：限制 prompt cache 的大小，實測最高用到 3.7 GB。
 
 `--reranker-model`：啟動時就載入 reranker（`BAAI/bge-reranker-v2-m3`，F32 權重檔約 2.1 GB），第一次查詢不會因為載入模型而變慢。`.env` 的 `RERANK_BASE_URL`、`RERANK_MODEL`、`RERANK_API_KEY` 三個欄位必填，`.env.example` 的預設值指向這個 server。查詢時 LightRAG 在依 token 上限截斷之前，先把候選 chunk 送到 `{RERANK_BASE_URL}/rerank` 重新排序；所有查詢入口（`query`、`query --vlm-enhanced`、`eval`、Python API）一律如此，沒有開關，匯入不使用。候選 chunk 數（`chunk_top_k`）固定 20、分數門檻（`min_rerank_score`）固定 0.0（等於 LightRAG 的預設值，但程式明確指定，不受 shell 裡 `CHUNK_TOP_K`、`MIN_RERANK_SCORE` 環境變數影響）。查詢開始前會先確認 rerank 端點連得上（和 LLM、embedding 端點一樣；匯入不檢查），連不上就指出端點名稱與位址並立即失敗。rerank 沒有正常完成（reranker 沒回應、回 HTTP 錯誤，或回應內容不合法：空結果、`results` 不是 list、項目缺 `index` 或 `relevance_score`、`index` 不是範圍內的整數或重複、筆數不等於 `min(chunk_top_k, 候選數)`、分數不是有限的數字）時，該次查詢在產生答案之前就中止：不會呼叫 LLM 生成答案，也不會把沒經過 rerank 的答案寫進 LLM 快取，所以 reranker 恢復後同一題會重新用 rerank 後的順序回答。`query` 以結束碼 1 結束，Python API 拋 `PipelineError`，`eval` 把該格記成失敗；錯誤訊息以「rerank 失敗」開頭，附端點回報的錯誤，不會悄悄改用沒經過 rerank 的排序。reranker 在本機執行，知識庫的內容不會送出本機；`RERANK_BASE_URL` 若改指向外部服務，候選 chunk 的內容就會送到那裡。
 

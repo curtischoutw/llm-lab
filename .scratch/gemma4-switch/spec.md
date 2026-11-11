@@ -1,6 +1,6 @@
 # LLM 與 VLM 換成 Gemma 4 26B A4B
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 ## Problem Statement
 
