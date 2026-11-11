@@ -10,7 +10,6 @@ __pycache__/
 /data/
 /rag_storage/
 /output/
-/eval_results/
 
 # subagent worktrees
 /.claude/worktrees/
