@@ -123,11 +123,12 @@ rag_lab 已經明確傳給 LightRAG／RAG-Anything 的參數對應的變數不�
   - 權益附件：已有的附件重新下載並比對 SHA-256，規則同下載區 PDF（內容不同才換掉，記「內容變更」；相同記「未變」）。所有權益子頁（讀存檔的原始 HTML）都不再連到的附件算下架，搬到 `_meta/removed/<下載當天>/rights_attachments/`，清單記「下架」；同一份附件只要還有一個子頁連到就不算。權益列表沒有成功取得，或有任何權益子頁請求失敗、轉檔失敗時，這次不判斷附件下架，stderr 寫「權益附件這次不判斷下架」與原因；轉址到外部網域的子頁（Visa、Mastercard、JCB，每次都是）不算，它沒有內容也不提供附件連結。子頁都成功、但解析到的附件連結是 0 個而本地有附件時，也當成沒有成功取得，不搬任何附件（結束碼 1）。已有的附件若網址現在也在文件下載區，記「重複略過」並搬走（內容已由下載區那一份匯入）。
   - 活動過期與活動圖片：更新模式下，每個已有活動文件的活動重新取得詳情頁並判斷期間，結束日早於下載當天就算過期，文件連同 `_meta/html/`、`_meta/print/` 的檔案搬到 `_meta/removed/<下載當天>/`，清單記「過期移除」（同一次既內容變更又過期的也一樣）。活動圖片跟著活動走：沒有任何「活動文件仍在」的活動指向的圖片，搬到 `_meta/removed/<下載當天>/offer_images/`，清單記「下架」；共用同一張圖的活動都不在了才搬。圖片名額照第一次下載的規則（8 個）算，少於 8 個時才從後面的活動補，主視覺網址變了的活動排最前面，新出現在前面的活動不會擠掉現有的圖片；仍有效、主視覺網址沒變的活動不重新請求圖片。活動列表沒有成功取得時，這次不判斷活動過期與活動圖片。活動的變更判斷除了主內容區，也比主視覺網址：只換了主視覺的活動也算內容變更，重新轉檔、舊圖搬走、新圖照名額規則優先補；新舊網址只有資料夾或 query 不同、檔名相同時，舊圖先搬走再下載新圖，不會當成已存在略過。
 - 台新官網的著作權聲明禁止未經授權的重製。下載的原始文件（`data/taishin_credit_card/`）只放在本機，不要推上 GitHub（`data/` 不進版本控管）。
-- 這個 repo 是公開的，有三處引用了部分官網原文，由 repo 擁有者決定公開（2026-11-02）：
-  - 題目檔 `eval/questions.taishin.jsonl` 的參考答案；
-  - `.scratch/taishin-credit-card-kb/` 的規格、ticket 與提案；
-  - `docs/taishin-eval-final.html`：第三次 eval 的 mix 答案、參考答案與判讀理由（第 5 節）。
-- 其他匯入後的知識庫（`rag_storage/`）、解析結果、eval 結果與判讀紀錄（`output/`、`eval_results/`）都含有原文，不進版本控管。
+- 這個 repo 是公開的，有四處引用了部分官網原文，由 repo 擁有者決定公開：
+  - 題目檔 `eval/questions.taishin.jsonl` 的參考答案（2026-11-02）；
+  - `.scratch/taishin-credit-card-kb/` 的規格、ticket 與提案（2026-11-02）；
+  - `docs/taishin-eval-final.html`：第三次 eval 的 mix 答案、參考答案與判讀理由（第 5 節）（2026-11-02）；
+  - `eval_results/`：每次 `eval` 的結果檔，含答案與參考答案（2026-11-11）。其中也有 RAG Hack 投影片、Nestlé 財報等第 2 節文件的 eval 結果。
+- 其他匯入後的知識庫（`rag_storage/`）、解析結果與判讀紀錄（`output/`）都含有原文，不進版本控管。
 
 ### 下載論文（前一版知識庫）
 
@@ -161,28 +162,47 @@ rag_lab 已經明確傳給 LightRAG／RAG-Anything 的參數對應的變數不�
 
 ## 3. 啟動本地模型 server
 
-兩個 server 各開一個終端機，在 repo 根目錄執行。
+預設設定用一個 server（port 8081）同時提供 LLM、VLM、embedding 與 reranker。LLM 與 VLM 是同一個模型 `mlx-community/gemma-4-26b-a4b-it-4bit`（權重 15.3 GB），在 repo 根目錄執行。
 
-LLM（port 8080）：
+先關掉其他軟體，再把 GPU 記憶體上限設為 26000 MB（要 sudo，在一般終端機執行；重開機會恢復成系統預設，所以每次開機後都要再設一次）：
+
+```sh
+sudo sysctl iogpu.wired_limit_mb=26000; sysctl iogpu.wired_limit_mb
+```
+
+```sh
+~/.local/share/pipx/venvs/mlx-vlm/bin/python scripts/vlm_server.py --mlx-cache-limit-gb 1 \
+  --host 127.0.0.1 --port 8081 \
+  --model mlx-community/gemma-4-26b-a4b-it-4bit \
+  --embedding-model mlx-community/Qwen3-Embedding-0.6B-8bit \
+  --reranker-model BAAI/bge-reranker-v2-m3 \
+  --max-tokens 4096
+```
+
+- thinking：`mlx_vlm.server` 沒給 `--enable-thinking` 時不開，Gemma 4 的 chat template 預設 `enable_thinking=false`；回應的 `reasoning_content` 是 null。
+- `--max-tokens 4096`：只在請求沒帶 `max_tokens` 時生效；rag_lab 每個請求都會帶（`LLM_MAX_TOKENS`、`VLM_MAX_TOKENS`）。
+- 記憶體（2026-11-11 實測，gemma4-switch ticket 01、02，32 GB M2 Pro，`iogpu.wired_limit_mb=26000`）：28 題 mix eval 的全系統 wired 峰值 22 GB（含 macOS 本身約 2.5 GB）。預設 GPU 上限下，第一次 mix 查詢在 rerank 時 wired 就到 22 GB。
+- 已知限制：`query --vlm-enhanced`（約 11k token 的 prompt 加 1 張圖片）在 prefill 時 wired 到 27 GB，超過記憶體監控的門檻，沒有完成；用 Gemma 4 匯入（ingest）沒有實測過。
+- 已建好的知識庫圖譜是 Qwen3-4B 抽取的，換成 Gemma 4 後沒有重新抽取。
+
+品質（同一份知識庫、`eval/questions.taishin.jsonl` 28 題、只跑 mix、兩位判讀者各自評分）：內容 ✓ 從 Qwen3-4B 的 8 題增加到 15 題（信用卡題 4 → 11、金融卡題 4 → 4），套用卡別規則後的最終 ✓ 從 2 題增加到 6 題。判讀與逐題對照在 `.scratch/gemma4-switch/issues/02-eval-against-qwen-baseline.md`。
+
+**改回 Qwen3-4B**（兩個 server 各開一個終端機；`.env` 的 `LLM_BASE_URL` 改回 `http://127.0.0.1:8080/v1`，`LLM_MODEL`、`VLM_MODEL` 改回 Qwen 的模型名稱）：
 
 ```sh
 mlx_lm.server --host 127.0.0.1 --port 8080 \
   --model mlx-community/Qwen3-4B-Instruct-2507-4bit \
   --max-tokens 4096 --prompt-cache-bytes 4GB
-```
 
-- `--max-tokens 4096`：`mlx_lm.server` 預設輸出上限 512 token，會截斷實體抽取的輸出。
-- `--prompt-cache-bytes 4GB`：限制 prompt cache 的大小，實測最高用到 3.7 GB。
-
-VLM、embedding 與 reranker（同一個 server，port 8081）：
-
-```sh
 ~/.local/share/pipx/venvs/mlx-vlm/bin/python scripts/vlm_server.py --mlx-cache-limit-gb 1 \
   --host 127.0.0.1 --port 8081 \
   --model mlx-community/Qwen3-VL-4B-Instruct-4bit \
   --embedding-model mlx-community/Qwen3-Embedding-0.6B-8bit \
   --reranker-model BAAI/bge-reranker-v2-m3
 ```
+
+- `--max-tokens 4096`：`mlx_lm.server` 預設輸出上限 512 token，會截斷實體抽取的輸出。
+- `--prompt-cache-bytes 4GB`：限制 prompt cache 的大小，實測最高用到 3.7 GB。
 
 `--reranker-model`：啟動時就載入 reranker（`BAAI/bge-reranker-v2-m3`，F32 權重檔約 2.1 GB），第一次查詢不會因為載入模型而變慢。`.env` 的 `RERANK_BASE_URL`、`RERANK_MODEL`、`RERANK_API_KEY` 三個欄位必填，`.env.example` 的預設值指向這個 server。查詢時 LightRAG 在依 token 上限截斷之前，先把候選 chunk 送到 `{RERANK_BASE_URL}/rerank` 重新排序；所有查詢入口（`query`、`query --vlm-enhanced`、`eval`、Python API）一律如此，沒有開關，匯入不使用。候選 chunk 數（`chunk_top_k`）固定 20、分數門檻（`min_rerank_score`）固定 0.0（等於 LightRAG 的預設值，但程式明確指定，不受 shell 裡 `CHUNK_TOP_K`、`MIN_RERANK_SCORE` 環境變數影響）。查詢開始前會先確認 rerank 端點連得上（和 LLM、embedding 端點一樣；匯入不檢查），連不上就指出端點名稱與位址並立即失敗。rerank 沒有正常完成（reranker 沒回應、回 HTTP 錯誤，或回應內容不合法：空結果、`results` 不是 list、項目缺 `index` 或 `relevance_score`、`index` 不是範圍內的整數或重複、筆數不等於 `min(chunk_top_k, 候選數)`、分數不是有限的數字）時，該次查詢在產生答案之前就中止：不會呼叫 LLM 生成答案，也不會把沒經過 rerank 的答案寫進 LLM 快取，所以 reranker 恢復後同一題會重新用 rerank 後的順序回答。`query` 以結束碼 1 結束，Python API 拋 `PipelineError`，`eval` 把該格記成失敗；錯誤訊息以「rerank 失敗」開頭，附端點回報的錯誤，不會悄悄改用沒經過 rerank 的排序。reranker 在本機執行，知識庫的內容不會送出本機；`RERANK_BASE_URL` 若改指向外部服務，候選 chunk 的內容就會送到那裡。
 
@@ -194,7 +214,7 @@ VLM、embedding 與 reranker（同一個 server，port 8081）：
 .venv/bin/python scripts/smoke_test.py
 ```
 
-**32 GB 機器的記憶體限制**（ticket 03 實測）：`.env` 的 `LLM_MAX_ASYNC` 要設 1，設 2 時兩個長生成請求同時進行會讓 `mlx_lm.server` GPU 記憶體不足；`QUERY_MAX_TOTAL_TOKENS` 設 12000，LightRAG 預設的 30000 會讓 mix 查詢的 prompt 到 29.7k token，同樣記憶體不足。
+**32 GB 機器的記憶體限制**（ticket 03 實測，當時是 Qwen3-4B 跑在 `mlx_lm.server`；換成 Gemma 4 後沿用這兩項設定）：`.env` 的 `LLM_MAX_ASYNC` 要設 1，設 2 時兩個長生成請求同時進行會讓 `mlx_lm.server` GPU 記憶體不足；`QUERY_MAX_TOTAL_TOKENS` 設 12000，LightRAG 預設的 30000 會讓 mix 查詢的 prompt 到 29.7k token，同樣記憶體不足。
 
 **查詢 context 的 token 分配**：`QUERY_MAX_TOTAL_TOKENS` 是 context 的總上限；`QUERY_MAX_ENTITY_TOKENS` 與 `QUERY_MAX_RELATION_TOKENS` 是其中 entity 與 relation 描述各自的上限，總上限扣掉這兩項，剩下的 token 全部留給文字 chunk。三個欄位都必填，兩個上限是 0 以上的整數、相加必須小於總上限，否則 CLI 在啟動時中止。`.env.example` 的值是 12000／500／500。程式不再依 LightRAG 預設比例（6,000／8,000 對 30,000）縮放：那個比例在 12,000 下是 2,400／3,200，mix 模式的 context 只剩 3–8 個文字 chunk（ticket 13）。兩個上限都設 0 時，mix 與 naive 照常執行，local、global、hybrid 沒有任何 context，LightRAG 回報查詢失敗。`eval` 的對照表表頭會記下這三個值。500／500 是為 mix 調的：完整 eval（2026-11-01）中 mix 答對的題目從 4 題增加到 7 題，local、global、hybrid 卻減少（4→2、8→4、4→1），因為這 3 種模式的 context 主要是 entity 與 relation 的描述。這個專案只用 mix（`query` 的預設模式），所以沒有依模式分開設定。
 
