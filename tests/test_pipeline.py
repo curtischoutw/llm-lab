@@ -203,6 +203,8 @@ LINK_DESCRIPTION = "Alpha is related to Beta."
 # 完全由 rerank 的順序決定：RERANK_MARKER 這一句落在其中一個 chunk 的中段（不在 chunk 之間的重疊範圍），
 # 沒有 rerank 規則時（預設保持候選順序）那個 chunk 排在後面、進不了 prompt。
 RERANK_MARKER = "Fake Entity 7-200 relates to Fake Entity 7-201."
+# 回答附加指示（rag_lab.pipeline.ANSWER_INSTRUCTIONS）裡的一句；每個答案請求都要帶這段指示
+CARD_TYPE_INSTRUCTION = "先判斷問題講的是信用卡還是金融卡"
 RERANK_BUDGET_ENV = {
     "QUERY_MAX_TOTAL_TOKENS": "3000",
     "QUERY_MAX_ENTITY_TOKENS": "100",
@@ -1297,6 +1299,12 @@ class QueryKnowledgeGraphBudgetTest(PipelineCase):
         no_relations = self.answer_prompt("mix", "--vlm-enhanced", QUERY_MAX_ENTITY_TOKENS="2000", QUERY_MAX_RELATION_TOKENS="0")
         self.assertIn(ALPHA_DESCRIPTION, no_relations)
         self.assertNotIn(LINK_DESCRIPTION, no_relations)
+
+    def test_every_answer_prompt_carries_the_card_type_instructions(self):
+        for mode in ("naive", "local", "global", "hybrid", "mix"):
+            with self.subTest(mode=mode):
+                self.assertIn(CARD_TYPE_INSTRUCTION, self.answer_prompt(mode))
+        self.assertIn(CARD_TYPE_INSTRUCTION, self.answer_prompt("mix", "--vlm-enhanced"))
 
 
 class QueryRerankOrderTest(PipelineCase):

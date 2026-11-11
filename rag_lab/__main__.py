@@ -317,12 +317,16 @@ def _run_eval(questions_path: str, output_dir: str, requested_modes: Sequence[st
         result_path.unlink(missing_ok=True)
         raise
     # 固定查詢設定直接取自實際送進 LightRAG 的參數（pipeline.query_kwargs），表頭才不會和實際行為不一致；
-    # 三個 token 上限在下面各佔一行，這裡不重複列
-    fixed = {"vlm_enhanced": False} | {k: v for k, v in pipeline.query_kwargs(settings).items() if not k.startswith("max_")}
+    # 三個 token 上限與回答附加指示（user_prompt，多行全文）在下面各佔一行，這裡不重複列
+    kwargs = pipeline.query_kwargs(settings)
+    fixed = {"vlm_enhanced": False} | {
+        k: v for k, v in kwargs.items() if not k.startswith("max_") and k != "user_prompt"
+    }
     meta = [
         ("題目檔", str(path.resolve())),
         ("題數", str(len(questions))),
         ("固定查詢設定", "、".join(f"{key}={value}" for key, value in fixed.items()) + "（檢索模式是唯一變因）"),
+        ("回答附加指示", " ".join(str(kwargs["user_prompt"]).split("\n"))),
         ("QUERY_MAX_TOTAL_TOKENS", str(settings.query_max_total_tokens)),
         ("QUERY_MAX_ENTITY_TOKENS", str(settings.query_max_entity_tokens)),
         ("QUERY_MAX_RELATION_TOKENS", str(settings.query_max_relation_tokens)),

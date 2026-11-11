@@ -197,6 +197,15 @@ QUERY_CACHE_TYPE = "query"
 CHUNK_TOP_K = 20
 MIN_RERANK_SCORE = 0.0
 
+# 回答附加指示：放進 LightRAG rag_response 提示詞的第 6 點（Additional Instructions，QueryParam.user_prompt），
+# 所有查詢入口一律套用。台新知識庫同時有信用卡與金融卡，eval 中錯誤多半是接受問題裡錯的卡別、拿另一種卡的資料回答，
+# 或把兩種卡的數字合成一個（docs/gemma4-vs-qwen-eval.html）。LightRAG 答案快取的 key 含 user_prompt，改這段不會命中舊答案。
+ANSWER_INSTRUCTIONS = """這個知識庫包含台新銀行的信用卡與金融卡（簽帳金融卡、晶片金融卡）。回答前：
+1. 先判斷問題講的是信用卡還是金融卡。問題的卡別或前提與資料不符時（例如把信用卡的權益說成金融卡的），第一句先指出並更正。
+2. 只寫 Context 中明確屬於該卡別的權益與費用，不要拿另一種卡的資料回答。問的卡沒有該項權益時，直接回答「沒有」。
+3. 講到回饋、費用、資格或適用範圍的每一段，都寫出卡別（信用卡／簽帳金融卡／晶片金融卡）或完整卡名。
+4. 兩種卡的數字不同時分開列，不要合成一個。"""
+
 
 class PipelineError(RuntimeError):
     """匯入或查詢流程的可預期失敗；訊息直接給使用者看。"""
@@ -1139,6 +1148,7 @@ def query_kwargs(settings: Settings) -> dict[str, object]:
         "max_total_tokens": settings.query_max_total_tokens,
         "max_entity_tokens": settings.query_max_entity_tokens,
         "max_relation_tokens": settings.query_max_relation_tokens,
+        "user_prompt": ANSWER_INSTRUCTIONS,
     }
 
 
