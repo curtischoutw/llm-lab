@@ -29,16 +29,20 @@
 - 每題約 40–45 秒；產生答案的 prompt 約 10.7k–11.2k token。
 
 ### 判讀
-- 兩位判讀者（各自判讀，沒有拿到 Qwen 的分數）內容分數 28 題一致。卡別規則觸發有 2 題分歧：rule-03 裁決不觸發（最終 ✓），debit-fact-01 裁決觸發（最終 △）。理由見 `output/gemma4_02/judgement.md`。
-- ASSUMPTION：✓／△／✗ 的文字定義是主對話依 2026-11-04 判讀紀錄整理後寫進判讀說明的，舊紀錄沒有成文定義。
+- 兩位判讀者各自判讀，沒有拿到 Qwen 的分數。A、B 有 6 題分歧，主對話裁決（理由見 `output/gemma4_02/judgement.md`）：
+  - 內容分數 4 題：switch-03（A ✓、B △）裁決 △；benefit-01（A △、B ✓）裁決 △；cross-01（A ✗、B △）裁決 ✗；debit-wrongcard-01（A ✗、B △）裁決 ✗。
+  - 卡別規則 2 題：rule-03 裁決不觸發（最終 ✓）；debit-fact-01 裁決觸發（最終 △）。
+- **更正（2026-11-11，做對照網頁時發現）**：第一次比對 A、B 總表的指令漏掉 4 題內容分數分歧，當時寫「內容分數 28 題一致」、Gemma 內容 ✓ 15 題（信用卡 11），是直接採用判讀者 B 的分數，這 4 題沒有裁決。裁決後內容 ✓ 是 14 題（信用卡 10），最終 ✓ 仍是 6 題；驗收結果不變。
+- ASSUMPTION：✓／△／✗ 的文字定義是主對話依 2026-11-04 判讀紀錄整理後寫進判讀說明的，舊紀錄沒有成文定義。裁決時以 Qwen 同一題在 2026-11-04 的判法為準。
 
 | | Qwen 內容 ✓ | Gemma 內容 ✓ | Qwen 最終 ✓ | Gemma 最終 ✓ |
 |---|---|---|---|---|
-| 信用卡 20 題 | 4 | 11 | 0 | 3 |
+| 信用卡 20 題 | 4 | 10 | 0 | 3 |
 | 金融卡 8 題 | 4 | 4 | 2 | 3 |
-| 合計 | 8 | 15 | 2 | 6 |
+| 合計 | 8 | 14 | 2 | 6 |
 
-- 內容 ✓ 新增 7 題：switch-02、benefit-01、benefit-03、rule-03、fee-01、terms-01、offer-03；沒有題目從 ✓ 掉下來。
+- 內容 ✓ 新增 6 題：switch-02、benefit-03、rule-03、fee-01、terms-01、offer-03；沒有題目從 ✓ 掉下來。
+- 內容分數變好但沒到 ✓：terms-02、debit-confuse-01（✗ → △）。
 - 內容分數變差 1 題：debit-negate-01 △ → ✗（沒有回答「沒有」，改列信用卡的機場接送權益）。
 
 逐題：
@@ -49,7 +53,7 @@
 | switch-02 | △ | ✓ | △ | △ |
 | switch-03 | △ | △ | △ | △ |
 | switch-04 | △ | △ | △ | △ |
-| benefit-01 | △ | ✓ | △ | △ |
+| benefit-01 | △ | △ | △ | △ |
 | benefit-02 | △ | △ | △ | △ |
 | benefit-03 | △ | ✓ | △ | △ |
 | rule-01 | ✗ | ✗ | ✗ | ✗ |
@@ -63,7 +67,7 @@
 | offer-01 | ✓ | ✓ | △ | △ |
 | offer-02 | ✓ | ✓ | △ | △ |
 | offer-03 | △ | ✓ | △ | ✓ |
-| cross-01 | ✗ | △ | ✗ | △ |
+| cross-01 | ✗ | ✗ | ✗ | ✗ |
 | cross-02 | ✗ | ✗ | ✗ | ✗ |
 | debit-confuse-01 | ✗ | △ | ✗ | △ |
 | debit-confuse-02 | ✓ | ✓ | △ | ✓ |
@@ -71,11 +75,11 @@
 | debit-fact-02 | ✓ | ✓ | ✓ | ✓ |
 | debit-negate-01 | △ | ✗ | △ | ✗ |
 | debit-negate-02 | ✓ | ✓ | ✓ | ✓ |
-| debit-wrongcard-01 | ✗ | △ | ✗ | △ |
+| debit-wrongcard-01 | ✗ | ✗ | ✗ | ✗ |
 | debit-wrongcard-02 | ✗ | ✗ | ✗ | ✗ |
 
 ### 驗收
-- 內容 ✓ 15 > 8，eval 全程沒有 OOM、沒有觸發 watchdog：**通過**。
+- 內容 ✓ 14 > 8，eval 全程沒有 OOM、沒有觸發 watchdog：**通過**。
 - README 第 3 節改成 Gemma 4 的啟動方式（含 `iogpu.wired_limit_mb` 設定、已知限制、品質數字），Qwen 的啟動方式留在同一節當退路；`.env.example` 的 `LLM_BASE_URL`、`LLM_MODEL`、`VLM_MODEL` 改成 Gemma 4。
 - 本機 `.env` 已是 Gemma 4 的設定（Qwen 版備份 `output/gemma4_01/env.qwen.bak`）。
 
