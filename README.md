@@ -185,7 +185,7 @@ sudo sysctl iogpu.wired_limit_mb=26000; sysctl iogpu.wired_limit_mb
 - 已知限制：`query --vlm-enhanced`（約 11k token 的 prompt 加 1 張圖片）在 prefill 時 wired 到 27 GB，超過記憶體監控的門檻，沒有完成；用 Gemma 4 匯入（ingest）沒有實測過。
 - 已建好的知識庫圖譜是 Qwen3-4B 抽取的，換成 Gemma 4 後沒有重新抽取。
 
-品質（同一份知識庫、`eval/questions.taishin.jsonl` 28 題、只跑 mix、兩位判讀者各自評分）：內容 ✓ 從 Qwen3-4B 的 8 題增加到 15 題（信用卡題 4 → 11、金融卡題 4 → 4），套用卡別規則後的最終 ✓ 從 2 題增加到 6 題。判讀與逐題對照在 `.scratch/gemma4-switch/issues/02-eval-against-qwen-baseline.md`。
+品質（同一份知識庫、`eval/questions.taishin.jsonl` 28 題、只跑 mix、兩位判讀者各自評分）：內容 ✓ 從 Qwen3-4B 的 8 題增加到 14 題（信用卡題 4 → 10、金融卡題 4 → 4），套用卡別規則後的最終 ✓ 從 2 題增加到 6 題。判讀與逐題對照在 `.scratch/gemma4-switch/issues/02-eval-against-qwen-baseline.md`，逐題答案在 `docs/gemma4-vs-qwen-eval.html`。
 
 **改回 Qwen3-4B**（兩個 server 各開一個終端機；`.env` 的 `LLM_BASE_URL` 改回 `http://127.0.0.1:8080/v1`，`LLM_MODEL`、`VLM_MODEL` 改回 Qwen 的模型名稱）：
 
