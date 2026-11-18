@@ -53,9 +53,9 @@ Status: needs-info（等歸因結果：Q7 probe、Q8 雜訊、Q11 逐題分析�
 ## 準備時發現的事實（2026-11-18）
 
 - 舊 probe 判斷「進 context」的方式是：關鍵字句出現在 context 的任何地方就算。terms-01 的「前24小時」、fee-02 的「3.5%」「150元」，在來源檔裡的寫法其實是「前二十四小時」「百分之三點五」「新臺幣壹佰伍拾元」。舊 probe 比對到的是別份文件，所以這兩題在舊資料裡「進 context」的判定不可靠。新 probe（`output/rag_opt/probe28.py`）改成只算來自參考來源檔的 chunk；84 句關鍵字句都確認過出現在來源檔的 chunk 裡。
-- Gemma 4 模型檔的 `generation_config.json` 是 `do_sample: true`、`temperature: 1.0`、`top_k: 64`、`top_p: 0.95`，rag_lab 沒有傳 temperature。mlx-vlm 的 `resolve_sampling_defaults` 在請求沒帶 temperature 時，會用模型設定裡的值，所以推測生成與關鍵字抽取都是取樣，重跑時結果會不同。這一點開 server 時要確認 server 讀的是哪份設定。「調低 temperature」列為第二次 grill 的查詢端候選。
+- Gemma 4 模型檔的 `generation_config.json` 寫的是 `do_sample: true`、`temperature: 1.0`，rag_lab 沒有傳 temperature。不過實測 server（2026-11-18）時，同一個開放式 prompt 不帶 temperature 送 3 次，回答一字不差，所以 server 實際是 greedy 解碼，沒有套用 generation_config 的取樣設定。生成與關鍵字抽取在輸入相同時應該是確定性的，這一點會用重跑的結果確認。
 - thinking 模式：`mlx_vlm.server` 有 `--enable-thinking` 參數（README 第 182 行），目前沒有開。
-- 量雜訊的重跑，每次都清掉查詢答案與查詢關鍵字快取（`output/rag_opt/clear_query_cache.py`，清之前先備份），所以雜訊包含關鍵字抽取的變動。
+- 量雜訊的重跑，每次都清掉查詢答案與查詢關鍵字快取（`output/rag_opt/clear_query_cache.py`，清之前先備份），所以雜訊包含關鍵字抽取的變動。因為解碼是 greedy，先只重跑 1 次，逐題和 2026-11-12 的答案比對（知識庫在 11/03 之後沒有變動）；如果完全相同，雜訊就是 0；第 3 次要不要跑、Q25 的多數決要不要改成每組跑 1 次，由使用者決定。
 
 ## 接下來的步驟
 
