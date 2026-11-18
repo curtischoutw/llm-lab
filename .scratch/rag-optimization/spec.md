@@ -57,6 +57,14 @@ Status: needs-info（等歸因結果：Q7 probe、Q8 雜訊、Q11 逐題分析�
 - thinking 模式：`mlx_vlm.server` 有 `--enable-thinking` 參數（README 第 182 行），目前沒有開。
 - 量雜訊的重跑，每次都清掉查詢答案與查詢關鍵字快取（`output/rag_opt/clear_query_cache.py`，清之前先備份），所以雜訊包含關鍵字抽取的變動。因為解碼是 greedy，先只重跑 1 次，逐題和 2026-11-12 的答案比對（知識庫在 11/03 之後沒有變動）；如果完全相同，雜訊就是 0；第 3 次要不要跑、Q25 的多數決要不要改成每組跑 1 次，由使用者決定。
 
+## 歸因結果（2026-11-18，事實）
+
+- 雜訊：清掉 query 與 keywords 快取後重跑一次 eval（`output/rag_opt/eval_runs/run2/`），28 題答案和 2026-11-12 逐字相同。28 格 0 失敗，wired 峰值 23 GB。
+- probe（`output/rag_opt/probe/probe.json`，log 在 `output/rag_opt/probe.log`）：內容沒有 ✓ 的 12 題中，c 6 題（switch-01、switch-04、benefit-02、benefit-03、rule-02、offer-01）、a 5 題（rule-01、terms-02、cross-01、cross-02、debit-wrongcard-02）、b_trunc 1 題（debit-negate-01）、b_rank 0 題。rerank 前的候選池每題 20–29 個 chunk，最後放進 context 的 7–10 個。
+- a／b 類的共同點是檢索到的是別張卡片的文件：cross-01 的街口卡（cg038）、cross-02 的雙幣卡（cg039）與昇恆昌卡（cg009）都不在候選池裡；debit-negate-01 的金融卡卡片頁被截掉，進 context 的是信用卡的機場接送權益。
+- 內容 ✓ 的題目裡也有 4 題被分到 a（fee-02、debit-confuse-02、debit-negate-02、debit-wrongcard-01），代表關鍵字句清單不完整，分類只能當參考。
+- Q11（`output/rag_opt/q11_c_analysis.md`）：6 題 c 類共 12 個錯漏點。c1（被同一份文件裡別的產品、別的年度、別的活動干擾）5 點，c3（正確資訊在 context，模型漏寫或改錯數字）5 點，c4（答案需要的資訊不在 context）2 點。c1 的正確 chunk 都排在干擾 chunk 前面。抽查兩點確認無誤：offer-01 的答案寫「1,303」，但 context 裡只有「1,300」；card_cg047 列出各方案回饋率的彙總表 chunk 沒有出現在 6 題的任何一份 context 裡。
+
 ## 接下來的步驟
 
 1. 準備（不需要 server）：probe 與 context 傾印腳本，以及金融卡 8 題的關鍵字句。
