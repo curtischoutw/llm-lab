@@ -41,7 +41,7 @@ Status: needs-info（等歸因結果：Q7 probe、Q8 雜訊、Q11 逐題分析�
    - 檔名格式：`<卡別>_<簡短卡名｜多卡｜全部>_<原檔名>`，例如 `信用卡_台新Richart卡_card_cg047_card001.pdf`。改名寫在 `scripts/fetch_taishin.py` 的 `document_filename`，另外寫一次性遷移腳本，改現有檔案、manifest 與 `eval/questions.taishin.jsonl` 的 `source`。
    - chunk 標頭放卡別與完整的適用卡片清單；超過 150 token 時改寫成「適用 N 張卡（清單見本文件第一段）」，完整清單只放在第一個 chunk。
 7. **重匯內容等歸因後再定案**：切塊方式、Gemma 補前後文摘要（contextual retrieval）兩項，在第二次 grill 決定。切塊優化排在 (c) 類問題之後，只針對 (a／b) 類設計。
-8. **不換生成用的 LLM**。如果 (a) 類占多數，再評估換大一點的 embedding（例如 Qwen3-Embedding-4B，前提是在 26 GB 上限內）。
+8. **不換生成用的 LLM**。embedding 在重匯前決定：如果 probe 結果 a 加 b_rank 的題數 ≥4，就在知識庫副本上只重算 chunk 向量，用 probe 比較 Qwen3-Embedding-0.6B（現行）、Qwen3-Embedding-4B、bge-m3 三個模型的關鍵字句覆蓋，並記錄記憶體峰值（上限 26 GB），再決定重匯時用哪一個。reranker 這次不重新評估：2026-11-01 已經比較過，只有 bge-reranker-v2-m3 能排序；歸因結果顯示問題出在 b_rank 時再回頭評估。
 9. **查詢端改動排在匯入端之前**（context 上限、chunk_top_k、thinking 模式）；thinking 模式要等 Q11 結果，而且要先查證 mlx-vlm 怎麼開。
 10. **Claude 只當裁判與協作者**：管線內每一步（解析、切塊、實體抽取、關鍵字、embedding、rerank、生成、改寫問題、補前後文摘要）只用本機模型。Claude 負責設計實驗、寫程式、整理關鍵字句、判讀與分析。
 
