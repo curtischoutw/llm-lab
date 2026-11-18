@@ -54,6 +54,9 @@ Status: needs-info（等歸因結果：Q7 probe、Q8 雜訊、Q11 逐題分析�
     - E3：回答附加指示加上「逐項回答每個子問題，每個數字都寫出它屬於哪個產品、哪一年、哪個活動」。
 13. **切塊依標題結構**：在 MinerU 標出的標題處切開，同一節超過 1,200 token 時再依 token 數切。chunk 標頭是卡片標籤加上章節名稱。事實：card_cg047 的 content_list 只有 `text_level` 2 一層標題（64 個），所以多數文件的章節名稱只有一層。
 14. **不做 Gemma 補前後文摘要**；重匯後如果 c1 類（被別的產品、年度、活動干擾）仍多，再考慮。
+15. **實驗不改 rag_lab**：E1–E3 用 `output/rag_opt/run_experiment.py` 覆寫 pipeline 常數；確定有效之後，再開 ticket 正式改程式。
+16. **重匯直接取代舊知識庫**：不另外建 WORKING_DIR。重匯前刪除 `rag_storage` 與 `output/rag_opt/kb_copy`，刪除前要列出清單請使用者確認。刪除之後就沒辦法換回舊知識庫，舊的 eval 答案保留在 `eval_results/` 供比對。檔名改了，MinerU 的解析快取對不上，所有文件都要重新解析。
+17. **順序**：E1–E3 查詢端實驗 → 在 kb_copy 上比較 embedding → 寫正式 spec 與 tickets → 實作（卡片標籤、依標題切塊、中文、實體類型、改檔名）→ 使用者確認後刪除舊知識庫 → 全量重匯 → eval 加雙判讀。
 
 ## 撤回的方案
 
