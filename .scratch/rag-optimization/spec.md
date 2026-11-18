@@ -56,6 +56,7 @@ Status: needs-info（等歸因結果：Q7 probe、Q8 雜訊、Q11 逐題分析�
 14. **不做 Gemma 補前後文摘要**；重匯後如果 c1 類（被別的產品、年度、活動干擾）仍多，再考慮。
 15. **實驗不改 rag_lab**：E1–E3 用 `output/rag_opt/run_experiment.py` 覆寫 pipeline 常數；確定有效之後，再開 ticket 正式改程式。
 16. **重匯直接取代舊知識庫**：不另外建 WORKING_DIR。重匯前刪除 `rag_storage` 與 `output/rag_opt/kb_copy`，刪除前要列出清單請使用者確認。刪除之後就沒辦法換回舊知識庫，舊的 eval 答案保留在 `eval_results/` 供比對。檔名改了，MinerU 的解析快取對不上，所有文件都要重新解析。
+18. **查詢端維持原狀**：E1–E3 都不採用，也不合併起來跑；重匯之後可以在新知識庫上再試一次 E1、E2。embedding 比較的候選是 `mlx-community/Qwen3-Embedding-4B-4bit-DWQ`（2560 維）與 `mlx-community/bge-m3-mlx-8bit`（1024 維）；在 kb_copy 的副本上用候選模型重算三個向量庫（chunk 2,341、entity 18,297、relation 37,027 筆），再跑 probe28 比較（`output/rag_opt/run_embed_compare.sh`）。
 17. **順序**：E1–E3 查詢端實驗 → 在 kb_copy 上比較 embedding → 寫正式 spec 與 tickets → 實作（卡片標籤、依標題切塊、中文、實體類型、改檔名）→ 使用者確認後刪除舊知識庫 → 全量重匯 → eval 加雙判讀。
 
 ## 查詢端實驗結果（2026-11-19，事實）
