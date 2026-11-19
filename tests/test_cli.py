@@ -51,7 +51,7 @@ TEXT_FIELDS = (
     "PARSER_OUTPUT_DIR",
 )
 REQUIRED_FIELDS = URL_FIELDS + INT_FIELDS + NON_NEGATIVE_INT_FIELDS + TEXT_FIELDS
-OPTIONAL_FIELDS = ("EMBED_QUERY_PREFIX",)
+OPTIONAL_FIELDS = ("EMBED_QUERY_PREFIX", "DOCUMENT_HEADERS_FILE")
 
 SECRET = "sk-TOP-SECRET-0123"
 
@@ -206,6 +206,35 @@ class ConfigValidationTest(unittest.TestCase):
                     self.assertIn(field, result.stderr)
         result = run_cli(["eval", "q.jsonl"], {**overrides, "QUERY_MAX_RELATION_TOKENS": "6999"})
         self.assertNotIn("設定錯誤", result.stderr)
+
+    def test_document_headers_file_must_exist_and_be_a_json_object_of_non_empty_strings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad_files = {
+                "missing": Path(tmp) / "no-such.json",
+                "not json": Path(tmp) / "broken.json",
+                "array": Path(tmp) / "array.json",
+                "non-string value": Path(tmp) / "number.json",
+                "empty value": Path(tmp) / "empty.json",
+            }
+            bad_files["not json"].write_text("{" + SECRET, encoding="utf-8")
+            bad_files["array"].write_text('["a.pdf"]', encoding="utf-8")
+            bad_files["non-string value"].write_text('{"a.pdf": 3}', encoding="utf-8")
+            bad_files["empty value"].write_text('{"a.pdf": "  "}', encoding="utf-8")
+            for case, path in bad_files.items():
+                with self.subTest(case=case):
+                    result = run_cli(["eval", "q.jsonl"], {"DOCUMENT_HEADERS_FILE": str(path)})
+                    self.assert_config_rejected(result, "DOCUMENT_HEADERS_FILE")
+                    self.assertNotIn(SECRET, result.stdout + result.stderr)
+
+    def test_valid_document_headers_file_is_accepted_and_unset_is_allowed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "headers.json"
+            path.write_text('{"a.pdf": "信用卡：甲卡"}', encoding="utf-8")
+            for overrides in ({"DOCUMENT_HEADERS_FILE": str(path)}, {}):
+                with self.subTest(overrides=bool(overrides)):
+                    result = run_cli(["eval", "q.jsonl"], overrides)
+                    self.assertIn("輸入錯誤", result.stderr)
+                    self.assertNotIn("設定錯誤", result.stderr)
 
     def test_error_output_never_contains_field_values(self):
         leaky = {

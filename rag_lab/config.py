@@ -11,6 +11,9 @@
   後兩者可以是 0（LightRAG 照常執行，只是不放該類描述），但兩者相加必須小於總上限，否則 chunk 分不到 token。
 - RERANK_BASE_URL／RERANK_MODEL／RERANK_API_KEY 三個欄位必填、規則與其他端點相同：查詢一律用 rerank，
   沒有開關；chunk_top_k 與分數門檻不在這裡設定，由 pipeline 固定為 20 與 0.0，不受行程環境的 CHUNK_TOP_K、MIN_RERANK_SCORE 影響。
+- DOCUMENT_HEADERS_FILE 選填：指向 JSON 檔（key 是文件檔名，值是 chunk 標頭文字），沒設時依標題切塊與標頭改寫都不啟用，
+  匯入行為與沒有這個設定時完全相同。有設時在啟動就讀檔驗證（檔案不存在、不是 JSON、不是物件、值不是非空字串都是 ConfigError；
+  訊息不含檔案內容）。標頭值不可含 rag_lab.chunking 的標記字串。
 - EMBED_QUERY_PREFIX 只套用在查詢端（LightRAG 會以 context="query" 呼叫），
   文件端不加前綴；Qwen3-Embedding 的官方用法即為此非對稱形式。
 - 拒絕 rag_lab 沒有管理的 LightRAG／RAG-Anything／MinerU 環境變數（UNMANAGED_LIBRARY_ENV）：LightRAG 與
@@ -64,12 +67,15 @@
 Dependencies: python-dotenv（由 raganything 帶入）。
 """
 
+import json
 import os
 from dataclasses import dataclass
 from functools import lru_cache
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
+
+from rag_lab.chunking import HEADER_END, HEADER_START
 
 # ==============================
 # rag_lab 沒有管理的 LightRAG／RAG-Anything／MinerU 環境變數
@@ -202,6 +208,38 @@ def _non_negative_int(name: str) -> int:
     return value
 
 
+def _document_headers(name: str) -> dict[str, str] | None:
+    """讀取選填的標頭檔（JSON 物件：檔名 → 標頭文字）。
+
+    Args:
+        name: 環境變數名稱，值是標頭檔路徑。
+
+    Returns:
+        檔名到標頭文字的 dict；環境變數沒設或是空字串時回傳 None。
+
+    Raises:
+        ConfigError: 檔案讀不到、不是 JSON、不是物件，或有值不是非空字串、含標頭標記字串（訊息不含檔案內容）。
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        with open(raw, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except OSError as exc:
+        raise ConfigError(name, f"指向的檔案讀不到（{type(exc).__name__}）") from exc
+    except ValueError as exc:
+        raise ConfigError(name, "指向的檔案不是合法的 JSON") from exc
+    if not isinstance(data, dict):
+        raise ConfigError(name, "指向的檔案必須是 JSON 物件（檔名 → 標頭文字）")
+    for file_name, header in data.items():
+        if not isinstance(header, str) or not header.strip():
+            raise ConfigError(name, "的每個標頭文字必須是非空字串")
+        if HEADER_START in header or HEADER_END in header:
+            raise ConfigError(name, "的標頭文字不可含有 rag_lab 的標頭標記字串")
+    return data
+
+
 # ==============================
 # 設定物件
 # ==============================
@@ -235,6 +273,8 @@ class Settings:
     query_max_total_tokens: int
     query_max_entity_tokens: int
     query_max_relation_tokens: int
+    # 檔名 → chunk 標頭文字；None 表示沒設 DOCUMENT_HEADERS_FILE，不做標頭改寫與依標題切塊
+    document_headers: dict[str, str] | None = None
 
 
 @lru_cache(maxsize=1)
@@ -283,4 +323,5 @@ def get_settings() -> Settings:
         query_max_total_tokens=query_max_total_tokens,
         query_max_entity_tokens=query_max_entity_tokens,
         query_max_relation_tokens=query_max_relation_tokens,
+        document_headers=_document_headers("DOCUMENT_HEADERS_FILE"),
     )

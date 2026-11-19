@@ -1633,5 +1633,90 @@ class UnreachableEndpointTest(PipelineCase):
         self.assertNotIn(SECRET, result.stdout + result.stderr)
 
 
+# ==============================
+# chunk 標頭與依標題切塊（DOCUMENT_HEADERS_FILE）
+# ==============================
+
+# 假 mineru 輸出的文字（tests/fake_mineru.py）：一個標題與一段內文，兩者合起來不到 100 token，所以是一個 chunk
+FAKE_HEADING = "A Study of Fake Entities in paper"
+FAKE_BODY = "Fake Entity Alpha works together with Fake Entity Beta."
+HEADER = "信用卡：甲卡、乙卡"
+
+
+class DocumentHeadersTest(PipelineCase):
+    def setUp(self):
+        super().setUp()
+        self.headers_file = self.tmp / "document_headers.json"
+        self.headers_file.write_text(json.dumps({"paper.pdf": HEADER, "other.pdf": "金融卡：丙卡"}), encoding="utf-8")
+
+    def stored_chunks(self) -> list[str]:
+        """知識庫裡所有 chunk 的內容，含圖片、表格、公式描述的 chunk（依 chunk_order_index 排序）。"""
+        stored = json.loads((self.working_dir / "kv_store_text_chunks.json").read_text(encoding="utf-8"))
+        return [c["content"] for c in sorted(stored.values(), key=lambda c: c["chunk_order_index"])]
+
+    def text_chunks(self) -> list[str]:
+        """文字 chunk：stored_chunks 去掉圖片、表格、公式描述的 chunk（它們以固定的分析標題開頭，內容由 RAG-Anything 決定）。"""
+        analysis = ("Image Content Analysis", "Table Analysis", "Equation Analysis")
+        return [c for c in self.stored_chunks() if not any(marker in c for marker in analysis)]
+
+    def test_without_the_setting_chunks_are_the_default_ones_and_captions_are_untouched(self):
+        result = self.ingest()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.text_chunks(), [f"{FAKE_HEADING}\n\n{FAKE_BODY}"])
+        for body in self.server.requests:
+            self.assertNotIn("卡片標籤", json.dumps(body["payload"], ensure_ascii=False))
+
+    def test_with_the_setting_each_chunk_starts_with_the_header_and_the_section_name(self):
+        result = self.ingest(DOCUMENT_HEADERS_FILE=str(self.headers_file))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.text_chunks(), [f"{HEADER}\n章節：{FAKE_HEADING}\n\n{FAKE_BODY}"])
+
+    def test_table_and_image_descriptions_are_asked_with_the_card_label(self):
+        result = self.ingest(DOCUMENT_HEADERS_FILE=str(self.headers_file))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        label = f"卡片標籤：{HEADER}"
+        describing = [
+            r for r in self.server.requests if r["path"] == "/v1/chat/completions" and "Body: <table>" in json.dumps(r["payload"])
+        ]
+        self.assertEqual(len(describing), 1)
+        self.assertIn(label, json.dumps(describing[0]["payload"], ensure_ascii=False))
+        vision = [r for r in self.server.requests if "image_url" in json.dumps(r["payload"])]
+        self.assertTrue(vision)
+        self.assertIn(label, json.dumps(vision[0]["payload"], ensure_ascii=False))
+
+    def test_document_id_and_parse_cache_still_come_from_the_original_content_list(self):
+        self.assertEqual(self.ingest(DOCUMENT_HEADERS_FILE=str(self.headers_file)).returncode, 0)
+        original = json.loads(next(self.output_dir.rglob("paper_content_list.json")).read_text(encoding="utf-8"))
+        cache = json.loads((self.working_dir / "kv_store_parse_cache.json").read_text(encoding="utf-8"))
+        (entry,) = cache.values()
+        self.assertEqual([b["type"] for b in entry["content_list"]], [b["type"] for b in original])
+        self.assertNotIn("RAG_LAB_HEADER", json.dumps(entry["content_list"]))
+        self.assertEqual(entry["content_list"][0].get("text"), FAKE_HEADING)
+        reingest = self.ingest(DOCUMENT_HEADERS_FILE=str(self.headers_file))
+        self.assertIn("略過", reingest.stdout)
+
+    def test_a_document_missing_from_the_headers_file_fails_and_nothing_is_written(self):
+        stranger = self.tmp / "stranger.pdf"
+        stranger.write_bytes(b"%PDF-1.4 stranger")
+        result = self.ingest(stranger, DOCUMENT_HEADERS_FILE=str(self.headers_file))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertRegex(result.stderr, r"匯入失敗：stranger\.pdf：.*DOCUMENT_HEADERS_FILE")
+        # 沒有寫入任何東西：儲存檔不存在或是空的
+        for name in ("kv_store_doc_status.json", "kv_store_text_chunks.json", "kv_store_full_docs.json"):
+            written = self.working_dir / name
+            self.assertEqual(json.loads(written.read_text(encoding="utf-8")) if written.exists() else {}, {}, name)
+
+    def test_other_documents_in_the_batch_are_still_ingested_when_one_is_missing_from_the_headers_file(self):
+        folder = self.tmp / "papers"
+        folder.mkdir()
+        (folder / "paper.pdf").write_bytes(b"%PDF-1.4 a")
+        (folder / "stranger.pdf").write_bytes(b"%PDF-1.4 b")
+        result = self.ingest(folder, DOCUMENT_HEADERS_FILE=str(self.headers_file))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertRegex(result.stderr, r"匯入失敗：stranger\.pdf")
+        self.assertNotRegex(result.stderr, r"匯入失敗：paper\.pdf")
+        self.assertEqual(self.text_chunks(), [f"{HEADER}\n章節：{FAKE_HEADING}\n\n{FAKE_BODY}"])
+
+
 if __name__ == "__main__":
     unittest.main()
