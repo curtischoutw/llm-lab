@@ -77,7 +77,25 @@ Status: needs-info（等歸因結果：Q7 probe、Q8 雜訊、Q11 逐題分析�
   - offer-01 超過 360 秒的 worker 逾時。把 `LLM_TIMEOUT` 調到 600 秒補跑，結果 thinking 一直產生到 16,384 token 上限，輸出是無意義的重複文字，所以這題算 ✗。
   - wired 峰值 23 GB。
 
+## embedding 比較結果（2026-11-19，事實）
+
+19. **只比較 chunk 向量檢索**（取代決定 18 的「三個向量庫都重算再跑 probe28」）：4B 重算 chunk 2,341 筆花了 97 分鐘，entity 前 1,000 筆花了 12 分鐘；依這個速度，entity 18,297 筆約 3.7 小時、relation 37,027 筆約 7.4 小時，三個向量庫合計約 12.7 小時。所以改成只重算 chunk 向量，用 `output/rag_opt/chunk_retrieval.py` 計算 84 句關鍵字句在 chunk 向量檢索前 K 名的覆蓋（來源檔的 chunk 而且含該句才算）。這個比較不含 mix 的圖譜路徑、rerank 與 token 截斷。
+
+| 模型 | 前 10 名 | 前 20 名 | 前 40 名 | 3 句都在前 20 名的題數 | 重算 chunk 時間 |
+|---|---|---|---|---|---|
+| Qwen3-Embedding-0.6B（現行） | 59 | 70 | 77 | 19／28 | — |
+| Qwen3-Embedding-4B | 70 | 75 | 77 | 23／28 | 97 分 |
+| bge-m3（CLS pooling） | 65 | 72 | 75 | 21／28 | 約 4 分 |
+| bge-m3（mlx-vlm server 預設，mean pooling） | 4 | 12 | 17 | — | 7 分 |
+
+- 4B 在前 10、前 20 名比 0.6B 多 11、5 句；前 40 名三個模型相同或只差 2 句。
+- rule-01 和 cross-02 在三個模型下都檢索不到：rule-01 有 2 句排在第 600 名之後，cross-02 有 2 句排在第 100 名之後。這兩題的問題不在 embedding 模型。
+- bge-m3：`mlx-community/bge-m3-mlx-8bit` 缺少 `1_Pooling` 設定，mlx-vlm 的 xlm_roberta 實作因此預設 mean pooling（`mlx_vlm/models/xlm_roberta/xlm_roberta.py:143`），但 bge-m3 用 CLS pooling。用 mean pooling 時，存下的向量和模型直接算的一致（cos 1.0），查詢向量改在同一個 process 內計算，結果也一樣是 4／12／17，所以低分來自 pooling，不是比較程式的錯誤。CLS 的數字是在同一個 process 內直接算 chunk 與查詢向量得到的（`output/rag_opt/` 以外的暫存腳本），server 目前無法用 CLS 提供 bge-m3。
+- 記憶體峰值沒有記錄（決定 8 原本要求記錄）。
+
 ## 範圍外發現
+
+- mlx-vlm 對缺少 `1_Pooling` 設定的 xlm-roberta embedding 模型預設用 mean pooling，不會警告。用 bge-m3 前要先解決 pooling 設定。
 
 - rag_lab 收到回答被長度上限截斷（`finish_reason=length`）時，仍當成正常答案收下：E1 補跑 offer-01 時，eval 記為「失敗 0 格」，但答案是 16,384 token 的重複文字。抽關鍵字那一步遇到同樣情況時會拋 LengthFinishReasonError。
 - E1 補跑 offer-01 時，eval 從 02:21 啟動，到 02:38 才送出第一個 embedding 請求。這 17 分鐘的空檔原因還沒查。
