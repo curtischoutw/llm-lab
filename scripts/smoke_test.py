@@ -30,7 +30,7 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "mlx-community/Qwen3-4B-Instruct-2507-4b
 VLM_BASE_URL = os.environ.get("VLM_BASE_URL", "http://127.0.0.1:8081/v1")
 VLM_MODEL = os.environ.get("VLM_MODEL", "mlx-community/Qwen3-VL-4B-Instruct-4bit")
 EMBED_BASE_URL = os.environ.get("EMBED_BASE_URL", "http://127.0.0.1:8081/v1")
-EMBED_MODEL = os.environ.get("EMBED_MODEL", "mlx-community/Qwen3-Embedding-0.6B-8bit")
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "mlx-community/Qwen3-Embedding-4B-4bit-DWQ")
 
 TIMEOUT_SEC = 300
 

@@ -16,7 +16,7 @@ chat 路徑會清 cache，所以只有 embedding 期間會累積。
     ~/.local/share/pipx/venvs/mlx-vlm/bin/python scripts/vlm_server.py [--mlx-cache-limit-gb 1] \\
         --host 127.0.0.1 --port 8081 \\
         --model mlx-community/Qwen3-VL-4B-Instruct-4bit \\
-        --embedding-model mlx-community/Qwen3-Embedding-0.6B-8bit
+        --embedding-model mlx-community/Qwen3-Embedding-4B-4bit-DWQ
 --mlx-cache-limit-gb 以外的參數原樣轉給 mlx_vlm.server。
 
 已知極限：依賴 mlx_vlm.server 在同一個行程內執行；若之後的版本改成多行程（workers>1 或 reload），

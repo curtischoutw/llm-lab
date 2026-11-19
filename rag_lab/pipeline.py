@@ -102,6 +102,10 @@ CLI 只負責參數與輸出格式，這裡負責行為。
 - embedding 並行數由 EMBED_MAX_ASYNC 經 lightrag_kwargs 明確傳入，不依賴 LightRAG 自己讀的
   EMBEDDING_FUNC_MAX_ASYNC 環境變數：那個預設值在 import lightrag 時就決定，晚於 import 才載入的
   .env 不會生效。
+- 知識庫的語言與實體類型由 KB_LANGUAGE、KB_ENTITY_TYPES 經 lightrag_kwargs 的 addon_params 明確傳入：
+  語言決定實體抽取、描述合併與查詢時關鍵字抽取的輸出語言，實體類型決定抽取時可用的類型。LightRAG 自己
+  讀的 SUMMARY_LANGUAGE、ENTITY_TYPES 環境變數預設是英文與通用類型、且被 rag_lab 拒絕，所以改由 rag_lab 管理，
+  值會留在匯入結果裡，不能只靠行程環境。addon_params 會整個取代 LightRAG 的預設值，所以兩個鍵都要給。
 - 收尾（_close）除了 finalize_storages，還要呼叫 LightRAG 兩個限流器（LLM、embedding）的
   shutdown()：限流 worker 在執行呼叫時被取消會把 CancelledError 吞掉、回到等待迴圈，
   只有 shutdown 設定的旗標能讓它結束。不呼叫的話，端點在請求進行中失敗（例如 mlx_lm.server
@@ -317,15 +321,18 @@ def build_rag(settings: Settings) -> RAGAnything:
         parse_method="auto",
     )
     lightrag_kwargs = {
-            "llm_model_max_async": settings.llm_max_async,
-            # ASSUMPTION：圖片／表格／公式描述的並行度（max_parallel_insert）不受 llm_model_max_async
-            # 限制，沿用同一個設定值，避免本地 server 被打爆。
-            "max_parallel_insert": settings.llm_max_async,
-            "embedding_func_max_async": settings.embed_max_async,
-            # rerank 函式必須在建立 LightRAG 時傳入：mix 等圖譜模式處理 chunk 時讀的是儲存層初始化時拿到的
-            # 設定副本，初始化之後才設不會生效（LightRAG 1.4.16）。匯入不會用到它。
-            "rerank_model_func": models.rerank_model_func,
-            "min_rerank_score": MIN_RERANK_SCORE,
+        "llm_model_max_async": settings.llm_max_async,
+        # ASSUMPTION：圖片／表格／公式描述的並行度（max_parallel_insert）不受 llm_model_max_async
+        # 限制，沿用同一個設定值，避免本地 server 被打爆。
+        "max_parallel_insert": settings.llm_max_async,
+        "embedding_func_max_async": settings.embed_max_async,
+        # rerank 函式必須在建立 LightRAG 時傳入：mix 等圖譜模式處理 chunk 時讀的是儲存層初始化時拿到的
+        # 設定副本，初始化之後才設不會生效（LightRAG 1.4.16）。匯入不會用到它。
+        "rerank_model_func": models.rerank_model_func,
+        "min_rerank_score": MIN_RERANK_SCORE,
+        # 語言與實體類型由設定決定（KB_LANGUAGE、KB_ENTITY_TYPES），不靠 LightRAG 讀 SUMMARY_LANGUAGE、
+        # ENTITY_TYPES 環境變數的預設值。LightRAG 整個取代預設的 addon_params，所以兩個鍵都要給。
+        "addon_params": {"language": settings.kb_language, "entity_types": list(settings.kb_entity_types)},
     }
     if settings.document_headers is not None:
         # 有設標頭檔才換掉 LightRAG 預設的 chunker；沒設時 chunk 內容與數量和以前相同

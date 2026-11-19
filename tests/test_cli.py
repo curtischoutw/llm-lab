@@ -49,11 +49,15 @@ TEXT_FIELDS = (
     "RERANK_API_KEY",
     "WORKING_DIR",
     "PARSER_OUTPUT_DIR",
+    "KB_LANGUAGE",
+    "KB_ENTITY_TYPES",
 )
 REQUIRED_FIELDS = URL_FIELDS + INT_FIELDS + NON_NEGATIVE_INT_FIELDS + TEXT_FIELDS
 OPTIONAL_FIELDS = ("EMBED_QUERY_PREFIX", "DOCUMENT_HEADERS_FILE")
 
 SECRET = "sk-TOP-SECRET-0123"
+# spec「語言與實體類型」指定的實體類型（逗號分隔）
+KB_ENTITY_TYPES = "卡片,權益,回饋方案,回饋規則,費用,約定條款,活動,商店或通路,支付工具,機構"
 
 
 # ==============================
@@ -92,6 +96,8 @@ def valid_env(base_url: str = "http://127.0.0.1:9/v1") -> dict[str, str]:
             "RERANK_API_KEY": SECRET,
             "WORKING_DIR": "./rag_storage",
             "PARSER_OUTPUT_DIR": "./output",
+            "KB_LANGUAGE": "Traditional Chinese",
+            "KB_ENTITY_TYPES": KB_ENTITY_TYPES,
         }
     )
     return env

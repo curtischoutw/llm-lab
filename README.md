@@ -174,7 +174,7 @@ sudo sysctl iogpu.wired_limit_mb=26000; sysctl iogpu.wired_limit_mb
 ~/.local/share/pipx/venvs/mlx-vlm/bin/python scripts/vlm_server.py --mlx-cache-limit-gb 1 \
   --host 127.0.0.1 --port 8081 \
   --model mlx-community/gemma-4-26b-a4b-it-4bit \
-  --embedding-model mlx-community/Qwen3-Embedding-0.6B-8bit \
+  --embedding-model mlx-community/Qwen3-Embedding-4B-4bit-DWQ \
   --reranker-model BAAI/bge-reranker-v2-m3 \
   --max-tokens 4096
 ```
@@ -197,7 +197,7 @@ mlx_lm.server --host 127.0.0.1 --port 8080 \
 ~/.local/share/pipx/venvs/mlx-vlm/bin/python scripts/vlm_server.py --mlx-cache-limit-gb 1 \
   --host 127.0.0.1 --port 8081 \
   --model mlx-community/Qwen3-VL-4B-Instruct-4bit \
-  --embedding-model mlx-community/Qwen3-Embedding-0.6B-8bit \
+  --embedding-model mlx-community/Qwen3-Embedding-4B-4bit-DWQ \
   --reranker-model BAAI/bge-reranker-v2-m3
 ```
 
@@ -217,6 +217,8 @@ mlx_lm.server --host 127.0.0.1 --port 8080 \
 **32 GB 機器的記憶體限制**（ticket 03 實測，當時是 Qwen3-4B 跑在 `mlx_lm.server`；換成 Gemma 4 後沿用這兩項設定）：`.env` 的 `LLM_MAX_ASYNC` 要設 1，設 2 時兩個長生成請求同時進行會讓 `mlx_lm.server` GPU 記憶體不足；`QUERY_MAX_TOTAL_TOKENS` 設 12000，LightRAG 預設的 30000 會讓 mix 查詢的 prompt 到 29.7k token，同樣記憶體不足。
 
 **查詢 context 的 token 分配**：`QUERY_MAX_TOTAL_TOKENS` 是 context 的總上限；`QUERY_MAX_ENTITY_TOKENS` 與 `QUERY_MAX_RELATION_TOKENS` 是其中 entity 與 relation 描述各自的上限，總上限扣掉這兩項，剩下的 token 全部留給文字 chunk。三個欄位都必填，兩個上限是 0 以上的整數、相加必須小於總上限，否則 CLI 在啟動時中止。`.env.example` 的值是 12000／500／500。程式不再依 LightRAG 預設比例（6,000／8,000 對 30,000）縮放：那個比例在 12,000 下是 2,400／3,200，mix 模式的 context 只剩 3–8 個文字 chunk（ticket 13）。兩個上限都設 0 時，mix 與 naive 照常執行，local、global、hybrid 沒有任何 context，LightRAG 回報查詢失敗。`eval` 的對照表表頭會記下這三個值。500／500 是為 mix 調的：完整 eval（2026-11-01）中 mix 答對的題目從 4 題增加到 7 題，local、global、hybrid 卻減少（4→2、8→4、4→1），因為這 3 種模式的 context 主要是 entity 與 relation 的描述。這個專案只用 mix（`query` 的預設模式），所以沒有依模式分開設定。
+
+**知識庫的語言與實體類型**：`KB_LANGUAGE`（這次是 `Traditional Chinese`）與 `KB_ENTITY_TYPES`（逗號分隔，這次是「卡片,權益,回饋方案,回饋規則,費用,約定條款,活動,商店或通路,支付工具,機構」）兩個欄位必填，缺少、為空或有空項目時 CLI 在啟動時中止。`rag_lab` 經 LightRAG 的 `addon_params` 傳入：語言決定實體抽取與描述合併的輸出語言，也決定查詢時關鍵字抽取的語言；實體類型決定抽取時可用的類型。LightRAG 自己讀的 `SUMMARY_LANGUAGE`、`ENTITY_TYPES` 仍然會被拒絕。改這兩個值只影響之後匯入的文件，已匯入的要重匯才會反映。
 
 **回答附加指示**：產生答案時，LightRAG 的回答提示詞（`rag_response`，英文）第 6 點「Additional Instructions」會放入 `rag_lab/pipeline.py` 的 `ANSWER_INSTRUCTIONS`（以 `QueryParam.user_prompt` 傳入）。內容是要求模型先分清楚問題講的是信用卡還是金融卡：問題的卡別或前提與資料不符時第一句先更正、不拿另一種卡的資料回答、講回饋或費用的每一段寫出卡別、兩種卡的數字分開列。所有查詢入口（`query`、`query --vlm-enhanced`、`eval`、Python API）一律套用，沒有開關；`eval` 的對照表表頭以「回答附加指示」一行記下全文。LightRAG 答案快取的 key 含 `user_prompt`，所以改了這段指示之後，同一題會重新產生答案，不會拿到舊答案；查詢關鍵字的快取不受影響。加上這段指示後（2026-11-12，Gemma 4、28 題 mix、同樣的查詢關鍵字），內容 ✓ 從 14 題變成 16 題：金融卡題 4 → 6、信用卡題 10 → 10；每個設定只跑一次，沒有量重跑的差異（`.scratch/answer-prompt-card-type/issues/01-card-type-answer-instructions.md`）。
 
@@ -529,9 +531,10 @@ PPT、Word、圖片（主知識庫，在 3 篇論文之後匯入 `data/documents
 | `LLM_MAX_ASYNC`、`EMBED_MAX_ASYNC` | 記憶體較大的機器或雲端 API 可以調高 |
 | `LLM_MAX_TOKENS`、`VLM_MAX_TOKENS` | 依新模型的輸出上限調整 |
 | `QUERY_MAX_TOTAL_TOKENS`、`QUERY_MAX_ENTITY_TOKENS`、`QUERY_MAX_RELATION_TOKENS` | 總上限依新 LLM 的 context 長度與記憶體調整；entity／relation 上限相加要小於總上限，其餘留給文字 chunk |
+| `KB_LANGUAGE`、`KB_ENTITY_TYPES` | 知識庫的語言與實體類型，改了要重匯才會反映；不是搬機器要動的欄位 |
 | `EMBED_MODEL`、`EMBED_DIM` | **不能改**，除非重建知識庫 |
 
-- **embedding 模型與維度在建立知識庫後鎖定。** 要換的話，`WORKING_DIR` 也要改到新的資料夾再重新 ingest：LightRAG 預設的向量檔名不含模型名稱或維度，沿用舊資料夾會讓新舊向量混在同一個庫。
+- **embedding 模型與維度在建立知識庫後鎖定。** 要換的話，`WORKING_DIR` 也要改到新的資料夾再重新 ingest：LightRAG 預設的向量檔名不含模型名稱或維度，沿用舊資料夾會讓新舊向量混在同一個庫。預設 embedding 從 Qwen3-Embedding-0.6B-8bit（1024 維）改成 Qwen3-Embedding-4B-4bit-DWQ（2560 維）後，用舊設定建的知識庫（1024 維）在重匯之前不能用新設定查詢，維度對不上。
 - **換成更大的 LLM** 只改 `LLM_BASE_URL` 與 `LLM_MODEL`。已建好的圖譜是舊 LLM 抽取的；要讓圖譜改由新 LLM 抽取，需刪除 `WORKING_DIR` 後重新 ingest。LightRAG 1.4.16 的文件建議 LLM 至少 32B 參數、context length 至少 32KB（建議 64KB；文件原文的單位就是 KB），建圖階段不建議用推理模型；目前的 4B 模型與 `QUERY_MAX_TOTAL_TOKENS=12000` 都低於這個建議。
 - **文件 ID 含圖片的絕對路徑**：專案資料夾搬到別的路徑，或 `PARSER_OUTPUT_DIR` 改了，同一篇論文會被當成新文件。搬機器後從空的 `WORKING_DIR` 重新 ingest。
 
