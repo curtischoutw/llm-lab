@@ -72,7 +72,7 @@ grill 與實驗紀錄在 `grill-notes.md`（決定 1–20），下面引用的�
   - `LabRAGAnything.parse_document` 把 content list 裡有 `text_level` 的文字項目標成標題（加 markdown `#` 記號），並在文件最前面放一段標頭，用固定的標記行包起來，讓 chunker 能從文件內容讀出標頭（LightRAG 呼叫 `chunking_func` 時不傳檔名）。標記行的格式由 ticket 04 定，不能是一般文件會出現的文字。
   - 自訂 chunker 在標題處切開。一節超過 1,200 token 時，在節內依 token 數再切，重疊 100。
   - 每個 chunk 的開頭是「卡片標籤＋章節名稱」。標頭超過 150 token 時，標頭改寫成「適用 N 張卡（清單見本文件第一段）」，完整清單只放在第一個 chunk。
-  - 短節的處理見下面「待使用者確認」第 1 項。
+  - 短節：少於 100 token 的節併進下一節，標頭列出兩個章節名稱；最後一節太短時併進前一節；合併後超過 1,200 token 時照一般規則在節內再切（使用者 2026-11-19 選 (c)）。
 - 表格與圖片：RAG-Anything 把它們另外做成 chunk，不經過 `chunking_func`。在 `parse_document` 把卡片標籤加進 `table_caption`／`image_caption`，讓這些 chunk 的內容也帶卡片名稱。
 - 文件 ID 不變：RAG-Anything 依原始 content list 算 ID 與解析快取，`parse_document` 只改回傳的那一份（和現行的表格縮小做法相同）。
 - 已知後果：自訂 `chunking_func` 之後，RAG-Anything 不會再幫文字 chunk 標頁碼（`page_idx`）。`rag_lab` 目前沒有用到頁碼。
@@ -105,20 +105,20 @@ grill 與實驗紀錄在 `grill-notes.md`（決定 1–20），下面引用的�
 - 另外用 `output/rag_opt/probe28.py` 重跑 a／b／c 歸因，來源檔名改成新檔名。
 - 沒達標時不回滾（舊知識庫已刪），結果寫進 ticket，由使用者決定下一步（例如在新知識庫上重試 E1、E2，或考慮補前後文摘要，決定 14）。
 
-### 待使用者確認
+### 已確認：短節的處理
 
 1. **短節怎麼處理**：948 節少於 100 token。
    - (a) 每個標題各自一個 chunk：chunk 數從 2,341 增加到約 2,600 以上，實體抽取的 LLM 呼叫跟著增加，很多 chunk 的標頭比內文還長。
    - (b) 相鄰的節合併到接近 1,200 token：chunk 數接近現在，但一個 chunk 又會混到好幾節，c1 類干擾回來。
    - (c) 少於 100 token 的節併進下一節，標頭列出兩個章節名稱；其他節各自一個 chunk。
-   - 建議 (c)。最後一節太短時併進前一節；合併後超過 1,200 token 時照一般規則在節內再切。
+   - 使用者選 (c)（2026-11-19）。最後一節太短時併進前一節；合併後超過 1,200 token 時照一般規則在節內再切。
 
 ## Testing Decisions
 
 - 好的測試只看外部行為：給定 content list 與設定，檢查產生的 chunk 內容與數量、設定錯誤時的錯誤訊息；不檢查內部函式的呼叫順序。
 - 新增的測試沿用現有的假端點（`tests/fake_openai_server.py`、`tests/fake_mineru.py`），參考 `tests/test_pipeline.py`、`tests/test_cli.py` 的寫法。
 - 要測的行為：
-  - 切塊：標題處切開；超長節再切；短節合併（依第 1 項的結論）；標頭內容；標頭超過 150 token 的改寫；沒有標題的文件。
+  - 切塊：標題處切開；超長節再切；短節合併（少於 100 token 併進下一節、最後一節併進前一節）；標頭內容；標頭超過 150 token 的改寫；沒有標題的文件。
   - `DOCUMENT_HEADERS_FILE`：沒設時和現在一樣；文件不在檔裡時匯入失敗。
   - `KB_LANGUAGE`、`KB_ENTITY_TYPES`：缺少時 ConfigError；值有傳進 LightRAG 的 `addon_params`。
   - 改檔名：`document_filename` 的新格式；遷移腳本重跑不會重複改名。
