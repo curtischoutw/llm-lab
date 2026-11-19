@@ -1679,14 +1679,14 @@ class UnreachableEndpointTest(PipelineCase):
 # 假 mineru 輸出的文字（tests/fake_mineru.py）：一個標題與一段內文，兩者合起來不到 100 token，所以是一個 chunk
 FAKE_HEADING = "A Study of Fake Entities in paper"
 FAKE_BODY = "Fake Entity Alpha works together with Fake Entity Beta."
-HEADER = "信用卡：甲卡、乙卡"
+HEADER = "卡別：信用卡｜適用卡片：甲卡／乙卡"
 
 
 class DocumentHeadersTest(PipelineCase):
     def setUp(self):
         super().setUp()
         self.headers_file = self.tmp / "document_headers.json"
-        self.headers_file.write_text(json.dumps({"paper.pdf": HEADER, "other.pdf": "金融卡：丙卡"}), encoding="utf-8")
+        self.headers_file.write_text(json.dumps({"paper.pdf": HEADER, "other.pdf": "卡別：金融卡｜適用卡片：丙卡"}), encoding="utf-8")
 
     def stored_chunks(self) -> list[str]:
         """知識庫裡所有 chunk 的內容，含圖片、表格、公式描述的 chunk（依 chunk_order_index 排序）。"""

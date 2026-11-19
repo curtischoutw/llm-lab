@@ -12,8 +12,11 @@
 Dependencies: 標準函式庫。
 """
 
+import json
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from rag_lab.config import ConfigError, get_settings
@@ -91,6 +94,30 @@ class KnowledgeBaseSettingsTest(unittest.TestCase):
                 with self.assertRaises(ConfigError) as caught:
                     self.settings(KB_ENTITY_TYPES=bad)
                 self.assertEqual(caught.exception.field, "KB_ENTITY_TYPES")
+
+
+class DocumentHeadersSettingsTest(unittest.TestCase):
+    """DOCUMENT_HEADERS_FILE 的值是使用者資料：載入時就檢查格式，錯誤訊息指出是哪個檔名、不含標頭內容。"""
+
+    settings = KnowledgeBaseSettingsTest.settings
+
+    def headers_settings(self, headers: dict):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "headers.json"
+            path.write_text(json.dumps(headers, ensure_ascii=False), encoding="utf-8")
+            return self.settings(DOCUMENT_HEADERS_FILE=str(path))
+
+    def test_valid_headers_are_loaded(self):
+        headers = {"a.pdf": "卡別：信用卡｜適用卡片：甲卡／乙卡", "b.pdf": "卡別：信用卡及金融卡｜適用卡片：全部信用卡"}
+        self.assertEqual(self.headers_settings(headers).document_headers, headers)
+
+    def test_a_malformed_header_aborts_and_names_the_file_but_not_the_header(self):
+        with self.assertRaises(ConfigError) as caught:
+            self.headers_settings({"good.pdf": "卡別：信用卡｜適用卡片：甲卡", "bad.pdf": "信用卡：機密卡名、乙卡"})
+        self.assertEqual(caught.exception.field, "DOCUMENT_HEADERS_FILE")
+        self.assertIn("bad.pdf", str(caught.exception))
+        self.assertNotIn("good.pdf", str(caught.exception))
+        self.assertNotIn("機密卡名", str(caught.exception))
 
 
 if __name__ == "__main__":

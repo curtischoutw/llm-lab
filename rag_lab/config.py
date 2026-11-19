@@ -13,7 +13,8 @@
   沒有開關；chunk_top_k 與分數門檻不在這裡設定，由 pipeline 固定為 20 與 0.0，不受行程環境的 CHUNK_TOP_K、MIN_RERANK_SCORE 影響。
 - DOCUMENT_HEADERS_FILE 選填：指向 JSON 檔（key 是文件檔名，值是 chunk 標頭文字），沒設時依標題切塊與標頭改寫都不啟用，
   匯入行為與沒有這個設定時完全相同。有設時在啟動就讀檔驗證（檔案不存在、不是 JSON、不是物件、值不是非空字串都是 ConfigError；
-  訊息不含檔案內容）。標頭值不可含 rag_lab.chunking 的標記字串。
+  訊息不含檔案內容）。標頭值必須符合 `卡別：<卡別>｜適用卡片：<卡名>／<卡名>…`（rag_lab.chunking.parse_header），
+  也不可含 rag_lab.chunking 的標記字串；錯誤訊息指出是哪個檔名，不含標頭內容。
 - EMBED_QUERY_PREFIX 只套用在查詢端（LightRAG 會以 context="query" 呼叫），
   文件端不加前綴；Qwen3-Embedding 的官方用法即為此非對稱形式。
 - KB_LANGUAGE 與 KB_ENTITY_TYPES 必填：知識庫的語言與實體類型是匯入結果的一部分，由 rag_lab 經 pipeline.build_rag 的
@@ -80,7 +81,7 @@ from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
-from rag_lab.chunking import HEADER_END, HEADER_START
+from rag_lab.chunking import HEADER_END, HEADER_START, parse_header
 
 # ==============================
 # rag_lab 沒有管理的 LightRAG／RAG-Anything／MinerU 環境變數
@@ -223,7 +224,7 @@ def _document_headers(name: str) -> dict[str, str] | None:
         檔名到標頭文字的 dict；環境變數沒設或是空字串時回傳 None。
 
     Raises:
-        ConfigError: 檔案讀不到、不是 JSON、不是物件，或有值不是非空字串、含標頭標記字串（訊息不含檔案內容）。
+        ConfigError: 檔案讀不到、不是 JSON、不是物件，或有值不是非空字串、含標頭標記字串、格式不符（訊息指出檔名，不含標頭內容）。
     """
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -241,7 +242,11 @@ def _document_headers(name: str) -> dict[str, str] | None:
         if not isinstance(header, str) or not header.strip():
             raise ConfigError(name, "的每個標頭文字必須是非空字串")
         if HEADER_START in header or HEADER_END in header:
-            raise ConfigError(name, "的標頭文字不可含有 rag_lab 的標頭標記字串")
+            raise ConfigError(name, f"裡 {file_name} 的標頭文字不可含有 rag_lab 的標頭標記字串")
+        try:
+            parse_header(header)
+        except ValueError as exc:
+            raise ConfigError(name, f"裡 {file_name} 的標頭格式不符：{exc}") from exc
     return data
 
 

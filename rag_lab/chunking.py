@@ -16,8 +16,9 @@
 - chunk_token_size 限制整個 chunk（標頭＋章節行＋內文），不只內文：實體抽取的 prompt 大小看整個 chunk。組超過時在組內依 token
   切內文，每段與前一段重疊 chunk_overlap_token_size（ASSUMPTION：spec 的「一節超過 1,200 token」解讀成整個 chunk 的上限）。
 - 標頭超過 HEADER_MAX_TOKENS（150）時，整份文件的第一個 chunk 放完整標頭，其餘 chunk 改成「適用 N 張卡（清單見本文件第一段）」。
-  標頭格式假設是 `<卡別>：<卡名>、<卡名>…`（ASSUMPTION：ticket 02 產生的標頭檔照這個格式）；冒號前的部分保留，N 是冒號後以
-  頓號分隔的項目數；沒有冒號時整段都當清單。
+  標頭格式是 ticket 01 產生的 `卡別：<卡別>｜適用卡片：<卡名>／<卡名>…`（卡別可以是「信用卡及金融卡」，「全部信用卡」是清單裡的
+  一個項目）；短標頭保留「卡別：…」，適用卡片換成「適用 N 張卡（清單見本文件第一段）」，N 是以全形「／」分隔的項目數。格式不符時
+  不猜，parse_header 拋 ValueError；chunker、rewrite_content_list 與 config 載入標頭檔時都會檢查。
 - 表格與圖片不經過 chunking_func（RAG-Anything 另外做成 chunk），所以 rewrite_content_list 把標頭加進它們的 caption。
 
 已知極限：
@@ -51,6 +52,7 @@ _HEADER_BLOCK = re.compile(
     rf"\A{re.escape(HEADER_START)}\n(.*?)\n{re.escape(HEADER_END)}[ \t\r\n]*", re.DOTALL
 )
 _HEADING_LINE = re.compile(r"^(#{1,6}) +(\S.*)$")
+_HEADER_FORMAT = re.compile(r"\A卡別：([^｜\n]*)｜適用卡片：([^｜\n]*)\Z")
 
 # ==============================
 # 標頭
@@ -69,21 +71,41 @@ def wrap_header(header: str) -> str:
     return f"{HEADER_START}\n{header}\n{HEADER_END}"
 
 
+def parse_header(header: str) -> tuple[str, list[str]]:
+    """解析「卡別：<卡別>｜適用卡片：<卡名>／<卡名>…」。
+
+    Args:
+        header: 標頭文字（單行）。
+
+    Returns:
+        (卡別, 適用卡片清單)，前後空白已去掉。
+
+    Raises:
+        ValueError: 格式不符、卡別為空，或清單有空項目。訊息不含標頭內容（標頭是使用者資料）。
+    """
+    match = _HEADER_FORMAT.match(header)
+    if match is not None:
+        kind = match.group(1).strip()
+        cards = [card.strip() for card in match.group(2).split("／")]
+        if kind and all(cards):
+            return kind, cards
+    raise ValueError("標頭格式必須是「卡別：<卡別>｜適用卡片：<卡名>／<卡名>…」（單行；卡別與每個卡名都不可為空）")
+
+
 def shorten_header(header: str) -> str:
-    """把「<卡別>：<卡名>、<卡名>…」改寫成「<卡別>：適用 N 張卡（清單見本文件第一段）」。
+    """把「卡別：<卡別>｜適用卡片：<清單>」改寫成「卡別：<卡別>｜適用 N 張卡（清單見本文件第一段）」。
 
     Args:
         header: 完整標頭。
 
     Returns:
-        短標頭；沒有冒號時只有「適用 N 張卡（清單見本文件第一段）」。
+        短標頭。
+
+    Raises:
+        ValueError: 標頭格式不符（見 parse_header）。
     """
-    prefix, colon, names = header.partition("：")
-    if not colon:
-        prefix, names = "", header
-    count = len([name for name in names.split("、") if name.strip()])
-    short = f"適用 {count} 張卡（清單見本文件第一段）"
-    return f"{prefix}：{short}" if prefix else short
+    kind, cards = parse_header(header)
+    return f"卡別：{kind}｜適用 {len(cards)} 張卡（清單見本文件第一段）"
 
 
 # ==============================
@@ -113,12 +135,11 @@ def rewrite_content_list(
         新的 content list。
 
     Raises:
-        ValueError: 標頭是空字串或含有標記字串。
+        ValueError: 標頭含有標記字串，或格式不符（見 parse_header）。
     """
-    if not header.strip():
-        raise ValueError("標頭不可以是空字串")
     if HEADER_START in header or HEADER_END in header:
         raise ValueError("標頭不可以含有標頭標記字串")
+    parse_header(header)
     label = CAPTION_LABEL + (shorten_header(header) if count_tokens(header) > HEADER_MAX_TOKENS else header)
     result: list[dict[str, Any]] = [{"type": "text", "text": wrap_header(header)}]
     for item in content_list:
@@ -220,12 +241,13 @@ def chunk_by_headings(
         [{"tokens", "content", "chunk_order_index"}]，順序與文件相同。
 
     Raises:
-        ValueError: 內容沒有標頭標記區塊，或標頭佔掉的 token 太多、內文每段剩下的 token 不超過重疊的 token 數。
+        ValueError: 內容沒有標頭標記區塊、標頭格式不符（見 parse_header），或標頭佔掉的 token 太多、內文每段剩下的 token 不超過重疊的 token 數。
     """
     match = _HEADER_BLOCK.match(content)
     if match is None:
         raise ValueError("文件內容開頭沒有標頭標記區塊；使用依標題切塊的 chunker 時，每份文件都必須經過 parse_document 的改寫")
     header = match.group(1)
+    parse_header(header)
     long_header = len(tokenizer.encode(header)) > HEADER_MAX_TOKENS
     short_header = shorten_header(header) if long_header else header
     sections = _split_sections(content[match.end() :])

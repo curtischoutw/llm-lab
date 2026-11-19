@@ -221,11 +221,13 @@ class ConfigValidationTest(unittest.TestCase):
                 "array": Path(tmp) / "array.json",
                 "non-string value": Path(tmp) / "number.json",
                 "empty value": Path(tmp) / "empty.json",
+                "malformed header": Path(tmp) / "format.json",
             }
             bad_files["not json"].write_text("{" + SECRET, encoding="utf-8")
             bad_files["array"].write_text('["a.pdf"]', encoding="utf-8")
             bad_files["non-string value"].write_text('{"a.pdf": 3}', encoding="utf-8")
             bad_files["empty value"].write_text('{"a.pdf": "  "}', encoding="utf-8")
+            bad_files["malformed header"].write_text('{"a.pdf": "信用卡：甲卡、乙卡"}', encoding="utf-8")
             for case, path in bad_files.items():
                 with self.subTest(case=case):
                     result = run_cli(["eval", "q.jsonl"], {"DOCUMENT_HEADERS_FILE": str(path)})
@@ -235,7 +237,7 @@ class ConfigValidationTest(unittest.TestCase):
     def test_valid_document_headers_file_is_accepted_and_unset_is_allowed(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "headers.json"
-            path.write_text('{"a.pdf": "信用卡：甲卡"}', encoding="utf-8")
+            path.write_text('{"a.pdf": "卡別：信用卡｜適用卡片：甲卡"}', encoding="utf-8")
             for overrides in ({"DOCUMENT_HEADERS_FILE": str(path)}, {}):
                 with self.subTest(overrides=bool(overrides)):
                     result = run_cli(["eval", "q.jsonl"], overrides)
