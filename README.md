@@ -174,7 +174,7 @@ sudo sysctl iogpu.wired_limit_mb=26000; sysctl iogpu.wired_limit_mb
 ~/.local/share/pipx/venvs/mlx-vlm/bin/python scripts/vlm_server.py --mlx-cache-limit-gb 1 \
   --host 127.0.0.1 --port 8081 \
   --model mlx-community/gemma-4-26b-a4b-it-4bit \
-  --embedding-model mlx-community/Qwen3-Embedding-0.6B-8bit \
+  --embedding-model mlx-community/Qwen3-Embedding-4B-4bit-DWQ \
   --reranker-model BAAI/bge-reranker-v2-m3 \
   --max-tokens 4096
 ```
@@ -197,7 +197,7 @@ mlx_lm.server --host 127.0.0.1 --port 8080 \
 ~/.local/share/pipx/venvs/mlx-vlm/bin/python scripts/vlm_server.py --mlx-cache-limit-gb 1 \
   --host 127.0.0.1 --port 8081 \
   --model mlx-community/Qwen3-VL-4B-Instruct-4bit \
-  --embedding-model mlx-community/Qwen3-Embedding-0.6B-8bit \
+  --embedding-model mlx-community/Qwen3-Embedding-4B-4bit-DWQ \
   --reranker-model BAAI/bge-reranker-v2-m3
 ```
 
@@ -534,7 +534,7 @@ PPT、Word、圖片（主知識庫，在 3 篇論文之後匯入 `data/documents
 | `KB_LANGUAGE`、`KB_ENTITY_TYPES` | 知識庫的語言與實體類型，改了要重匯才會反映；不是搬機器要動的欄位 |
 | `EMBED_MODEL`、`EMBED_DIM` | **不能改**，除非重建知識庫 |
 
-- **embedding 模型與維度在建立知識庫後鎖定。** 要換的話，`WORKING_DIR` 也要改到新的資料夾再重新 ingest：LightRAG 預設的向量檔名不含模型名稱或維度，沿用舊資料夾會讓新舊向量混在同一個庫。
+- **embedding 模型與維度在建立知識庫後鎖定。** 要換的話，`WORKING_DIR` 也要改到新的資料夾再重新 ingest：LightRAG 預設的向量檔名不含模型名稱或維度，沿用舊資料夾會讓新舊向量混在同一個庫。預設 embedding 從 Qwen3-Embedding-0.6B-8bit（1024 維）改成 Qwen3-Embedding-4B-4bit-DWQ（2560 維）後，用舊設定建的知識庫（1024 維）在重匯之前不能用新設定查詢，維度對不上。
 - **換成更大的 LLM** 只改 `LLM_BASE_URL` 與 `LLM_MODEL`。已建好的圖譜是舊 LLM 抽取的；要讓圖譜改由新 LLM 抽取，需刪除 `WORKING_DIR` 後重新 ingest。LightRAG 1.4.16 的文件建議 LLM 至少 32B 參數、context length 至少 32KB（建議 64KB；文件原文的單位就是 KB），建圖階段不建議用推理模型；目前的 4B 模型與 `QUERY_MAX_TOTAL_TOKENS=12000` 都低於這個建議。
 - **文件 ID 含圖片的絕對路徑**：專案資料夾搬到別的路徑，或 `PARSER_OUTPUT_DIR` 改了，同一篇論文會被當成新文件。搬機器後從空的 `WORKING_DIR` 重新 ingest。
 
