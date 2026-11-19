@@ -394,7 +394,8 @@ EXTRA_ALIASES: dict[tuple[str, str], tuple[str, ...]] = {
     ("信用卡", "cg019"): ("friDay聯名卡",),
     ("信用卡", "cg039"): ("雙幣卡",),
     ("信用卡", "cg042"): ("Gogoro聯名卡",),
-    ("信用卡", "cg047"): ("Richart卡",),
+    # 官網卡片頁 cg047 的公告：下列舊卡名皆已更名為台新Richart卡（使用者 Q43：算同一張卡）
+    ("信用卡", "cg047"): ("Richart卡", "@GoGo卡", "FlyGo卡", "玫瑰Giving卡", "大買家聯名卡", "Woojii卡", "三商美邦聯名卡", "全家Richart聯名卡"),
     ("信用卡", "cg048"): ("美麗華卡",),
     ("金融卡", "cg008"): ("蝴蝶悠遊卡", "悠遊Debit卡"),
 }
@@ -421,14 +422,6 @@ EXTRA_CARDS: tuple[Card, ...] = (
     Card("信用卡", "比漾聯名卡", ("比漾聯名卡",)),
     Card("信用卡", "棉花田聯名卡", ("棉花田聯名卡",)),
     Card("信用卡", "SKM Park Outlets聯名卡", ("SKM Park Outlets聯名卡",)),
-    # 下面七張是已更名為台新Richart卡的舊卡名（官網卡片頁 cg047 的公告），舊名還出現在活動與卡片頁內文
-    Card("信用卡", "@GoGo卡", ("@GoGo卡",)),
-    Card("信用卡", "FlyGo卡", ("FlyGo卡",)),
-    Card("信用卡", "玫瑰Giving卡", ("玫瑰Giving卡",)),
-    Card("信用卡", "大買家聯名卡", ("大買家聯名卡",)),
-    Card("信用卡", "Woojii卡", ("Woojii卡",)),
-    Card("信用卡", "三商美邦聯名卡", ("三商美邦聯名卡",)),
-    Card("信用卡", "全家Richart聯名卡", ("全家Richart聯名卡",)),
 )
 # 不確定是不是「一張卡」的詞：不加進已知清單，每次產報告時列出文件數，讓使用者決定
 UNDECIDED_TERMS: tuple[tuple[str, str], ...] = (

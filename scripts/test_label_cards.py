@@ -538,6 +538,14 @@ class ExtraCardsTest(unittest.TestCase):
     def test_renamed_card_is_the_same_card_as_the_new_name(self) -> None:
         self.assertEqual(self.offer("適用：Richart世界商務卡(原Woojii世界商務卡)")["cards"], ["Richart世界商務卡"])
 
+    def test_old_names_of_the_richart_card_are_aliases_of_it(self) -> None:
+        for old_name in ("@GoGo卡", "FlyGo卡", "玫瑰Giving卡", "大買家聯名卡", "Woojii卡", "三商美邦聯名卡", "全家Richart聯名卡"):
+            self.data = FakeData(Path(self._tmp.name) / f"old_{abs(hash(old_name))}")
+            self.data.add("卡片", "card_cg047_card001.pdf", f"{WWW}/overview/cg047/card001/", html=card_page("台新Richart卡"))
+            entry = self.offer(f"限原{old_name}持卡人")
+            self.assertEqual(entry["cards"], ["台新Richart卡"], old_name)
+            self.assertEqual(entry["short_name"], "台新Richart卡", old_name)
+
     def test_tier_words_that_are_not_a_card_name_are_not_matched(self) -> None:
         self.assertTrue(self.offer("限御璽卡、白金卡、鈦金卡持卡人，不含企業卡")["needs_review"])
 
