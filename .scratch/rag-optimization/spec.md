@@ -57,7 +57,7 @@ Status: needs-info（等歸因結果：Q7 probe、Q8 雜訊、Q11 逐題分析�
 15. **實驗不改 rag_lab**：E1–E3 用 `output/rag_opt/run_experiment.py` 覆寫 pipeline 常數；確定有效之後，再開 ticket 正式改程式。
 16. **重匯直接取代舊知識庫**：不另外建 WORKING_DIR。重匯前刪除 `rag_storage` 與 `output/rag_opt/kb_copy`，刪除前要列出清單請使用者確認。刪除之後就沒辦法換回舊知識庫，舊的 eval 答案保留在 `eval_results/` 供比對。檔名改了，MinerU 的解析快取對不上，所有文件都要重新解析。
 18. **查詢端維持原狀**：E1–E3 都不採用，也不合併起來跑；重匯之後可以在新知識庫上再試一次 E1、E2。embedding 比較的候選是 `mlx-community/Qwen3-Embedding-4B-4bit-DWQ`（2560 維）與 `mlx-community/bge-m3-mlx-8bit`（1024 維）；在 kb_copy 的副本上用候選模型重算三個向量庫（chunk 2,341、entity 18,297、relation 37,027 筆），再跑 probe28 比較（`output/rag_opt/run_embed_compare.sh`）。
-17. **順序**：E1–E3 查詢端實驗 → 在 kb_copy 上比較 embedding → 寫正式 spec 與 tickets → 實作（卡片標籤、依標題切塊、中文、實體類型、改檔名）→ 使用者確認後刪除舊知識庫 → 全量重匯 → eval 加雙判讀。
+17. **順序**：E1–E3 查詢端實驗 → 在 kb_copy 上比較 embedding（結果：換 4B，決定 20）→ 寫正式 spec 與 tickets → 實作（卡片標籤、依標題切塊、中文、實體類型、改檔名）→ 使用者確認後刪除舊知識庫 → 全量重匯 → eval 加雙判讀。
 
 ## 查詢端實驗結果（2026-11-19，事實）
 
@@ -91,7 +91,13 @@ Status: needs-info（等歸因結果：Q7 probe、Q8 雜訊、Q11 逐題分析�
 - 4B 在前 10、前 20 名比 0.6B 多 11、5 句；前 40 名三個模型相同或只差 2 句。
 - rule-01 和 cross-02 在三個模型下都檢索不到：rule-01 有 2 句排在第 600 名之後，cross-02 有 2 句排在第 100 名之後。這兩題的問題不在 embedding 模型。
 - bge-m3：`mlx-community/bge-m3-mlx-8bit` 缺少 `1_Pooling` 設定，mlx-vlm 的 xlm_roberta 實作因此預設 mean pooling（`mlx_vlm/models/xlm_roberta/xlm_roberta.py:143`），但 bge-m3 用 CLS pooling。用 mean pooling 時，存下的向量和模型直接算的一致（cos 1.0），查詢向量改在同一個 process 內計算，結果也一樣是 4／12／17，所以低分來自 pooling，不是比較程式的錯誤。CLS 的數字是在同一個 process 內直接算 chunk 與查詢向量得到的（`output/rag_opt/` 以外的暫存腳本），server 目前無法用 CLS 提供 bge-m3。
-- 記憶體峰值沒有記錄（決定 8 原本要求記錄）。
+- 記憶體：4B 重算期間 server footprint 峰值 22 GB（`output/rag_opt/watchdog_q4b/sampler.log`）。這段期間只有 embedding 請求，重匯時 Gemma 抽實體與 4B embedding 會交替執行，峰值沒有量過。
+
+20. **重匯改用 Qwen3-Embedding-4B**（`mlx-community/Qwen3-Embedding-4B-4bit-DWQ`，2560 維，查詢前綴沿用現行的 Qwen 指令）：使用者決定（2026-11-19）。影響：
+    - 重匯時 embedding 約多 12 小時（依上面實測速度推算），加上 Gemma 抽實體的時間。
+    - `.env` 的 `EMBED_MODEL`、`EMBED_DIM` 與 server 啟動參數要改；`scripts/vlm_server.py`、`scripts/smoke_test.py`、`README.md` 有寫到 0.6B，要一起更新。
+    - 查詢時的 embedding 延遲與之後增量更新的時間會增加，數字沒有量過，重匯後的 eval 會記錄 eval 總時間。
+    - 重匯時用 watchdog 監看記憶體（上限 26 GB）。
 
 ## 範圍外發現
 
