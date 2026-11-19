@@ -13,6 +13,11 @@
   沒有開關；chunk_top_k 與分數門檻不在這裡設定，由 pipeline 固定為 20 與 0.0，不受行程環境的 CHUNK_TOP_K、MIN_RERANK_SCORE 影響。
 - EMBED_QUERY_PREFIX 只套用在查詢端（LightRAG 會以 context="query" 呼叫），
   文件端不加前綴；Qwen3-Embedding 的官方用法即為此非對稱形式。
+- KB_LANGUAGE 與 KB_ENTITY_TYPES 必填：知識庫的語言與實體類型是匯入結果的一部分，由 rag_lab 經 pipeline.build_rag 的
+  addon_params 傳給 LightRAG，不靠 LightRAG 自己讀的 SUMMARY_LANGUAGE、ENTITY_TYPES（那兩個仍在拒絕名單，
+  預設是英文與人物、組織等通用類型，不適合繁體中文的信用卡文件）。語言也影響查詢時的關鍵字抽取。
+  KB_ENTITY_TYPES 是逗號分隔，去掉每項前後空白；空項目（含整個空字串）以 ConfigError 中止，不默默略過。
+  Settings 以 tuple 保存（frozen dataclass）。
 - 拒絕 rag_lab 沒有管理的 LightRAG／RAG-Anything／MinerU 環境變數（UNMANAGED_LIBRARY_ENV）：LightRAG 與
   RAG-Anything 在 import 時會從環境變數與目前工作目錄的 .env（load_dotenv(".env", override=False)）讀幾十個設定
   當預設值；MinerU 是 RAG-Anything 以子行程執行的 `mineru` 指令，繼承 rag_lab 行程的環境（.env 經 load_dotenv
@@ -202,6 +207,24 @@ def _non_negative_int(name: str) -> int:
     return value
 
 
+def _comma_list(name: str) -> tuple[str, ...]:
+    """讀逗號分隔的清單，去掉每項前後空白。
+
+    Args:
+        name: 環境變數名稱。
+
+    Returns:
+        各項目（至少一項）。
+
+    Raises:
+        ConfigError: 缺少、為空字串，或有空項目。
+    """
+    items = tuple(item.strip() for item in _required(name).split(","))
+    if not all(items):
+        raise ConfigError(name, "有空的項目（逗號分隔的每一項都要有內容）")
+    return items
+
+
 # ==============================
 # 設定物件
 # ==============================
@@ -235,6 +258,8 @@ class Settings:
     query_max_total_tokens: int
     query_max_entity_tokens: int
     query_max_relation_tokens: int
+    kb_language: str
+    kb_entity_types: tuple[str, ...]
 
 
 @lru_cache(maxsize=1)
@@ -283,4 +308,6 @@ def get_settings() -> Settings:
         query_max_total_tokens=query_max_total_tokens,
         query_max_entity_tokens=query_max_entity_tokens,
         query_max_relation_tokens=query_max_relation_tokens,
+        kb_language=_required("KB_LANGUAGE"),
+        kb_entity_types=_comma_list("KB_ENTITY_TYPES"),
     )

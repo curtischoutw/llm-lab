@@ -18,6 +18,7 @@
 Dependencies: 標準函式庫；Pillow（RAG-Anything 的依賴，只用來產生測試用的小圖）。
 """
 
+import asyncio
 import hashlib
 import json
 import os
@@ -31,6 +32,7 @@ import tempfile
 import unittest
 from html.parser import HTMLParser
 from pathlib import Path
+from unittest import mock
 
 import tiktoken
 from PIL import Image
@@ -308,6 +310,43 @@ class PipelineCase(unittest.TestCase):
     def query(self, question: str = "What is Fake Entity Alpha?", *extra: str, **overrides: str):
         """執行 `query`。"""
         return run_cli(["query", question, *extra], self.env(**overrides), timeout=INGEST_TIMEOUT)
+
+
+# ==============================
+# 語言與實體類型（build_rag 傳給 LightRAG 的 addon_params）
+# ==============================
+
+
+class BuildRagAddonParamsTest(unittest.TestCase):
+    """build_rag 建出的 LightRAG 實例用設定裡的語言與實體類型，不是 LightRAG 的預設值。"""
+
+    def test_lightrag_instance_gets_language_and_entity_types_from_settings(self):
+        from rag_lab import config, pipeline
+
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        env = valid_env() | {
+            "WORKING_DIR": str(tmp / "rag_storage"),
+            "PARSER_OUTPUT_DIR": str(tmp / "output"),
+            "KB_LANGUAGE": "Traditional Chinese",
+            "KB_ENTITY_TYPES": " 卡片 ,權益,回饋方案",
+        }
+        config.get_settings.cache_clear()
+        self.addCleanup(config.get_settings.cache_clear)
+        # 保留 PATH：初始化時 RAG-Anything 會執行 mineru --version
+        with mock.patch.dict(os.environ, env | {"PATH": os.environ["PATH"]}, clear=True):
+            rag = pipeline.build_rag(config.get_settings())
+
+            async def addon_params() -> dict:
+                await pipeline._initialize(rag)
+                try:
+                    return dict(rag.lightrag.addon_params)
+                finally:
+                    await pipeline._close(rag)
+
+            params = asyncio.run(addon_params())
+        self.assertEqual(params["language"], "Traditional Chinese")
+        self.assertEqual(params["entity_types"], ["卡片", "權益", "回饋方案"])
 
 
 # ==============================

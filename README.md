@@ -218,6 +218,8 @@ mlx_lm.server --host 127.0.0.1 --port 8080 \
 
 **查詢 context 的 token 分配**：`QUERY_MAX_TOTAL_TOKENS` 是 context 的總上限；`QUERY_MAX_ENTITY_TOKENS` 與 `QUERY_MAX_RELATION_TOKENS` 是其中 entity 與 relation 描述各自的上限，總上限扣掉這兩項，剩下的 token 全部留給文字 chunk。三個欄位都必填，兩個上限是 0 以上的整數、相加必須小於總上限，否則 CLI 在啟動時中止。`.env.example` 的值是 12000／500／500。程式不再依 LightRAG 預設比例（6,000／8,000 對 30,000）縮放：那個比例在 12,000 下是 2,400／3,200，mix 模式的 context 只剩 3–8 個文字 chunk（ticket 13）。兩個上限都設 0 時，mix 與 naive 照常執行，local、global、hybrid 沒有任何 context，LightRAG 回報查詢失敗。`eval` 的對照表表頭會記下這三個值。500／500 是為 mix 調的：完整 eval（2026-11-01）中 mix 答對的題目從 4 題增加到 7 題，local、global、hybrid 卻減少（4→2、8→4、4→1），因為這 3 種模式的 context 主要是 entity 與 relation 的描述。這個專案只用 mix（`query` 的預設模式），所以沒有依模式分開設定。
 
+**知識庫的語言與實體類型**：`KB_LANGUAGE`（這次是 `Traditional Chinese`）與 `KB_ENTITY_TYPES`（逗號分隔，這次是「卡片,權益,回饋方案,回饋規則,費用,約定條款,活動,商店或通路,支付工具,機構」）兩個欄位必填，缺少、為空或有空項目時 CLI 在啟動時中止。`rag_lab` 經 LightRAG 的 `addon_params` 傳入：語言決定實體抽取與描述合併的輸出語言，也決定查詢時關鍵字抽取的語言；實體類型決定抽取時可用的類型。LightRAG 自己讀的 `SUMMARY_LANGUAGE`、`ENTITY_TYPES` 仍然會被拒絕。改這兩個值只影響之後匯入的文件，已匯入的要重匯才會反映。
+
 **回答附加指示**：產生答案時，LightRAG 的回答提示詞（`rag_response`，英文）第 6 點「Additional Instructions」會放入 `rag_lab/pipeline.py` 的 `ANSWER_INSTRUCTIONS`（以 `QueryParam.user_prompt` 傳入）。內容是要求模型先分清楚問題講的是信用卡還是金融卡：問題的卡別或前提與資料不符時第一句先更正、不拿另一種卡的資料回答、講回饋或費用的每一段寫出卡別、兩種卡的數字分開列。所有查詢入口（`query`、`query --vlm-enhanced`、`eval`、Python API）一律套用，沒有開關；`eval` 的對照表表頭以「回答附加指示」一行記下全文。LightRAG 答案快取的 key 含 `user_prompt`，所以改了這段指示之後，同一題會重新產生答案，不會拿到舊答案；查詢關鍵字的快取不受影響。加上這段指示後（2026-11-12，Gemma 4、28 題 mix、同樣的查詢關鍵字），內容 ✓ 從 14 題變成 16 題：金融卡題 4 → 6、信用卡題 10 → 10；每個設定只跑一次，沒有量重跑的差異（`.scratch/answer-prompt-card-type/issues/01-card-type-answer-instructions.md`）。
 
 ## 4. 使用
@@ -529,6 +531,7 @@ PPT、Word、圖片（主知識庫，在 3 篇論文之後匯入 `data/documents
 | `LLM_MAX_ASYNC`、`EMBED_MAX_ASYNC` | 記憶體較大的機器或雲端 API 可以調高 |
 | `LLM_MAX_TOKENS`、`VLM_MAX_TOKENS` | 依新模型的輸出上限調整 |
 | `QUERY_MAX_TOTAL_TOKENS`、`QUERY_MAX_ENTITY_TOKENS`、`QUERY_MAX_RELATION_TOKENS` | 總上限依新 LLM 的 context 長度與記憶體調整；entity／relation 上限相加要小於總上限，其餘留給文字 chunk |
+| `KB_LANGUAGE`、`KB_ENTITY_TYPES` | 知識庫的語言與實體類型，改了要重匯才會反映；不是搬機器要動的欄位 |
 | `EMBED_MODEL`、`EMBED_DIM` | **不能改**，除非重建知識庫 |
 
 - **embedding 模型與維度在建立知識庫後鎖定。** 要換的話，`WORKING_DIR` 也要改到新的資料夾再重新 ingest：LightRAG 預設的向量檔名不含模型名稱或維度，沿用舊資料夾會讓新舊向量混在同一個庫。
