@@ -5,7 +5,8 @@
 
 關鍵設計決策：
 - 每個測試用 patch.dict(clear=True) 換上一份完整的有效環境，並在前後清掉 get_settings 的快取；
-  load_dotenv 不覆蓋已存在的變數，所以環境一律明確給齊（缺少的欄位用空字串表示）。
+  rag_lab.config.load_dotenv 換成空操作：get_settings 會往上找 .env（含開發者的 .env）把不存在的變數補回來，
+  不換掉的話「欄位不存在」的結果取決於開發者的 .env。
 - 期望值是 spec 給的字面值，不從 rag_lab 取值。
 
 Dependencies: 標準函式庫。
@@ -44,7 +45,7 @@ class KnowledgeBaseSettingsTest(unittest.TestCase):
         """
         get_settings.cache_clear()
         self.addCleanup(get_settings.cache_clear)
-        with mock.patch.dict(os.environ, {**valid_env(), **overrides}, clear=True):
+        with mock.patch.dict(os.environ, {**valid_env(), **overrides}, clear=True), mock.patch("rag_lab.config.load_dotenv"):
             return get_settings()
 
     def test_language_and_entity_types_come_from_the_environment(self):
@@ -76,7 +77,11 @@ class KnowledgeBaseSettingsTest(unittest.TestCase):
             with self.subTest(field=field):
                 env = valid_env()
                 del env[field]
-                with mock.patch.dict(os.environ, env, clear=True), self.assertRaises(ConfigError) as caught:
+                with (
+                    mock.patch.dict(os.environ, env, clear=True),
+                    mock.patch("rag_lab.config.load_dotenv"),
+                    self.assertRaises(ConfigError) as caught,
+                ):
                     get_settings()
                 self.assertEqual(caught.exception.field, field)
 
