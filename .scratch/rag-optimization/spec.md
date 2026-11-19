@@ -49,26 +49,29 @@ grill 與實驗紀錄在 `grill-notes.md`（決定 1–20），下面引用的�
   - 卡別：信用卡、金融卡，或兩者都有。
   - 適用卡片：一張或多張卡片名稱，或「全部信用卡」「全部金融卡」。
 - 產生方式：程式從 manifest 網址、類別資料夾與 `_meta/html` 的官網頁面產生。
-  - 卡片頁（`cards/`、`debit_cards/`）：網址的 `cgXXX` 對應頁面標題的卡名。
-  - 其他文件（權益、活動、約定條款等）：在頁面內文比對已知卡名清單。比對不到時不猜，列進「待人工確認」清單。
+  - 卡片頁（`cards/`、`debit_cards/`、`richart/`）：網址的 `cgXXX` 或頁面標題對應卡名。
+  - 其他有頁面快照的文件（權益、活動等）：在頁面內文比對已知卡名清單。
+  - 沒有頁面快照的 52 份（下載 19、權益附件 20、活動圖片 9、金融卡約定條款 PDF 4）：如果 manifest 或 `fetch_taishin.py` 記得它是從哪個頁面連過去的，沿用那個頁面的標籤；查不到就列進待人工確認清單。
+  - 比對不到時不猜，列進待人工確認清單。
 - 標籤檔：`data/taishin_credit_card/_meta/document_labels.json`，key 是相對於 `data/taishin_credit_card/` 的路徑，值含卡別、適用卡片清單、簡短卡名（檔名用）與標頭文字。使用者抽查之後才給下游使用。
 - 檔名格式：`<卡別>_<簡短卡名｜多卡｜全部>_<原檔名>`，例如 `信用卡_台新Richart卡_card_cg047_card001.pdf`。卡別兩者都有時寫「信用卡及金融卡」。
 
-### 改檔名（決定 6、使用者 Q17）
+### 改檔名（決定 6；grill 時使用者決定檔名也要改）
 
 - `scripts/fetch_taishin.py` 的 `document_filename`（`scripts/fetch_taishin.py:2513`）改成產生新格式。之後新抓的文件也用新檔名。
-- 一次性遷移腳本：改 `data/taishin_credit_card/` 底下現有文件的檔名、manifest 的 `filename`、`eval/questions.taishin.jsonl` 的 `source`。`_meta/html` 的快照檔名要不要改，依 `fetch_taishin.py` 怎麼對照決定，以增量更新照常運作為準。
+- 新格式套用在所有會放進資料夾、會被匯入的文件，包含活動圖片（`IMAGES`，`fetch_taishin.py:2092` 起比較新舊 banner 檔名的地方也要跟著改）。
+- 一次性遷移腳本：改 `data/taishin_credit_card/` 底下現有文件的檔名、manifest 的 `filename`、`eval/questions.taishin.jsonl` 的 `source`。manifest 裡 11 筆沒有實體檔的紀錄也照同一規則改；產生不了標籤的保留原檔名並列出。`_meta/html`、`_meta/print` 的快照檔名要不要改，依 `fetch_taishin.py` 怎麼對照決定，以增量更新照常運作為準。
 - 遷移腳本要可以重跑：已經是新檔名的不再改。
 
 ### chunk 標頭與依標題切塊（決定 13）
 
-- rag_lab 新增選填設定 `DOCUMENT_HEADERS_FILE`，指向一個 JSON 檔，key 是文件檔名，值是標頭文字。
-  - 沒設：行為和現在一樣。
-  - 有設，但匯入的文件不在檔裡：該文件匯入失敗，報告寫出原因。不會在沒有標頭的情況下匯入。
+- rag_lab 新增選填設定 `DOCUMENT_HEADERS_FILE`，指向一個 JSON 檔，key 是文件檔名，值是標頭文字。台新知識庫用 `data/taishin_credit_card/_meta/document_headers.json`（ticket 02 產生）。
+  - 沒設：下面所有改寫都不做，匯入行為和現在完全一樣。
+  - 有設，但匯入的文件不在檔裡：在 `parse_document` 就讓該文件匯入失敗，報告寫出原因。不會在沒有標頭的情況下匯入。
 - 依標題切塊（`rag_lab` 自訂 LightRAG 的 `chunking_func`）：
-  - `LabRAGAnything.parse_document` 把 content list 裡有 `text_level` 的文字項目標成標題（加 markdown `#` 記號），並在文件最前面放一行標頭。
+  - `LabRAGAnything.parse_document` 把 content list 裡有 `text_level` 的文字項目標成標題（加 markdown `#` 記號），並在文件最前面放一段標頭，用固定的標記行包起來，讓 chunker 能從文件內容讀出標頭（LightRAG 呼叫 `chunking_func` 時不傳檔名）。標記行的格式由 ticket 04 定，不能是一般文件會出現的文字。
   - 自訂 chunker 在標題處切開。一節超過 1,200 token 時，在節內依 token 數再切，重疊 100。
-  - 每個 chunk 的開頭是「卡片標籤＋章節名稱」。適用卡片清單超過 150 token 時，標頭改寫成「適用 N 張卡（清單見本文件第一段）」，完整清單只放在第一個 chunk。
+  - 每個 chunk 的開頭是「卡片標籤＋章節名稱」。標頭超過 150 token 時，標頭改寫成「適用 N 張卡（清單見本文件第一段）」，完整清單只放在第一個 chunk。
   - 短節的處理見下面「待使用者確認」第 1 項。
 - 表格與圖片：RAG-Anything 把它們另外做成 chunk，不經過 `chunking_func`。在 `parse_document` 把卡片標籤加進 `table_caption`／`image_caption`，讓這些 chunk 的內容也帶卡片名稱。
 - 文件 ID 不變：RAG-Anything 依原始 content list 算 ID 與解析快取，`parse_document` 只改回傳的那一份（和現行的表格縮小做法相同）。
@@ -98,7 +101,7 @@ grill 與實驗紀錄在 `grill-notes.md`（決定 1–20），下面引用的�
 
 - 28 題 eval，只跑 mix，跑 1 次。兩位判讀者（sonnet）各自判讀，用 `output/rag_opt/compare_judges.py` 逐題比對。
 - 基準：重新判讀的基準 `output/rag_opt/judging/base_judge_{A,B}.md`（內容 ✓ 17／16、最終 ✓ 8／9）。
-- 目標：內容 ✓ ≥20、最終 ✓ ≥12，兩位判讀者都同意的變好題數減變差題數 ≥4。
+- 目標：內容 ✓ ≥20、最終 ✓ ≥12，兩位判讀者都同意的變好題數減變差題數 ≥4，原本 ✓ 的題目不能變錯（決定 1；以兩位判讀者都同意變差的題目計）。
 - 另外用 `output/rag_opt/probe28.py` 重跑 a／b／c 歸因，來源檔名改成新檔名。
 - 沒達標時不回滾（舊知識庫已刪），結果寫進 ticket，由使用者決定下一步（例如在新知識庫上重試 E1、E2，或考慮補前後文摘要，決定 14）。
 
@@ -108,14 +111,14 @@ grill 與實驗紀錄在 `grill-notes.md`（決定 1–20），下面引用的�
    - (a) 每個標題各自一個 chunk：chunk 數從 2,341 增加到約 2,600 以上，實體抽取的 LLM 呼叫跟著增加，很多 chunk 的標頭比內文還長。
    - (b) 相鄰的節合併到接近 1,200 token：chunk 數接近現在，但一個 chunk 又會混到好幾節，c1 類干擾回來。
    - (c) 少於 100 token 的節併進下一節，標頭列出兩個章節名稱；其他節各自一個 chunk。
-   - 建議 (c)。
+   - 建議 (c)。最後一節太短時併進前一節；合併後超過 1,200 token 時照一般規則在節內再切。
 
 ## Testing Decisions
 
 - 好的測試只看外部行為：給定 content list 與設定，檢查產生的 chunk 內容與數量、設定錯誤時的錯誤訊息；不檢查內部函式的呼叫順序。
 - 新增的測試沿用現有的假端點（`tests/fake_openai_server.py`、`tests/fake_mineru.py`），參考 `tests/test_pipeline.py`、`tests/test_cli.py` 的寫法。
 - 要測的行為：
-  - 切塊：標題處切開；超長節再切；標頭內容；標頭超過 150 token 的改寫；沒有標題的文件。
+  - 切塊：標題處切開；超長節再切；短節合併（依第 1 項的結論）；標頭內容；標頭超過 150 token 的改寫；沒有標題的文件。
   - `DOCUMENT_HEADERS_FILE`：沒設時和現在一樣；文件不在檔裡時匯入失敗。
   - `KB_LANGUAGE`、`KB_ENTITY_TYPES`：缺少時 ConfigError；值有傳進 LightRAG 的 `addon_params`。
   - 改檔名：`document_filename` 的新格式；遷移腳本重跑不會重複改名。
@@ -132,5 +135,5 @@ grill 與實驗紀錄在 `grill-notes.md`（決定 1–20），下面引用的�
 
 ## Further Notes
 
-- 依 4B 的實測速度，重匯光 embedding 就約 12.7 小時；加上 Gemma 用中文抽實體，總時間沒有實測過。Qwen 時期全量匯入花了 24–44 小時。
+- 依 4B 的實測速度，重匯光 embedding 就約 12.7 小時；加上 Gemma 用中文抽實體，總時間沒有實測過。Qwen 時期全量匯入（當時約 300 份）每份耗時加總 26.3 小時（`.scratch/taishin-credit-card-kb/issues/08`）。
 - 依 MinerU 現有輸出統計（351 份 content list）：`text_level` 1 有 31 個、2 有 2,332 個，22 份文件沒有標題；依標題切出約 2,580 節，中位數 167 token，948 節少於 100 token，105 節超過 1,200 token。現行知識庫是 2,341 個 chunk。

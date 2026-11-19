@@ -2,7 +2,7 @@
 
 **What to build:** 把 embedding 的設定、server 啟動指令與文件從 Qwen3-Embedding-0.6B 改成 `mlx-community/Qwen3-Embedding-4B-4bit-DWQ`（2560 維）（spec：「embedding」；grill-notes 決定 19、20）。
 
-**Blocked by:** 無
+**Blocked by:** 03（兩張都改 `.env`、`.env.example`、README，依序做避免衝突）
 
 **Status:** ready-for-agent
 
