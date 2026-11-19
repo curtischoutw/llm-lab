@@ -1,140 +1,136 @@
-Status: needs-info（等歸因結果：Q7 probe、Q8 雜訊、Q11 逐題分析；之後第二次 grill 決定切塊與查詢端做法）
+# 台新知識庫的回答品質優化：一次重匯
 
-# Spec 草稿：台新知識庫的回答品質優化
+**Status:** ready-for-agent
+
+grill 與實驗紀錄在 `grill-notes.md`（決定 1–20），下面引用的「決定 N」都指那份檔案。ADR：`docs/adr/0001-single-bundled-reingest.md`。
 
 ## Problem Statement
 
-28 題 eval（mix＋rerank，Gemma 4 26B A4B，加回答附加指示）的結果是內容 ✓ 16、最終 ✓ 8（`eval_results/eval_20261112-004153.md`，判讀 `output/answer_prompt_01/judgement.md`）。之前試過但沒有效果的做法：回答規則 A、拆子問題（方案 C）、換 Qwen3-8B（方案 D）。
+台新知識庫 28 題 eval（mix＋rerank，Gemma 4 26B A4B，加回答附加指示）的結果是內容 ✓ 16、最終 ✓ 8。2026-11-18～19 的歸因與實驗結果：
 
-已知的設定現況：
+- 內容沒有 ✓ 的 12 題裡，5 題是來源檔的 chunk 沒有被檢索到（a 類），1 題是被 token 上限截掉（b_trunc），6 題是正確內容已經在 context 裡，但答案被同一份文件裡別的產品、年度或活動干擾，或者模型漏寫、寫錯（c 類）。
+- a 類的共同點：檢索到的是別張卡片的文件。chunk 切開之後，內容裡沒有卡片名稱。
+- 查詢端三個實驗（thinking、chunk_top_k 40、逐項回答指示）都沒有淨增 4 題，不採用（決定 18）。
+- embedding 比較：Qwen3-Embedding-4B 的 chunk 檢索前 10 名覆蓋 70／84 句，現行 0.6B 是 59／84（決定 19）。
 
-- `SUMMARY_LANGUAGE` 沒有設定，LightRAG 用預設的 English。它同時決定匯入時實體與描述的語言、查詢時關鍵字抽取的語言（`lightrag/prompt.py:387`）。
-- 實體類型是 LightRAG 的通用預設（Person、Organization、Data、Artifact 等），沒有信用卡領域的類型。
-- 切塊是 LightRAG 預設：每塊 1,200 token、重疊 100，依 token 數切。表格另外切成 800 token 以下（`rag_lab/tables.py`）。
-- 圖譜是 Qwen 時期抽的；Gemma 4 還沒有實測過匯入。
-- 檔名（例如 `card_cg047_card001.pdf`）看不出是哪張卡片；chunk 切開後沒有卡片名稱。
+匯入端目前的設定：LightRAG 用英文抽實體與描述（`SUMMARY_LANGUAGE` 沒設），實體類型是通用預設，切塊只依 token 數（1,200 token、重疊 100），檔名（例如 `card_cg047_card001.pdf`）看不出是哪張卡片。
 
-## 初步歸因（舊資料，待 Q7 重跑確認）
+## Solution
 
-用 2026-11-03 的 probe（`output/chunk_trunc/probe_after.json`，Qwen 4B 抽關鍵字）對照 2026-11-12 的判讀，內容沒有 ✓ 的 12 題：
+把下列匯入端改動放進同一次全量重匯（ADR 0001），再用 28 題 eval 加雙判讀和基準比較：
 
-| 類別 | 題目 |
-|---|---|
-| (c) 3 句關鍵字句都進 context，仍答錯 | switch-01、switch-04、benefit-02、benefit-03、rule-02、offer-01 |
-| (a／b) 關鍵字句沒有全部進 context | terms-02（0/3）、cross-02（0/3）、cross-01（2/3）、rule-01（1/2） |
-| 沒有 probe 資料 | debit-negate-01、debit-wrongcard-02 |
+1. 每份文件產生**卡片標籤**（卡別＋適用卡片，定義見 GLOSSARY），放進檔名與每個 chunk 的標頭。
+2. **依標題切塊**：在 MinerU 標出的標題處切開，chunk 標頭是卡片標籤加章節名稱。
+3. 實體抽取與描述的**語言改成繁體中文**。
+4. **實體類型**改成信用卡領域的 10 類。
+5. **embedding 換成 Qwen3-Embedding-4B**。
 
-限制：關鍵字抽取模型已經換了；每題只檢查 3 句；重跑差異沒有量過。
+重匯直接取代 `rag_storage`，刪除前列清單給使用者確認（決定 16）。不重新爬官網（決定 4）。管線裡每一步只用本機模型，Claude 只負責設計、寫程式與判讀（決定 10）。
 
-## 已定案的決定（grill 2026-11-18）
+## User Stories
 
-1. **量尺**：28 題 eval 加雙判讀，只用 mix 模式評估（eval 一律加 `--modes mix`，probe 也只跑 mix；naive、local、global、hybrid 都不跑）。目標是內容 ✓ 16→≥20、最終 ✓ 8→≥12，原本 ✓ 的題目不能變錯。
-2. **雜訊**：基準設定與改動後的設定各跑 3 次，每題取多數決（3 次中至少 2 次 ✓ 才算 ✓），目標用多數決結果比較。每次都由兩位判讀者各自判讀，再用程式逐題比對。
-3. **先歸因再改**：失敗分成 (a) 檢索漏掉、(b) 有檢索到但被排掉或截斷、(c) 進了 context 仍答錯，依分布決定改哪一層。
-4. **重匯最多一次**，所有匯入端的改動一起放進這次重匯（見 `docs/adr/0001-single-bundled-reingest.md`）。不重新爬官網，用 `data/taishin_credit_card/` 現有的檔案。
-5. **重匯時確定放入**：
-   - 語言設為繁體中文，由 rag_lab 管理（現在 config 會拒絕直接用 `SUMMARY_LANGUAGE` 環境變數）。
-   - 實體類型改成：卡片、權益、回饋方案、回饋規則、費用、約定條款、活動、商店或通路、支付工具、機構。
-   - 卡片標籤（定義見 GLOSSARY），檔名與 chunk 標頭兩處都放。
-6. **卡片標籤**：
-   - 由程式從 manifest 網址與 `_meta/html` 的官網頁面標題產生，交給使用者抽查。
-   - 檔名格式：`<卡別>_<簡短卡名｜多卡｜全部>_<原檔名>`，例如 `信用卡_台新Richart卡_card_cg047_card001.pdf`。改名寫在 `scripts/fetch_taishin.py` 的 `document_filename`，另外寫一次性遷移腳本，改現有檔案、manifest 與 `eval/questions.taishin.jsonl` 的 `source`。
-   - chunk 標頭放卡別與完整的適用卡片清單；超過 150 token 時改寫成「適用 N 張卡（清單見本文件第一段）」，完整清單只放在第一個 chunk。
-7. **重匯內容等歸因後再定案**：切塊方式、Gemma 補前後文摘要（contextual retrieval）兩項，在第二次 grill 決定。切塊優化排在 (c) 類問題之後，只針對 (a／b) 類設計。
-8. **不換生成用的 LLM**。embedding 在重匯前決定：如果 probe 結果 a 加 b_rank 的題數 ≥4，就在知識庫副本上只重算 chunk 向量，用 probe 比較 Qwen3-Embedding-0.6B（現行）、Qwen3-Embedding-4B、bge-m3 三個模型的關鍵字句覆蓋，並記錄記憶體峰值（上限 26 GB），再決定重匯時用哪一個。reranker 這次不重新評估：2026-11-01 已經比較過，只有 bge-reranker-v2-m3 能排序；歸因結果顯示問題出在 b_rank 時再回頭評估。
-9. **查詢端改動排在匯入端之前**（context 上限、chunk_top_k、thinking 模式）；thinking 模式要等 Q11 結果，而且要先查證 mlx-vlm 怎麼開。
-10. **Claude 只當裁判與協作者**：管線內每一步（解析、切塊、實體抽取、關鍵字、embedding、rerank、生成、改寫問題、補前後文摘要）只用本機模型。Claude 負責設計實驗、寫程式、整理關鍵字句、判讀與分析。
+1. As a 使用者, I want 每份文件的檔名帶卡別與卡片名稱, so that 看檔名就知道文件屬於哪張卡。
+2. As a 使用者, I want 卡片標籤先交給我抽查再用, so that 標錯的卡片不會進知識庫。
+3. As a 使用者, I want 每個 chunk 開頭寫出卡片標籤與章節名稱, so that 檢索時問題裡的卡片名稱能比對到正確文件的 chunk。
+4. As a 使用者, I want chunk 在標題處切開, so that 一個 chunk 不會混到兩個章節的產品或年度。
+5. As a 使用者, I want 圖譜的實體與描述用繁體中文, so that 中文問題抽出的關鍵字和圖譜的語言一致。
+6. As a 使用者, I want 實體類型是卡片、權益、回饋方案等領域類型, so that 圖譜依信用卡的概念分類。
+7. As a 使用者, I want 語言、實體類型、標頭檔都在 .env 設定, so that 其他知識庫可以用不同的值，不用改程式。
+8. As a 使用者, I want 之後用 `scripts/fetch_taishin.py` 抓新文件時自動用新檔名, so that 增量更新不會產生舊格式的檔名。
+9. As a 使用者, I want 刪除舊知識庫之前先看到要刪的清單, so that 我確認之後才刪。
+10. As a 使用者, I want 重匯時記錄每個階段的時間與記憶體峰值, so that 知道 4B embedding 和中文抽取實際花多少時間。
+11. As a 使用者, I want 重匯後的 eval 用同樣的 28 題、同樣的判讀方式和基準比較, so that 能判斷這次重匯有沒有效。
 
-## 第二次 grill 的決定（2026-11-18）
+## Implementation Decisions
 
-11. **每組設定只跑 1 次 eval**（取代決定 2 的 3 次多數決）：解碼是 greedy，重跑雜訊是 0。改 prompt 或 context 時個別題目仍可能升降，所以只有淨增 4 題以上才算進步。
-12. **查詢端三個獨立實驗**，每個只改一項，各跑 1 次加雙判讀，和基準比較；有效的再合併跑一次：
-    - E1：開 thinking（server 加 `--enable-thinking`），要注意記憶體峰值。
-    - E2：`chunk_top_k` 從 20 改成 40。
-    - E3：回答附加指示加上「逐項回答每個子問題，每個數字都寫出它屬於哪個產品、哪一年、哪個活動」。
-13. **切塊依標題結構**：在 MinerU 標出的標題處切開，同一節超過 1,200 token 時再依 token 數切。chunk 標頭是卡片標籤加上章節名稱。事實：card_cg047 的 content_list 只有 `text_level` 2 一層標題（64 個），所以多數文件的章節名稱只有一層。
-14. **不做 Gemma 補前後文摘要**；重匯後如果 c1 類（被別的產品、年度、活動干擾）仍多，再考慮。
-15. **實驗不改 rag_lab**：E1–E3 用 `output/rag_opt/run_experiment.py` 覆寫 pipeline 常數；確定有效之後，再開 ticket 正式改程式。
-16. **重匯直接取代舊知識庫**：不另外建 WORKING_DIR。重匯前刪除 `rag_storage` 與 `output/rag_opt/kb_copy`，刪除前要列出清單請使用者確認。刪除之後就沒辦法換回舊知識庫，舊的 eval 答案保留在 `eval_results/` 供比對。檔名改了，MinerU 的解析快取對不上，所有文件都要重新解析。
-18. **查詢端維持原狀**：E1–E3 都不採用，也不合併起來跑；重匯之後可以在新知識庫上再試一次 E1、E2。embedding 比較的候選是 `mlx-community/Qwen3-Embedding-4B-4bit-DWQ`（2560 維）與 `mlx-community/bge-m3-mlx-8bit`（1024 維）；在 kb_copy 的副本上用候選模型重算三個向量庫（chunk 2,341、entity 18,297、relation 37,027 筆），再跑 probe28 比較（`output/rag_opt/run_embed_compare.sh`）。
-17. **順序**：E1–E3 查詢端實驗 → 在 kb_copy 上比較 embedding（結果：換 4B，決定 20）→ 寫正式 spec 與 tickets → 實作（卡片標籤、依標題切塊、中文、實體類型、改檔名）→ 使用者確認後刪除舊知識庫 → 全量重匯 → eval 加雙判讀。
+### 卡片標籤（決定 5、6，GLOSSARY「卡片標籤」）
 
-## 查詢端實驗結果（2026-11-19，事實）
+- 標籤有兩個欄位：
+  - 卡別：信用卡、金融卡，或兩者都有。
+  - 適用卡片：一張或多張卡片名稱，或「全部信用卡」「全部金融卡」。
+- 產生方式：程式從 manifest 網址、類別資料夾與 `_meta/html` 的官網頁面產生。
+  - 卡片頁（`cards/`、`debit_cards/`）：網址的 `cgXXX` 對應頁面標題的卡名。
+  - 其他文件（權益、活動、約定條款等）：在頁面內文比對已知卡名清單。比對不到時不猜，列進「待人工確認」清單。
+- 標籤檔：`data/taishin_credit_card/_meta/document_labels.json`，key 是相對於 `data/taishin_credit_card/` 的路徑，值含卡別、適用卡片清單、簡短卡名（檔名用）與標頭文字。使用者抽查之後才給下游使用。
+- 檔名格式：`<卡別>_<簡短卡名｜多卡｜全部>_<原檔名>`，例如 `信用卡_台新Richart卡_card_cg047_card001.pdf`。卡別兩者都有時寫「信用卡及金融卡」。
 
-基準重新判讀：同一份判讀說明、同一批判讀者（sonnet），判讀基準答案（`output/rag_opt/eval_runs/run2/`）。兩位判讀者在 9 題上分數不一致，所以合計數字會因判讀者不同而差 1–2 題。下表的「變好」「變差」只算兩位判讀者都同意的題目。判讀檔在 `output/rag_opt/judging/`，比對程式是 `output/rag_opt/compare_judges.py`。
+### 改檔名（決定 6、使用者 Q17）
 
-| | 內容 ✓（A／B） | 最終 ✓（A／B） | 內容變好 | 內容變差 | 最終變好 | 最終變差 | eval 時間 |
-|---|---|---|---|---|---|---|---|
-| 基準 | 17／16 | 8／9 | | | | | 約 21 分 |
-| E1 thinking | 18／19 | 11／11 | 3 | 2 | 5 | 3 | 1 時 34 分 |
-| E2 chunk_top_k 40 | 17／16 | 10／9 | 3 | 3 | 4 | 2 | 約 22 分 |
-| E3 逐項回答指示 | 16／15 | 10／10 | 2 | 4 | 4 | 4 | 約 23 分 |
+- `scripts/fetch_taishin.py` 的 `document_filename`（`scripts/fetch_taishin.py:2513`）改成產生新格式。之後新抓的文件也用新檔名。
+- 一次性遷移腳本：改 `data/taishin_credit_card/` 底下現有文件的檔名、manifest 的 `filename`、`eval/questions.taishin.jsonl` 的 `source`。`_meta/html` 的快照檔名要不要改，依 `fetch_taishin.py` 怎麼對照決定，以增量更新照常運作為準。
+- 遷移腳本要可以重跑：已經是新檔名的不再改。
 
-- 三組都沒有達到淨增 4 題（決定 11）。
-- E1 和 E2 都修好了 debit-negate-01 和 debit-wrongcard-02；rule-01 三組都變差。
-- E1 的代價：
-  - `LLM_MAX_TOKENS` 4096 時，抽關鍵字這一步的 thinking 就把上限用完，查詢失敗。改成 16384 才跑得完。
-  - offer-01 超過 360 秒的 worker 逾時。把 `LLM_TIMEOUT` 調到 600 秒補跑，結果 thinking 一直產生到 16,384 token 上限，輸出是無意義的重複文字，所以這題算 ✗。
-  - wired 峰值 23 GB。
+### chunk 標頭與依標題切塊（決定 13）
 
-## embedding 比較結果（2026-11-19，事實）
+- rag_lab 新增選填設定 `DOCUMENT_HEADERS_FILE`，指向一個 JSON 檔，key 是文件檔名，值是標頭文字。
+  - 沒設：行為和現在一樣。
+  - 有設，但匯入的文件不在檔裡：該文件匯入失敗，報告寫出原因。不會在沒有標頭的情況下匯入。
+- 依標題切塊（`rag_lab` 自訂 LightRAG 的 `chunking_func`）：
+  - `LabRAGAnything.parse_document` 把 content list 裡有 `text_level` 的文字項目標成標題（加 markdown `#` 記號），並在文件最前面放一行標頭。
+  - 自訂 chunker 在標題處切開。一節超過 1,200 token 時，在節內依 token 數再切，重疊 100。
+  - 每個 chunk 的開頭是「卡片標籤＋章節名稱」。適用卡片清單超過 150 token 時，標頭改寫成「適用 N 張卡（清單見本文件第一段）」，完整清單只放在第一個 chunk。
+  - 短節的處理見下面「待使用者確認」第 1 項。
+- 表格與圖片：RAG-Anything 把它們另外做成 chunk，不經過 `chunking_func`。在 `parse_document` 把卡片標籤加進 `table_caption`／`image_caption`，讓這些 chunk 的內容也帶卡片名稱。
+- 文件 ID 不變：RAG-Anything 依原始 content list 算 ID 與解析快取，`parse_document` 只改回傳的那一份（和現行的表格縮小做法相同）。
+- 已知後果：自訂 `chunking_func` 之後，RAG-Anything 不會再幫文字 chunk 標頁碼（`page_idx`）。`rag_lab` 目前沒有用到頁碼。
 
-19. **只比較 chunk 向量檢索**（取代決定 18 的「三個向量庫都重算再跑 probe28」）：4B 重算 chunk 2,341 筆花了 97 分鐘，entity 前 1,000 筆花了 12 分鐘；依這個速度，entity 18,297 筆約 3.7 小時、relation 37,027 筆約 7.4 小時，三個向量庫合計約 12.7 小時。所以改成只重算 chunk 向量，用 `output/rag_opt/chunk_retrieval.py` 計算 84 句關鍵字句在 chunk 向量檢索前 K 名的覆蓋（來源檔的 chunk 而且含該句才算）。這個比較不含 mix 的圖譜路徑、rerank 與 token 截斷。
+### 語言與實體類型（決定 5）
 
-| 模型 | 前 10 名 | 前 20 名 | 前 40 名 | 3 句都在前 20 名的題數 | 重算 chunk 時間 |
-|---|---|---|---|---|---|
-| Qwen3-Embedding-0.6B（現行） | 59 | 70 | 77 | 19／28 | — |
-| Qwen3-Embedding-4B | 70 | 75 | 77 | 23／28 | 97 分 |
-| bge-m3（CLS pooling） | 65 | 72 | 75 | 21／28 | 約 4 分 |
-| bge-m3（mlx-vlm server 預設，mean pooling） | 4 | 12 | 17 | — | 7 分 |
+- rag_lab 新增兩個設定，經 `build_rag` 的 `addon_params` 傳給 LightRAG：
+  - `KB_LANGUAGE`：這次設 `Traditional Chinese`。
+  - `KB_ENTITY_TYPES`：逗號分隔，這次設「卡片,權益,回饋方案,回饋規則,費用,約定條款,活動,商店或通路,支付工具,機構」。
+- 兩個都必填，缺少時以 ConfigError 中止（和現有欄位的規則相同）。`SUMMARY_LANGUAGE`、`ENTITY_TYPES` 仍然留在拒絕名單裡。
+- 語言同時影響查詢時的關鍵字抽取（`lightrag/prompt.py:387`），所以重匯之後，查詢也用中文抽關鍵字。
 
-- 4B 在前 10、前 20 名比 0.6B 多 11、5 句；前 40 名三個模型相同或只差 2 句。
-- rule-01 和 cross-02 在三個模型下都檢索不到：rule-01 有 2 句排在第 600 名之後，cross-02 有 2 句排在第 100 名之後。這兩題的問題不在 embedding 模型。
-- bge-m3：`mlx-community/bge-m3-mlx-8bit` 缺少 `1_Pooling` 設定，mlx-vlm 的 xlm_roberta 實作因此預設 mean pooling（`mlx_vlm/models/xlm_roberta/xlm_roberta.py:143`），但 bge-m3 用 CLS pooling。用 mean pooling 時，存下的向量和模型直接算的一致（cos 1.0），查詢向量改在同一個 process 內計算，結果也一樣是 4／12／17，所以低分來自 pooling，不是比較程式的錯誤。CLS 的數字是在同一個 process 內直接算 chunk 與查詢向量得到的（`output/rag_opt/` 以外的暫存腳本），server 目前無法用 CLS 提供 bge-m3。
-- 記憶體：4B 重算期間 server footprint 峰值 22 GB（`output/rag_opt/watchdog_q4b/sampler.log`）。這段期間只有 embedding 請求，重匯時 Gemma 抽實體與 4B embedding 會交替執行，峰值沒有量過。
+### embedding（決定 20）
 
-20. **重匯改用 Qwen3-Embedding-4B**（`mlx-community/Qwen3-Embedding-4B-4bit-DWQ`，2560 維，查詢前綴沿用現行的 Qwen 指令）：使用者決定（2026-11-19）。影響：
-    - 重匯時 embedding 約多 12 小時（依上面實測速度推算），加上 Gemma 抽實體的時間。
-    - `.env` 的 `EMBED_MODEL`、`EMBED_DIM` 與 server 啟動參數要改；`scripts/vlm_server.py`、`scripts/smoke_test.py`、`README.md` 有寫到 0.6B，要一起更新。
-    - 查詢時的 embedding 延遲與之後增量更新的時間會增加，數字沒有量過，重匯後的 eval 會記錄 eval 總時間。
-    - 重匯時用 watchdog 監看記憶體（上限 26 GB）。
+- `EMBED_MODEL=mlx-community/Qwen3-Embedding-4B-4bit-DWQ`、`EMBED_DIM=2560`，查詢前綴沿用現行的 Qwen 指令。
+- 要一起更新的地方：`.env`、`.env.example`、`README.md` 的 server 啟動指令、`scripts/vlm_server.py` 與 `scripts/smoke_test.py` 裡寫到 0.6B 的地方。
 
-## 範圍外發現
+### 重匯（決定 16、17）
 
-- mlx-vlm 對缺少 `1_Pooling` 設定的 xlm-roberta embedding 模型預設用 mean pooling，不會警告。用 bge-m3 前要先解決 pooling 設定。
+- 刪除前列出 `rag_storage/` 與 `output/rag_opt/kb_copy/` 的大小與檔案數，交給使用者確認。刪除之後無法換回舊知識庫；舊的 eval 答案保留在 `eval_results/`。
+- 檔名改了，MinerU 的解析快取對不上，所有文件都要重新解析。
+- 記憶體上限 `iogpu.wired_limit_mb=26000`（每次開機由使用者設定），watchdog 門檻 27 GB、每 3 秒取樣。
+- 記錄：每個資料夾的匯入時間、各階段時間（rag_lab 的 StageTimer）、wired 峰值、chunk／實體／關係數。
 
-- rag_lab 收到回答被長度上限截斷（`finish_reason=length`）時，仍當成正常答案收下：E1 補跑 offer-01 時，eval 記為「失敗 0 格」，但答案是 16,384 token 的重複文字。抽關鍵字那一步遇到同樣情況時會拋 LengthFinishReasonError。
-- E1 補跑 offer-01 時，eval 從 02:21 啟動，到 02:38 才送出第一個 embedding 請求。這 17 分鐘的空檔原因還沒查。
+### 驗收（決定 1、11）
 
-## 撤回的方案
+- 28 題 eval，只跑 mix，跑 1 次。兩位判讀者（sonnet）各自判讀，用 `output/rag_opt/compare_judges.py` 逐題比對。
+- 基準：重新判讀的基準 `output/rag_opt/judging/base_judge_{A,B}.md`（內容 ✓ 17／16、最終 ✓ 8／9）。
+- 目標：內容 ✓ ≥20、最終 ✓ ≥12，兩位判讀者都同意的變好題數減變差題數 ≥4。
+- 另外用 `output/rag_opt/probe28.py` 重跑 a／b／c 歸因，來源檔名改成新檔名。
+- 沒達標時不回滾（舊知識庫已刪），結果寫進 ticket，由使用者決定下一步（例如在新知識庫上重試 E1、E2，或考慮補前後文摘要，決定 14）。
 
-- 只在查詢端把語言改成中文：圖譜描述仍是英文，兩邊語言不一致；結果變差時無法判斷原因。
-- 用小知識庫做語言 A/B：使用者決定直接用中文。
+### 待使用者確認
 
-## 準備時發現的事實（2026-11-18）
+1. **短節怎麼處理**：948 節少於 100 token。
+   - (a) 每個標題各自一個 chunk：chunk 數從 2,341 增加到約 2,600 以上，實體抽取的 LLM 呼叫跟著增加，很多 chunk 的標頭比內文還長。
+   - (b) 相鄰的節合併到接近 1,200 token：chunk 數接近現在，但一個 chunk 又會混到好幾節，c1 類干擾回來。
+   - (c) 少於 100 token 的節併進下一節，標頭列出兩個章節名稱；其他節各自一個 chunk。
+   - 建議 (c)。
 
-- 舊 probe 判斷「進 context」的方式是：關鍵字句出現在 context 的任何地方就算。terms-01 的「前24小時」、fee-02 的「3.5%」「150元」，在來源檔裡的寫法其實是「前二十四小時」「百分之三點五」「新臺幣壹佰伍拾元」。舊 probe 比對到的是別份文件，所以這兩題在舊資料裡「進 context」的判定不可靠。新 probe（`output/rag_opt/probe28.py`）改成只算來自參考來源檔的 chunk；84 句關鍵字句都確認過出現在來源檔的 chunk 裡。
-- Gemma 4 模型檔的 `generation_config.json` 寫的是 `do_sample: true`、`temperature: 1.0`，rag_lab 沒有傳 temperature。不過實測 server（2026-11-18）時，同一個開放式 prompt 不帶 temperature 送 3 次，回答一字不差，所以 server 實際是 greedy 解碼，沒有套用 generation_config 的取樣設定。生成與關鍵字抽取在輸入相同時應該是確定性的，這一點會用重跑的結果確認。
-- thinking 模式：`mlx_vlm.server` 有 `--enable-thinking` 參數（README 第 182 行），目前沒有開。
-- 量雜訊的重跑，每次都清掉查詢答案與查詢關鍵字快取（`output/rag_opt/clear_query_cache.py`，清之前先備份），所以雜訊包含關鍵字抽取的變動。因為解碼是 greedy，先只重跑 1 次，逐題和 2026-11-12 的答案比對（知識庫在 11/03 之後沒有變動）；如果完全相同，雜訊就是 0；第 3 次要不要跑、Q25 的多數決要不要改成每組跑 1 次，由使用者決定。
+## Testing Decisions
 
-## 歸因結果（2026-11-18，事實）
-
-- 雜訊：清掉 query 與 keywords 快取後重跑一次 eval（`output/rag_opt/eval_runs/run2/`），28 題答案和 2026-11-12 逐字相同。28 格 0 失敗，wired 峰值 23 GB。
-- probe（`output/rag_opt/probe/probe.json`，log 在 `output/rag_opt/probe.log`）：內容沒有 ✓ 的 12 題中，c 6 題（switch-01、switch-04、benefit-02、benefit-03、rule-02、offer-01）、a 5 題（rule-01、terms-02、cross-01、cross-02、debit-wrongcard-02）、b_trunc 1 題（debit-negate-01）、b_rank 0 題。rerank 前的候選池每題 20–29 個 chunk，最後放進 context 的 7–10 個。
-- a／b 類的共同點是檢索到的是別張卡片的文件：cross-01 的街口卡（cg038）、cross-02 的雙幣卡（cg039）與昇恆昌卡（cg009）都不在候選池裡；debit-negate-01 的金融卡卡片頁被截掉，進 context 的是信用卡的機場接送權益。
-- 內容 ✓ 的題目裡也有 4 題被分到 a（fee-02、debit-confuse-02、debit-negate-02、debit-wrongcard-01），代表關鍵字句清單不完整，分類只能當參考。
-- Q11（`output/rag_opt/q11_c_analysis.md`）：6 題 c 類共 12 個錯漏點。c1（被同一份文件裡別的產品、別的年度、別的活動干擾）5 點，c3（正確資訊在 context，模型漏寫或改錯數字）5 點，c4（答案需要的資訊不在 context）2 點。c1 的正確 chunk 都排在干擾 chunk 前面。抽查兩點確認無誤：offer-01 的答案寫「1,303」，但 context 裡只有「1,300」；card_cg047 列出各方案回饋率的彙總表 chunk 沒有出現在 6 題的任何一份 context 裡。
-
-## 接下來的步驟
-
-1. 準備（不需要 server）：probe 與 context 傾印腳本，以及金融卡 8 題的關鍵字句。
-2. 使用者回到電腦前先執行 `sudo sysctl iogpu.wired_limit_mb=26000`，接著跑 Q8（基準 eval 再跑 2 次），然後跑 Q7（28 題 probe 加 context 傾印）。
-3. Q11：逐題分析 (c) 類，看 context 與答案的差距。
-4. 第二次 grill：決定切塊、補前後文摘要、查詢端參數，然後把這份草稿寫成正式 spec 與 tickets。
+- 好的測試只看外部行為：給定 content list 與設定，檢查產生的 chunk 內容與數量、設定錯誤時的錯誤訊息；不檢查內部函式的呼叫順序。
+- 新增的測試沿用現有的假端點（`tests/fake_openai_server.py`、`tests/fake_mineru.py`），參考 `tests/test_pipeline.py`、`tests/test_cli.py` 的寫法。
+- 要測的行為：
+  - 切塊：標題處切開；超長節再切；標頭內容；標頭超過 150 token 的改寫；沒有標題的文件。
+  - `DOCUMENT_HEADERS_FILE`：沒設時和現在一樣；文件不在檔裡時匯入失敗。
+  - `KB_LANGUAGE`、`KB_ENTITY_TYPES`：缺少時 ConfigError；值有傳進 LightRAG 的 `addon_params`。
+  - 改檔名：`document_filename` 的新格式；遷移腳本重跑不會重複改名。
+- 卡片標籤的正確性靠使用者抽查，不寫自動測試。
+- 重匯與 eval 是實機量測。
 
 ## Out of Scope
 
-- 重新爬官網。
-- 換生成用的 LLM。
-- 在管線內使用 Claude。
+- 重新爬官網（決定 4）。
+- 查詢端改動（thinking、chunk_top_k、回答指示），決定 18。
+- 用 Gemma 補前後文摘要（決定 14）。
+- 換 reranker、換生成用的 LLM（決定 8）。
+- bge-m3 的 pooling 問題、rag_lab 收下被長度截斷的答案、eval 啟動時 17 分鐘的空檔（grill-notes「範圍外發現」）。
+
+## Further Notes
+
+- 依 4B 的實測速度，重匯光 embedding 就約 12.7 小時；加上 Gemma 用中文抽實體，總時間沒有實測過。Qwen 時期全量匯入花了 24–44 小時。
+- 依 MinerU 現有輸出統計（351 份 content list）：`text_level` 1 有 31 個、2 有 2,332 個，22 份文件沒有標題；依標題切出約 2,580 節，中位數 167 token，948 節少於 100 token，105 節超過 1,200 token。現行知識庫是 2,341 個 chunk。
