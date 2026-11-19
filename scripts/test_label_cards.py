@@ -503,5 +503,196 @@ class ReviewAndOutputTest(unittest.TestCase):
         self.assertIn("頁面標題：（沒有頁面快照）｜標籤：待人工確認", downloads)
 
 
+class ExtraCardsTest(unittest.TestCase):
+    """沒有獨立卡片頁的卡（Q40）：補進已知卡名清單。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.data = FakeData(Path(self._tmp.name))
+        self.data.add("卡片", "card_cg047_card001.pdf", f"{WWW}/overview/cg047/card001/", html=card_page("台新Richart卡"))
+
+    def offer(self, text: str) -> dict:
+        """加一份只有一段內文的活動，回傳它的標籤。
+
+        Args:
+            text: 活動內文。
+
+        Returns:
+            該活動的標籤紀錄。
+        """
+        key = self.data.add("活動", "offer_WM_1.pdf", f"{WWW}/WM_1", html=page(text))
+        return label_cards.label_data_dir(self.data.finish())[key]
+
+    def test_cards_without_their_own_page_are_in_the_catalog(self) -> None:
+        entry = self.offer("適用卡別：環球無限卡、財富無限卡、昇恆昌無限卡")
+        self.assertEqual(entry["cards"], ["環球無限卡", "財富無限卡", "昇恆昌無限卡"])
+        self.assertEqual(entry["kind"], "信用卡")
+
+    def test_different_spellings_of_one_card_are_one_card(self) -> None:
+        for text in ("限Mercedes-Benz無限卡", "限賓士無限卡", "限 Mercedes-Benz 無限卡"):
+            self.data = FakeData(Path(self._tmp.name) / text.replace(" ", "_").replace("-", "_"))
+            self.data.add("卡片", "card_cg047_card001.pdf", f"{WWW}/overview/cg047/card001/", html=card_page("台新Richart卡"))
+            self.assertEqual(self.offer(text)["cards"], ["Mercedes-Benz無限卡"], text)
+
+    def test_renamed_card_is_the_same_card_as_the_new_name(self) -> None:
+        self.assertEqual(self.offer("適用：Richart世界商務卡(原Woojii世界商務卡)")["cards"], ["Richart世界商務卡"])
+
+    def test_tier_words_that_are_not_a_card_name_are_not_matched(self) -> None:
+        self.assertTrue(self.offer("限御璽卡、白金卡、鈦金卡持卡人，不含企業卡")["needs_review"])
+
+    def test_card_brand_words_are_not_matched(self) -> None:
+        self.assertTrue(self.offer("限刷台新Visa卡或台新JCB信用卡")["needs_review"])
+
+
+class SuggestionTest(unittest.TestCase):
+    """仍比對不到的文件（Q41）：needs_review 維持 true，另給 suggested 欄位放依資料夾的預設建議。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.data = FakeData(Path(self._tmp.name))
+        self.data.add("卡片", "card_cg047_card001.pdf", f"{WWW}/overview/cg047/card001/", html=card_page("台新Richart卡"))
+        self.data.add("金融卡卡片頁", "debit_card_cg001_card01.pdf", f"{WWW}/payment/cg001/card01/", html=card_page("VISA金融卡"))
+
+    def entry(self, category: str, filename: str, text: str | None = "沒有卡名") -> dict:
+        """加一份文件並回傳它的標籤。
+
+        Args:
+            category: manifest 類別。
+            filename: 檔名。
+            text: 內文；None 表示沒有頁面快照。
+
+        Returns:
+            該文件的標籤紀錄。
+        """
+        key = self.data.add(category, filename, f"{WWW}/files/{filename}", html=None if text is None else page(text))
+        return label_cards.label_data_dir(self.data.finish())[key]
+
+    def test_credit_card_folders_suggest_all_credit_cards(self) -> None:
+        for category, filename in (("權益", "rights_a_b.docx"), ("活動", "offer_WM_5.pdf"), ("下載", "download_x.pdf")):
+            self.setUp()
+            entry = self.entry(category, filename, None if category == "下載" else "沒有卡名")
+            self.assertTrue(entry["needs_review"], category)
+            self.assertEqual(entry["suggested"]["cards"], ["全部信用卡"], category)
+            self.assertEqual(entry["suggested"]["kind"], "信用卡")
+            self.assertEqual(entry["suggested"]["short_name"], "全部")
+
+    def test_attachments_suggest_all_credit_cards(self) -> None:
+        entry = self.entry("權益附件", "attachment_x.pdf", None)
+        self.assertTrue(entry["needs_review"])
+        self.assertEqual(entry["suggested"]["cards"], ["全部信用卡"])
+
+    def test_debit_folders_suggest_all_debit_cards(self) -> None:
+        for category, filename in (("金融卡說明頁", "debit_info_x.pdf"), ("金融卡約定條款 PDF", "debit_term_x.pdf")):
+            self.setUp()
+            entry = self.entry(category, filename, None if category.endswith("PDF") else "沒有卡名")
+            self.assertEqual(entry["suggested"]["cards"], ["全部金融卡"], category)
+            self.assertEqual(entry["suggested"]["kind"], "金融卡")
+
+    def test_richart_discounts_suggest_richart_card(self) -> None:
+        entry = self.entry("Richart 優惠細則", "richart_discount_1.pdf")
+        self.assertEqual(entry["suggested"]["cards"], ["台新Richart卡"])
+        self.assertEqual(entry["suggested"]["header"], "卡別：信用卡｜適用卡片：台新Richart卡")
+
+    def test_file_name_with_benz_suggests_the_mercedes_benz_card(self) -> None:
+        entry = self.entry("下載", "download_01BENZ_Assignment_Company.pdf", None)
+        self.assertEqual(entry["suggested"]["cards"], ["Mercedes-Benz卡"])
+        self.assertTrue(entry["needs_review"])
+
+    def test_labelled_documents_have_no_suggestion(self) -> None:
+        self.assertIsNone(self.entry("活動", "offer_WM_6.pdf", "台新Richart卡限定")["suggested"])
+
+
+class NegationTest(unittest.TestCase):
+    """卡名附近的否定詞（Q42）：子字串比對不看上下文，另外標出可能被否定的卡名。"""
+
+    def test_negation_before_the_card_name(self) -> None:
+        found = label_cards.find_negations("非上述表列卡別皆不適用，例:台新Richart卡", CATALOG)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0][0].name, "台新Richart卡")
+        self.assertIn("非上述表列卡別皆不適用，例:台新Richart卡", found[0][1])
+
+    def test_negation_after_the_card_name(self) -> None:
+        found = label_cards.find_negations("雙幣卡除外", CATALOG)
+        self.assertEqual([(card.name, context) for card, context in found], [("雙幣信用卡", "雙幣卡除外")])
+
+    def test_each_negation_word_counts(self) -> None:
+        for word in ("不適用", "除外", "排除", "不含", "恕不", "非上述"):
+            self.assertEqual(len(label_cards.find_negations(f"{word}太陽卡", CATALOG)), 1, word)
+
+    def test_negation_further_than_30_characters_away_does_not_count(self) -> None:
+        text = "不含" + "。" * 31 + "太陽卡" + "。" * 31 + "除外"
+        self.assertEqual(label_cards.find_negations(text, CATALOG), [])
+
+    def test_whitespace_does_not_count_toward_the_distance(self) -> None:
+        text = "不含" + " \n" * 40 + "太陽卡"
+        self.assertEqual(len(label_cards.find_negations(text, CATALOG)), 1)
+
+    def test_one_entry_per_card_even_when_it_is_negated_twice(self) -> None:
+        self.assertEqual(len(label_cards.find_negations("不含太陽卡。不含太陽卡。", CATALOG)), 1)
+
+    def test_no_negation_word_means_no_entry(self) -> None:
+        self.assertEqual(label_cards.find_negations("限太陽卡持卡人", CATALOG), [])
+
+
+class ReviewSectionsTest(unittest.TestCase):
+    """抽查報告的待確認明細、否定詞、新增卡名與未決定詞（Q40～Q42）。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        data = FakeData(self.root / "data")
+        data.add("卡片", "card_cg012_card0001.pdf", f"{WWW}/overview/cg012/card0001/", html=card_page("太陽卡"))
+        data.add("活動", "offer_WM_1.pdf", f"{WWW}/WM_1", html=page("限環球無限卡、財富無限卡持卡人，御璽卡不適用", title="環球活動"))
+        data.add("活動", "offer_WM_2.pdf", f"{WWW}/WM_2", html=page("本活動不含太陽卡", title="太陽活動"))
+        data.add("活動", "offer_WM_3.pdf", f"{WWW}/WM_3", html=page("這是一段很長的說明。" * 30, title="無卡名活動"))
+        data.add("下載", "download_01BENZ_x.pdf", f"{WWW}/files/download_01BENZ_x.pdf")
+        data.finish()
+        review_path = self.root / "review.md"
+        with contextlib.redirect_stdout(io.StringIO()):
+            label_cards.main(["--data-dir", str(self.root / "data"), "--labels", str(self.root / "labels.json"), "--review", str(review_path)])
+        self.review = review_path.read_text(encoding="utf-8")
+
+    def section(self, heading: str) -> str:
+        """報告裡某個「## 」段落的內容。
+
+        Args:
+            heading: 段落標題（不含「## 」）。
+
+        Returns:
+            標題之後、下一個「## 」之前的文字。
+        """
+        return self.review.split(f"## {heading}")[1].split("\n## ")[0]
+
+    def test_pending_documents_are_listed_with_title_text_start_and_suggestion(self) -> None:
+        section = self.section("待人工確認")
+        self.assertIn("- `offers/offer_WM_3.pdf`：頁面內文沒有比對到已知卡名", section)
+        self.assertIn("頁面標題：無卡名活動", section)
+        self.assertIn("程式建議：信用卡｜全部信用卡", section)
+        start = section.split("內文開頭：")[1].split("\n")[0]
+        self.assertEqual(start, "這是一段很長的說明。" * 15 + "…")
+        self.assertIn("程式建議：信用卡｜Mercedes-Benz卡", section.split("download_01BENZ_x.pdf")[1])
+        self.assertIn("內文開頭：（沒有頁面快照）", section.split("download_01BENZ_x.pdf")[1])
+
+    def test_negation_section_lists_path_card_and_context(self) -> None:
+        section = self.section("卡名附近有否定詞")
+        self.assertIn("共 2 份文件", section)
+        self.assertIn("- `offers/offer_WM_2.pdf`｜太陽卡｜本活動不含太陽卡", section)
+        self.assertNotIn("offer_WM_3", section)
+
+    def test_new_card_names_are_listed_with_kind_and_document_count(self) -> None:
+        section = self.section("補進已知清單的卡名")
+        self.assertIn("| 環球無限卡 | 信用卡 | 1 |", section)
+        self.assertIn("| 財富無限卡 | 信用卡 | 1 |", section)
+        self.assertIn("| 台新商務卡 | 信用卡 | 0 |", section)
+
+    def test_undecided_terms_are_listed_with_document_count_and_reason(self) -> None:
+        section = self.section("未加入已知清單的詞")
+        self.assertIn("| 御璽卡 | 1 | 卡片階級，多張卡共用 |", section)
+        self.assertIn("| 台新Visa卡 | 0 |", section)
+
+
 if __name__ == "__main__":
     unittest.main()

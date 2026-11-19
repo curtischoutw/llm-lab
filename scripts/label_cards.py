@@ -21,19 +21,29 @@
 5. 沒有頁面快照的活動圖片：檔名裡的活動編號（WM_數字）對應活動頁，沿用那一頁的標籤。
 6. 其他（下載區 PDF、金融卡約定條款 PDF）：官網沒有記錄它從哪頁連過去，列為待人工確認。
 
+仍比對不到的文件（Q41）：標籤檔裡維持 needs_review: true，另有 suggested 欄位放程式依資料夾給的建議
+（rights、rights_attachments、downloads、offers 建議全部信用卡，debit_info、debit_terms 建議全部金融卡，
+richart_discounts 建議台新Richart卡，檔名含 BENZ 建議 Mercedes-Benz卡）。建議不會自動採用；
+使用者確認後直接把 suggested 的內容搬到標籤欄位並把 needs_review 改成 false。
+抽查報告逐份列出這些文件的路徑、頁面標題、內文開頭約 150 字與建議。
+
+卡名附近的否定詞（Q42）：子字串比對不看上下文。報告另列一節，卡名前後 30 字內有「不適用、除外、排除、不含、恕不、非上述」
+的文件，列出路徑、卡名與前後文；標籤本身不因此改變。
+
 標籤內容（make_label）：某一卡別的已知卡片全部出現時，該卡別寫「全部信用卡」或「全部金融卡」；
 簡短卡名：一張卡寫卡名，多張寫「多卡」，全部寫「全部」；兩種卡別都有時卡別寫「信用卡及金融卡」。
 標頭是「卡別：…｜適用卡片：…」，超過 150 個 token 時改寫成「適用 N 張卡（清單見本文件第一段）」。
 
-標籤檔格式：key 是文件相對於資料根目錄的路徑，值有 kind、cards、short_name、header、source、needs_review、reason。
+標籤檔格式：key 是文件相對於資料根目錄的路徑，值有 kind、cards、short_name、header、source、needs_review、reason、suggested。
 待人工確認的文件 needs_review 是 true，kind 是空字串、cards 是空清單、short_name 與 header 是 null：
 下游（改檔名、標頭檔）看到 needs_review 是 true 要停下來，不能當成有標籤。使用者修正時直接改這個檔
 （needs_review 改成 false 並填好欄位）。
 
 關鍵設計決策與 ASSUMPTION：
-- ASSUMPTION：已知卡名清單只有官網有獨立卡片頁的卡片（信用卡 16 張、金融卡 5 張，加上寫死的 Richart簽帳金融卡）。
-  權益頁與活動頁常提到沒有卡片頁的卡（環球無限卡、財富無限卡、國泰航空世界卡、商務卡等），這些卡不會出現在標籤裡，
-  只提到它們的文件會變成待人工確認；同時提到已知卡與這些卡的文件，標籤只列已知卡（不完整）。
+- 已知卡名清單（使用者 2026-11-19 決定 Q40）：官網有獨立卡片頁的卡（信用卡 16 張、金融卡 5 張）、寫死的 Richart簽帳金融卡，
+  加上 EXTRA_CARDS（沒有卡片頁、但頁面內文實際提到的卡，同一張卡的不同寫法與更名前後的名稱併在一起）。
+  不確定是不是「一張卡」的詞（卡片階級、卡組織泛稱、支付工具、系列名稱）不加，列在 UNDECIDED_TERMS，抽查報告每次印出文件數。
+  ASSUMPTION：EXTRA_CARDS 裡的卡一律當信用卡；卡別是從內文語境判斷（適用卡別列表、保險、停車等信用卡權益），沒有逐張查證。
 - ASSUMPTION：「全部信用卡」「全部金融卡」只在內文比對到該卡別所有已知卡片時才標；內文只寫「台新信用卡」不算。
 - ASSUMPTION：內文比對讀 _meta/print（主內容區）而不是 _meta/html（整頁），因為整頁含導覽選單，會讓每頁都比到卡名。
 - ASSUMPTION：卡名裡的「/」換成「・」（例如「新光三越御璽・鈦金・白金卡」）：「／」是清單分隔符號，而且卡名要放進檔名；
@@ -45,7 +55,7 @@
   使用者抽查後發現漏比對的寫法，加進這個表。
 
 已知極限：
-- 子字串比對不看上下文：內文寫「不含雙幣卡」也會算成適用雙幣信用卡。
+- 子字串比對不看上下文：內文寫「不含雙幣卡」也會算成適用雙幣信用卡（使用者接受，報告另列否定詞清單）。
 - 官網新增卡片頁時，卡名會自動進清單，但內文別名要手動補。
 
 Dependencies: tiktoken（LightRAG 已依賴，不是新增依賴）。
@@ -97,8 +107,20 @@ def normalize(text: str) -> str:
     return re.sub(r"\s+", "", text).lower()
 
 
-def find_cards(text: str, catalog: list[Card]) -> list[Card]:
-    """在文字裡比對已知卡名。
+def compact(text: str) -> str:
+    """去掉所有空白，保留大小寫（內文比對與取前後文都用這個版本）。
+
+    Args:
+        text: 原始文字。
+
+    Returns:
+        沒有空白的文字。
+    """
+    return re.sub(r"\s+", "", text)
+
+
+def occurrences(text: str, catalog: list[Card]) -> list[tuple[Card, int, int]]:
+    """內文裡每一處卡名的位置。
 
     先比對長的寫法並把比到的位置遮掉，所以「元氣VISA金融卡」不會同時算成「VISA金融卡」。
 
@@ -107,20 +129,64 @@ def find_cards(text: str, catalog: list[Card]) -> list[Card]:
         catalog: 已知卡片清單。
 
     Returns:
-        內文提到的卡片，順序同 catalog。
+        (卡片, 起點, 終點)，位置是 compact(text) 的索引，順序依出現位置。
     """
-    remaining = normalize(text)
+    remaining = compact(text).lower()
     entries = sorted(
         ((normalize(alias), card) for card in catalog for alias in card.aliases),
         key=lambda entry: len(entry[0]),
         reverse=True,
     )
-    hit: set[Card] = set()
+    found: list[tuple[Card, int, int]] = []
     for alias, card in entries:
-        if alias in remaining:
-            hit.add(card)
-            remaining = remaining.replace(alias, "\0")
+        for match in re.finditer(re.escape(alias), remaining):
+            found.append((card, match.start(), match.end()))
+        remaining = remaining.replace(alias, "\0" * len(alias))
+    return sorted(found, key=lambda item: item[1])
+
+
+def find_cards(text: str, catalog: list[Card]) -> list[Card]:
+    """在文字裡比對已知卡名。
+
+    Args:
+        text: 頁面內文。
+        catalog: 已知卡片清單。
+
+    Returns:
+        內文提到的卡片，順序同 catalog。
+    """
+    hit = {card for card, _, _ in occurrences(text, catalog)}
     return [card for card in catalog if card in hit]
+
+
+NEGATION_WORDS = ("不適用", "除外", "排除", "不含", "恕不", "非上述")
+NEGATION_WINDOW = 30
+
+
+def find_negations(text: str, catalog: list[Card]) -> list[tuple[Card, str]]:
+    """卡名前後 NEGATION_WINDOW 個字內有否定詞的卡名。
+
+    子字串比對不看上下文，「非上述表列卡別皆不適用，例:台新Richart卡」也會算成適用台新Richart卡；
+    這個函式把這種卡名找出來給使用者看，不改標籤。距離以去掉空白後的字數算。
+
+    Args:
+        text: 頁面內文。
+        catalog: 已知卡片清單。
+
+    Returns:
+        (卡片, 卡名前後文)，每張卡在一份文件只列第一處，順序依出現位置。
+    """
+    body = compact(text)
+    result: list[tuple[Card, str]] = []
+    seen: set[Card] = set()
+    for card, start, end in occurrences(text, catalog):
+        if card in seen:
+            continue
+        low, high = max(0, start - NEGATION_WINDOW), end + NEGATION_WINDOW
+        if any(word in body[low:high] for word in NEGATION_WORDS):
+            seen.add(card)
+            result.append((card, body[low:high]))
+    return result
 
 
 @cache
@@ -214,7 +280,7 @@ class Doc:
 
 
 class _PageParser(HTMLParser):
-    """從 HTML 取出可見文字、第一個 h1、第一個 h1～h3 與 <title>，並收集 <a> 的連結。"""
+    """從 HTML 取出可見文字（不含 <title>）、第一個 h1、第一個 h1～h3 與 <title>，並收集 <a> 的連結。"""
 
     def __init__(self) -> None:
         super().__init__()
@@ -250,9 +316,10 @@ class _PageParser(HTMLParser):
     def handle_data(self, data: str) -> None:
         if self._skip:
             return
-        self.text.append(data)
         for field in self._capture:
             setattr(self, field, getattr(self, field) + data)
+        if "title" not in self._capture:
+            self.text.append(data)
 
     @staticmethod
     def _fields(tag: str) -> list[str]:
@@ -322,14 +389,76 @@ EXTRA_ALIASES: dict[tuple[str, str], tuple[str, ...]] = {
     ("信用卡", "cg003"): ("國泰航空翱翔鈦金卡", "國泰航空鈦金卡"),
     ("信用卡", "cg008"): ("新光三越御璽卡", "新光三越鈦金卡", "新光三越白金卡"),
     ("信用卡", "cg009"): ("昇恆昌御璽卡", "昇恆昌白金卡", "昇恆昌普卡"),
-    ("信用卡", "cg010"): ("大全聯卡",),
+    ("信用卡", "cg010"): ("大全聯卡", "大潤發聯名卡"),  # 官網：2025/9/12 起原大潤發聯名卡更名為大全聯信用卡
     ("信用卡", "cg014"): ("新光三越無限卡", "新光三越世界卡"),
     ("信用卡", "cg019"): ("friDay聯名卡",),
     ("信用卡", "cg039"): ("雙幣卡",),
     ("信用卡", "cg042"): ("Gogoro聯名卡",),
     ("信用卡", "cg047"): ("Richart卡",),
-    ("金融卡", "cg008"): ("蝴蝶悠遊卡",),
+    ("信用卡", "cg048"): ("美麗華卡",),
+    ("金融卡", "cg008"): ("蝴蝶悠遊卡", "悠遊Debit卡"),
 }
+# 沒有獨立卡片頁、但頁面內文實際提到的卡（Q40，依 _meta/print 整理）。同一張卡的不同寫法併在 aliases；
+# 更名的卡（「原 Woojii 世界商務卡」）算同一張，卡名用新名。名稱是卡名的才加；階級（御璽卡、白金卡）、
+# 卡組織（台新Visa卡）、支付工具（悠遊卡）與系列名稱（悠遊聯名卡）不加，列在 UNDECIDED_TERMS 讓使用者決定。
+EXTRA_CARDS: tuple[Card, ...] = (
+    Card("信用卡", "環球無限卡", ("環球無限卡",)),
+    Card("信用卡", "財富無限卡", ("財富無限卡",)),
+    Card("信用卡", "昇恆昌無限卡", ("昇恆昌無限卡",)),
+    Card("信用卡", "國泰航空世界卡", ("國泰航空世界卡",)),
+    Card("信用卡", "尊爵世界卡", ("尊爵世界卡",)),
+    Card("信用卡", "台新商務卡", ("台新商務卡",)),
+    Card("信用卡", "台新商務鈦金卡", ("台新商務鈦金卡",)),
+    Card("信用卡", "Mercedes-Benz無限卡", ("Mercedes-Benz無限卡", "賓士無限卡")),
+    Card("信用卡", "Mercedes-Benz御璽卡", ("Mercedes-Benz御璽卡",)),
+    Card("信用卡", "Mercedes-Benz白金卡", ("Mercedes-Benz白金卡",)),
+    Card("信用卡", "Mercedes-Benz卡", ("Mercedes-Benz卡", "Mercedes-Benz信用卡")),
+    Card("信用卡", "Richart世界商務卡", ("Richart世界商務卡", "Woojii世界商務卡")),
+    Card("信用卡", "Richart鈦金商務卡", ("Richart鈦金商務卡", "Woojii鈦金商務卡")),
+    Card("信用卡", "Richart商務御璽卡", ("Richart商務御璽卡",)),
+    Card("信用卡", "街口鈦金商務卡", ("街口鈦金商務卡",)),
+    Card("信用卡", "玫瑰悠遊商務鈦金卡", ("玫瑰悠遊商務鈦金卡",)),
+    Card("信用卡", "比漾聯名卡", ("比漾聯名卡",)),
+    Card("信用卡", "棉花田聯名卡", ("棉花田聯名卡",)),
+    Card("信用卡", "SKM Park Outlets聯名卡", ("SKM Park Outlets聯名卡",)),
+    # 下面七張是已更名為台新Richart卡的舊卡名（官網卡片頁 cg047 的公告），舊名還出現在活動與卡片頁內文
+    Card("信用卡", "@GoGo卡", ("@GoGo卡",)),
+    Card("信用卡", "FlyGo卡", ("FlyGo卡",)),
+    Card("信用卡", "玫瑰Giving卡", ("玫瑰Giving卡",)),
+    Card("信用卡", "大買家聯名卡", ("大買家聯名卡",)),
+    Card("信用卡", "Woojii卡", ("Woojii卡",)),
+    Card("信用卡", "三商美邦聯名卡", ("三商美邦聯名卡",)),
+    Card("信用卡", "全家Richart聯名卡", ("全家Richart聯名卡",)),
+)
+# 不確定是不是「一張卡」的詞：不加進已知清單，每次產報告時列出文件數，讓使用者決定
+UNDECIDED_TERMS: tuple[tuple[str, str], ...] = (
+    ("御璽卡", "卡片階級，多張卡共用"),
+    ("白金卡", "卡片階級，多張卡共用"),
+    ("鈦金卡", "卡片階級，多張卡共用"),
+    ("晶緻卡", "卡片階級，多張卡共用"),
+    ("世界卡", "卡片階級，多張卡共用"),
+    ("無限卡", "卡片階級，多張卡共用"),
+    ("普卡", "卡片階級，多張卡共用"),
+    ("頂級卡", "卡片階級的泛稱（美饌優惠專案用語）"),
+    ("商務卡", "台新商務卡、街口商務卡等多張卡的泛稱"),
+    ("企業卡", "卡別泛稱（約定條款的適用對象）"),
+    ("台新Visa卡", "卡組織泛稱，不是一張卡"),
+    ("Visa信用卡", "卡組織泛稱，不是一張卡"),
+    ("Visa無限卡", "卡組織加階級，不是一張卡"),
+    ("JCB信用卡", "卡組織泛稱，不是一張卡"),
+    ("Mastercard卡", "卡組織泛稱，不是一張卡"),
+    ("悠遊聯名卡", "系列名稱（信用卡與金融卡都有），多數出現在約定條款連結"),
+    ("一卡通聯名卡", "系列名稱，只出現在行動裝置支付的約定條款"),
+    ("icash聯名卡", "系列名稱，只出現在行動裝置支付的約定條款"),
+    ("新光三越聯名卡", "新光三越卡的泛稱（卡片頁有 cg008、cg014 兩張）"),
+    ("新光三越卡", "新光三越卡的泛稱（卡片頁有 cg008、cg014 兩張）"),
+    ("國泰航空聯名卡", "國泰航空卡的泛稱（國泰航空翱翔鈦金卡、國泰航空世界卡兩張）"),
+    ("昇恆昌聯名卡", "昇恆昌卡的泛稱（昇恆昌無限卡、昇恆昌御璽/白金/普卡）"),
+    ("賓士聯名卡", "Mercedes-Benz 卡的泛稱"),
+    ("街口商務卡", "可能是街口鈦金商務卡，內文只在卡別列表裡出現"),
+    ("頭家商務卡", "只出現在金融卡卡片頁的「不含」清單，看不出卡別"),
+    ("Story簽帳金融卡", "只出現在金融卡卡片頁的「不含」清單"),
+)
 # richart.tw 的簽帳金融卡沒有 cgXXX 頁面，寫死
 RICHART_DEBIT = Card(
     "金融卡",
@@ -340,15 +469,18 @@ RICHART_DEBIT = Card(
 RICHART_PAGE_CARDS = {"richart_credit-card": "台新Richart卡", "richart_debit-card": "Richart簽帳金融卡"}
 
 
-def build_catalog(data_dir: Path, docs: list[Doc]) -> tuple[list[Card], dict[tuple[str, str], Card]]:
+def build_catalog(
+    data_dir: Path, docs: list[Doc], extra_cards: tuple[Card, ...] = EXTRA_CARDS
+) -> tuple[list[Card], dict[tuple[str, str], Card]]:
     """從卡片頁建立已知卡名清單：群組編號 cgXXX 對應卡名（頁面 h1）。
 
     Args:
         data_dir: 資料根目錄。
         docs: 有實體檔的文件。
+        extra_cards: 沒有卡片頁的卡，接在卡片頁的卡後面。
 
     Returns:
-        (清單, 以（卡別，cgXXX）查卡的字典)。清單含寫死的 Richart 簽帳金融卡。
+        (清單, 以（卡別，cgXXX）查卡的字典)。清單依序是卡片頁的卡、extra_cards、寫死的 Richart 簽帳金融卡。
         卡名裡的「/」換成「・」，因為「／」是清單分隔符號，而且卡名要能放進檔名。
     """
     catalog: list[Card] = []
@@ -367,6 +499,7 @@ def build_catalog(data_dir: Path, docs: list[Doc]) -> tuple[list[Card], dict[tup
         card = Card(kind, heading.replace("/", "・"), aliases)
         catalog.append(card)
         by_cg[(kind, cg)] = card
+    catalog.extend(extra_cards)
     catalog.append(RICHART_DEBIT)
     return catalog, by_cg
 
@@ -375,16 +508,63 @@ def build_catalog(data_dir: Path, docs: list[Doc]) -> tuple[list[Card], dict[tup
 # 產生標籤
 # ==============================
 
-def pending(reason: str) -> dict:
+# 仍比對不到的文件依資料夾的預設建議（Q41）：資料夾 -> 預設卡別（"credit"、"debit"）或卡名
+FOLDER_SUGGESTIONS = {
+    "rights": "credit",
+    "rights_attachments": "credit",
+    "downloads": "credit",
+    "offers": "credit",
+    "debit_info": "debit",
+    "debit_terms": "debit",
+    "richart_discounts": "台新Richart卡",
+}
+BENZ_CARD = "Mercedes-Benz卡"
+
+
+def suggest(doc: Doc, catalog: list[Card]) -> dict | None:
+    """待人工確認的文件，程式依資料夾給的建議標籤。只是建議，needs_review 仍是 true。
+
+    檔名含 BENZ 的文件建議 Mercedes-Benz卡；其他依資料夾：rights、rights_attachments、downloads、offers 建議全部信用卡，
+    debit_info、debit_terms 建議全部金融卡，richart_discounts 建議台新Richart卡；其他資料夾不建議。
+
+    Args:
+        doc: 文件。
+        catalog: 全部已知卡片。
+
+    Returns:
+        make_label 的結果；沒有建議時是 None。
+    """
+    rule = FOLDER_SUGGESTIONS.get(doc.path.split("/")[0])
+    if "BENZ" in doc.stem.upper():
+        cards = [card for card in catalog if card.name == BENZ_CARD]
+    elif rule in ("credit", "debit"):
+        kind = KINDS[0] if rule == "credit" else KINDS[1]
+        cards = [card for card in catalog if card.kind == kind]
+    else:
+        cards = [card for card in catalog if card.name == rule]
+    return make_label(cards, catalog) if cards else None
+
+
+def pending(reason: str, suggested: dict | None = None) -> dict:
     """待人工確認的標籤紀錄：沒有卡別與適用卡片，下游不能使用。
 
     Args:
         reason: 為什麼沒有標籤。
+        suggested: 程式建議的標籤（suggest 的結果）。
 
     Returns:
         標籤紀錄。
     """
-    return {"kind": "", "cards": [], "short_name": None, "header": None, "source": "", "needs_review": True, "reason": reason}
+    return {
+        "kind": "",
+        "cards": [],
+        "short_name": None,
+        "header": None,
+        "source": "",
+        "needs_review": True,
+        "reason": reason,
+        "suggested": suggested,
+    }
 
 
 def labelled(cards: list[Card], catalog: list[Card], source: str) -> dict:
@@ -396,9 +576,9 @@ def labelled(cards: list[Card], catalog: list[Card], source: str) -> dict:
         source: 標籤怎麼來的。
 
     Returns:
-        標籤紀錄（make_label 的欄位加 source、needs_review、reason）。
+        標籤紀錄（make_label 的欄位加 source、needs_review、reason、suggested）。
     """
-    return {**make_label(cards, catalog), "source": source, "needs_review": False, "reason": ""}
+    return {**make_label(cards, catalog), "source": source, "needs_review": False, "reason": "", "suggested": None}
 
 
 def linked_pages(data_dir: Path, docs: list[Doc]) -> dict[str, list[str]]:
@@ -451,21 +631,21 @@ def label_data_dir(data_dir: Path) -> dict[str, dict]:
                 cards_of[doc.path] = [card]
                 labels[doc.path] = labelled([card], catalog, "卡片頁")
             else:
-                labels[doc.path] = pending("卡片頁找不到卡名")
+                labels[doc.path] = pending("卡片頁找不到卡名", suggest(doc, catalog))
         elif doc.category == "Richart 卡片頁":
             card = by_name.get(RICHART_PAGE_CARDS.get(doc.stem, ""))
             if card:
                 cards_of[doc.path] = [card]
                 labels[doc.path] = labelled([card], catalog, "卡片頁")
             else:
-                labels[doc.path] = pending("Richart 卡片頁對應的卡名不在已知清單")
+                labels[doc.path] = pending("Richart 卡片頁對應的卡名不在已知清單", suggest(doc, catalog))
         elif (snapshot := data_dir / "_meta" / "print" / f"{doc.stem}.html").is_file():
             found = find_cards("".join(parse_page(snapshot).text), catalog)
             if found:
                 cards_of[doc.path] = found
                 labels[doc.path] = labelled(found, catalog, "頁面內文")
             else:
-                labels[doc.path] = pending("頁面內文沒有比對到已知卡名")
+                labels[doc.path] = pending("頁面內文沒有比對到已知卡名", suggest(doc, catalog))
     links = linked_pages(data_dir, docs)
     for doc in docs:
         if doc.path in labels:
@@ -480,9 +660,9 @@ def label_data_dir(data_dir: Path) -> dict[str, dict]:
         else:
             missing = "沒有頁面快照，查不到它從哪個頁面連過去"
         if not sources:
-            labels[doc.path] = pending(missing)
+            labels[doc.path] = pending(missing, suggest(doc, catalog))
         elif unlabelled := [path for path in sources if path not in cards_of]:
-            labels[doc.path] = pending(f"連到它的頁面待人工確認：{'、'.join(unlabelled)}")
+            labels[doc.path] = pending(f"連到它的頁面待人工確認：{'、'.join(unlabelled)}", suggest(doc, catalog))
         else:
             union = {card for path in sources for card in cards_of[path]}
             labels[doc.path] = labelled([c for c in catalog if c in union], catalog, f"沿用連到它的頁面：{'、'.join(sources)}")
@@ -537,19 +717,60 @@ def label_text(entry: dict) -> str:
     return f"{entry['kind']}｜{LIST_SEPARATOR.join(entry['cards'])}"
 
 
-def render_review(data_dir: Path, labels: dict[str, dict]) -> str:
-    """產生抽查報告（markdown）：各資料夾文件數、標籤統計、待人工確認清單、每個資料夾抽 3 份。
+TEXT_START_CHARS = 150
 
+
+def read_texts(data_dir: Path, docs: list[Doc]) -> dict[str, str]:
+    """有頁面快照的文件的主內容區文字（_meta/print）。
+
+    Args:
+        data_dir: 資料根目錄。
+        docs: 有實體檔的文件。
+
+    Returns:
+        文件相對路徑對內文；沒有頁面快照的文件不在裡面。
+    """
+    texts = {}
+    for doc in docs:
+        snapshot = data_dir / "_meta" / "print" / f"{doc.stem}.html"
+        if snapshot.is_file():
+            texts[doc.path] = "".join(parse_page(snapshot).text)
+    return texts
+
+
+def text_start(text: str | None) -> str:
+    """內文開頭約 TEXT_START_CHARS 個字，抽查時用來判斷頁面在講什麼。
+
+    Args:
+        text: 內文；沒有頁面快照時是 None。
+
+    Returns:
+        去掉多餘空白後的前 TEXT_START_CHARS 個字，超過時加「…」。
+    """
+    if text is None:
+        return "（沒有頁面快照）"
+    flat = squash(text)
+    return flat[:TEXT_START_CHARS] + ("…" if len(flat) > TEXT_START_CHARS else "")
+
+
+def render_review(data_dir: Path, labels: dict[str, dict]) -> str:
+    """產生抽查報告（markdown）。
+
+    內容依序是：各類別資料夾文件數、標籤統計、待人工確認（逐份：標題、內文開頭、程式建議）、
+    卡名附近有否定詞的文件、補進已知清單的卡名與文件數、未加入已知清單的詞，最後每個資料夾抽 3 份。
     抽樣用固定種子，同樣的標籤重跑得到同樣的報告。
 
     Args:
-        data_dir: 資料根目錄（讀頁面標題用）。
+        data_dir: 資料根目錄（讀頁面標題與內文用）。
         labels: label_data_dir 的結果。
 
     Returns:
         報告全文。
     """
-    docs = {doc.path: doc for doc in read_docs(data_dir)}
+    doc_list = read_docs(data_dir)
+    docs = {doc.path: doc for doc in doc_list}
+    catalog, _ = build_catalog(data_dir, doc_list)
+    texts = read_texts(data_dir, doc_list)
     folders = sorted({path.split("/")[0] for path in labels})
     in_folder = {folder: sorted(path for path in labels if path.split("/")[0] == folder) for folder in folders}
     out = ["# 卡片標籤抽查報告", "", "## 各類別資料夾", "", "| 類別資料夾 | 文件數 | 待人工確認 |", "| --- | --- | --- |"]
@@ -565,8 +786,37 @@ def render_review(data_dir: Path, labels: dict[str, dict]) -> str:
     out.append(f"| 多卡 | {sum(e['short_name'] == '多卡' for e in done)} |")
     out.append(f"| 全部 | {sum(e['short_name'] == '全部' for e in done)} |")
     out.append(f"| 待人工確認 | {len(reviewing)} |")
-    out += ["", "## 待人工確認", ""]
-    out += [f"- `{path}`：{entry['reason']}" for path, entry in labels.items() if entry["needs_review"]] or ["（無）"]
+    out += ["", "## 待人工確認", "", f"共 {len(reviewing)} 份。標籤檔裡這些文件仍是 needs_review: true，建議標籤放在 suggested 欄位。", ""]
+    for path, entry in labels.items():
+        if not entry["needs_review"]:
+            continue
+        suggested = entry["suggested"]
+        out.append(f"- `{path}`：{entry['reason']}")
+        out.append(f"  - 頁面標題：{page_title(data_dir, docs[path])}")
+        out.append(f"  - 內文開頭：{text_start(texts.get(path))}")
+        out.append(f"  - 程式建議：{suggested['kind']}｜{LIST_SEPARATOR.join(suggested['cards'])}" if suggested else "  - 程式建議：（無）")
+    negated = {
+        path: found
+        for path, text in texts.items()
+        if labels[path]["source"] == "頁面內文" and (found := find_negations(text, catalog))
+    }
+    out += ["", "## 卡名附近有否定詞", ""]
+    out.append(
+        f"共 {len(negated)} 份文件：卡名前後 {NEGATION_WINDOW} 字內出現「{'、'.join(NEGATION_WORDS)}」。"
+        "標籤用子字串比對，不看上下文，這些文件的標籤可能把被排除的卡也列進去。每張卡每份文件只列第一處。"
+    )
+    out.append("")
+    out += [f"- `{path}`｜{card.name}｜{context}" for path, found in negated.items() for card, context in found]
+    mentioned = [set(find_cards(text, catalog)) for text in texts.values()]
+    counts = {card: sum(card in found for found in mentioned) for card in EXTRA_CARDS}
+    out += ["", "## 補進已知清單的卡名", "", "沒有獨立卡片頁、但內文實際提到的卡（文件數是內文提到的文件份數，含卡片頁以外的所有類別）。", ""]
+    out += ["| 卡名 | 卡別 | 文件數 |", "| --- | --- | --- |"]
+    out += [f"| {card.name} | {card.kind} | {count} |" for card, count in counts.items()]
+    out += ["", "## 未加入已知清單的詞", "", "不確定是不是「一張卡」，沒有加進已知清單；文件數是內文含這個字串的份數。請使用者決定。", ""]
+    out += ["| 詞 | 文件數 | 為什麼沒加 |", "| --- | --- | --- |"]
+    for term, reason in UNDECIDED_TERMS:
+        count = sum(normalize(term) in normalize(text) for text in texts.values())
+        out.append(f"| {term} | {count} | {reason} |")
     out += ["", "## 每個類別資料夾抽 3 份", ""]
     rng = random.Random(SAMPLE_SEED)
     for folder in folders:
