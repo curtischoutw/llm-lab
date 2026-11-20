@@ -5,17 +5,29 @@
 使用者修正的項目要回寫成規則，所以每次重跑得到同樣的結果。
 
 用法：
-    python3 scripts/label_cards.py [--data-dir DIR] [--labels FILE] [--review FILE]
-    預設讀 data/taishin_credit_card，寫 DIR/_meta/document_labels.json 與 output/rag_opt/labels_review.md。
+    python3 scripts/label_cards.py [--data-dir DIR] [--labels FILE] [--review FILE] [--manual FILE]
+    預設讀 data/taishin_credit_card 與 scripts/label_cards_manual.json，寫 DIR/_meta/document_labels.json 與 output/rag_opt/labels_review.md。
     不連網；輸入是 _meta/manifest.jsonl、類別資料夾與 _meta/html、_meta/print 的頁面快照。
 
 規則（依序，第一條適用的就用）：
+0. 人工標籤優先：scripts/label_cards_manual.json（版本控制的資料檔，--manual 可換路徑）有這份文件就直接用，
+   跳過下面所有規則。格式：key 是文件相對於資料根目錄的路徑，值是 {"kind", "cards", "decision"}：
+   kind 是「信用卡」「金融卡」或「信用卡及金融卡」；cards 是字串清單，每項可以是已知卡名、「全部信用卡」「全部金融卡」，
+   或不在已知清單的自由描述（例如「台新VISA、JCB信用卡」），但不能含「／」「｜」（含就報錯中止，不自動修改）；
+   decision 是使用者怎麼決定的（寫進 source，可省略）。路徑在 manifest 找不到也報錯。
+   short_name 與 header 仍依 make_label 的格式規則產生；source 是「人工確認：decision」、needs_review 是 false。
+   何時要加進去：使用者抽查後改的標籤、或使用者確認了待人工確認的文件，而這個結果無法（或不該）靠修改比對規則得到時
+   （例如只出現在某一份文件的卡別寫法）；能用規則表達的修正（別名、已知卡）改規則，不加人工標籤。
+   人工標籤的頁面，連到它的附件與活動圖片仍沿用它的標籤，但只限 cards 每一項都對得到已知卡（卡名或「全部」）；
+   含自由描述時，沿用它的文件列為待人工確認。
 1. 卡片頁（cards/、debit_cards/）：網址的 cgXXX 對應卡名，卡名是頁面 h1。卡別由資料夾決定。
    信用卡與金融卡的 cgXXX 會重複（cg003、cg008），所以用（卡別，cgXXX）當 key。
 2. richart/ 兩份文件依檔名：richart_credit-card 是「台新Richart卡」，richart_debit-card 是「Richart簽帳金融卡」。
    兩頁內文都會提到對方的卡名，所以不用內文比對。
-3. 其他有頁面快照的文件：在主內容區（_meta/print）比對已知卡名。比對前去掉空白、不分大小寫；先比對長的寫法
-   並遮掉，所以「元氣VISA金融卡」不會同時算成「VISA金融卡」。比對不到任何卡名時列為待人工確認，不猜。
+3. 其他有頁面快照的文件：在主內容區（_meta/print）比對已知卡名，加上泛稱（GENERAL_TERMS）所指的整個卡別。
+   比對前去掉空白、不分大小寫；先比對長的寫法並遮掉，所以「元氣VISA金融卡」不會同時算成「VISA金融卡」。
+   一個寫法可以是多張卡的別名（「新光三越聯名卡」「台新新光三越聯名卡」＝新光三越兩張卡）。
+   比對不到任何卡名時列為待人工確認，不猜。
 4. 沒有頁面快照的權益附件：讀權益子頁的原始 HTML 找出連到它的頁面（fetch_taishin.py 的 collect_attachments 也是這樣找，
    manifest 沒有記來源頁面），沿用那些頁面標籤的聯集；沒有頁面連到它、或連到它的頁面待人工確認時，列為待人工確認。
 5. 沒有頁面快照的活動圖片：檔名裡的活動編號（WM_數字）對應活動頁，沿用那一頁的標籤。
@@ -44,18 +56,24 @@ richart_discounts 建議台新Richart卡，檔名含 BENZ 建議 Mercedes-Benz�
   加上 EXTRA_CARDS（沒有卡片頁、但頁面內文實際提到的卡，同一張卡的不同寫法與更名前後的名稱併在一起）。
   不確定是不是「一張卡」的詞（卡片階級、卡組織泛稱、支付工具、系列名稱）不加，列在 UNDECIDED_TERMS，抽查報告每次印出文件數。
   ASSUMPTION：EXTRA_CARDS 裡的卡一律當信用卡；卡別是從內文語境判斷（適用卡別列表、保險、停車等信用卡權益），沒有逐張查證。
-- ASSUMPTION：「全部信用卡」「全部金融卡」只在內文比對到該卡別所有已知卡片時才標；內文只寫「台新信用卡」不算。
+- 「全部信用卡」「全部金融卡」有兩種來源：內文比對到該卡別所有已知卡片；或內文出現泛稱（使用者 2026-11-20 決定）：
+  「全台新信用卡」算全部信用卡、「簽帳金融卡會員」算全部金融卡（GENERAL_TERMS）。內文只寫「台新信用卡」仍不算。
+  泛稱的誤差：「簽帳金融卡會員」會把沒有簽帳功能的金融卡（例如勞動保障卡）也算進去，使用者接受；
+  「Richart簽帳金融卡會員」這類帶卡名的寫法也會同時觸發（泛稱不遮蔽、也不被卡名遮蔽）。
 - ASSUMPTION：內文比對讀 _meta/print（主內容區）而不是 _meta/html（整頁），因為整頁含導覽選單，會讓每頁都比到卡名。
 - ASSUMPTION：卡名裡的「/」換成「・」（例如「新光三越御璽・鈦金・白金卡」）：「／」是清單分隔符號，而且卡名要放進檔名；
   內文比對仍認得原本的 h1 寫法。
 - ASSUMPTION：活動圖片靠檔名裡的活動編號對應活動頁（manifest 沒有來源頁面欄位，fetch_taishin.py 的主視覺也是從活動頁取的）。
 - ASSUMPTION：同一份附件被多個權益頁連到時，適用卡片取各頁的聯集。
 - ASSUMPTION：標頭 token 數用 LightRAG 預設的 tokenizer（tiktoken，gpt-4o-mini 的編碼）。
+- 已知卡「企業卡」（別名「企業信用卡」）算一張信用卡（使用者 2026-11-20 決定）；「smart聯名卡」「輔仁大學認同卡」
+  使用者決定不加進已知卡。
 - 內文別名（EXTRA_ALIASES）只補「頁面 h1 與內文寫法不同」的卡（例如 h1 是「新光三越御璽/鈦金/白金卡」，內文寫「新光三越白金卡」）；
   使用者抽查後發現漏比對的寫法，加進這個表。
 
 已知極限：
 - 子字串比對不看上下文：內文寫「不含雙幣卡」也會算成適用雙幣信用卡（使用者接受，報告另列否定詞清單）。
+  加入「企業卡」後這點更明顯：「（不含簽帳金融卡、企業卡）」這類排除句會讓文件多出企業卡。
 - 官網新增卡片頁時，卡名會自動進清單，但內文別名要手動補。
 
 Dependencies: tiktoken（LightRAG 已依賴，不是新增依賴）。
@@ -75,6 +93,7 @@ from urllib.parse import unquote, urljoin, urlparse
 import tiktoken
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+MANUAL_LABELS_PATH = Path(__file__).resolve().parent / "label_cards_manual.json"
 KINDS = ("信用卡", "金融卡")
 HEADER_TOKEN_LIMIT = 150
 LIST_SEPARATOR = "／"
@@ -123,6 +142,7 @@ def occurrences(text: str, catalog: list[Card]) -> list[tuple[Card, int, int]]:
     """內文裡每一處卡名的位置。
 
     先比對長的寫法並把比到的位置遮掉，所以「元氣VISA金融卡」不會同時算成「VISA金融卡」。
+    同一個寫法可以是多張卡的別名（例如「新光三越聯名卡」），比到時每張卡都算。
 
     Args:
         text: 頁面內文。
@@ -132,15 +152,14 @@ def occurrences(text: str, catalog: list[Card]) -> list[tuple[Card, int, int]]:
         (卡片, 起點, 終點)，位置是 compact(text) 的索引，順序依出現位置。
     """
     remaining = compact(text).lower()
-    entries = sorted(
-        ((normalize(alias), card) for card in catalog for alias in card.aliases),
-        key=lambda entry: len(entry[0]),
-        reverse=True,
-    )
+    owners: dict[str, list[Card]] = {}
+    for card in catalog:
+        for alias in card.aliases:
+            owners.setdefault(normalize(alias), []).append(card)
     found: list[tuple[Card, int, int]] = []
-    for alias, card in entries:
+    for alias in sorted(owners, key=len, reverse=True):
         for match in re.finditer(re.escape(alias), remaining):
-            found.append((card, match.start(), match.end()))
+            found.extend((card, match.start(), match.end()) for card in owners[alias])
         remaining = remaining.replace(alias, "\0" * len(alias))
     return sorted(found, key=lambda item: item[1])
 
@@ -156,6 +175,28 @@ def find_cards(text: str, catalog: list[Card]) -> list[Card]:
         內文提到的卡片，順序同 catalog。
     """
     hit = {card for card, _, _ in occurrences(text, catalog)}
+    return [card for card in catalog if card in hit]
+
+
+# 內文出現這些詞就算某一卡別的全部卡片（使用者 2026-11-20 決定）：詞 -> 卡別
+GENERAL_TERMS = {"全台新信用卡": "信用卡", "簽帳金融卡會員": "金融卡"}
+
+
+def match_cards(text: str, catalog: list[Card]) -> list[Card]:
+    """內文適用的卡片：比對到的卡名，加上 GENERAL_TERMS 的詞所指的整個卡別。
+
+    Args:
+        text: 頁面內文。
+        catalog: 已知卡片清單。
+
+    Returns:
+        適用的卡片，順序同 catalog。
+    """
+    hit = set(find_cards(text, catalog))
+    body = normalize(text)
+    for term, kind in GENERAL_TERMS.items():
+        if normalize(term) in body:
+            hit.update(card for card in catalog if card.kind == kind)
     return [card for card in catalog if card in hit]
 
 
@@ -228,7 +269,21 @@ def make_label(cards: list[Card], catalog: list[Card]) -> dict:
         else:
             entries.extend(card.name for card in chosen)
         count += len(chosen)
-    kind_text = "及".join(kinds)
+    return compose_label("及".join(kinds), entries, all_entries, count)
+
+
+def compose_label(kind_text: str, entries: list[str], all_entries: int, count: int) -> dict:
+    """卡別與適用卡片字串組成標籤（自動標籤與人工標籤共用的格式規則）。
+
+    Args:
+        kind_text: 卡別（信用卡、金融卡或信用卡及金融卡）。
+        entries: 適用卡片，字串清單（「全部信用卡」「全部金融卡」算一項）。
+        all_entries: entries 裡「全部…」的項數。
+        count: 實際張數（「全部」展開後），標頭超過 token 上限時寫進「適用 N 張卡」。
+
+    Returns:
+        dict：kind、cards、short_name、header。
+    """
     if all_entries == len(entries):
         short_name = "全部"
     elif len(entries) == 1:
@@ -239,6 +294,39 @@ def make_label(cards: list[Card], catalog: list[Card]) -> dict:
     if token_counter()(header) > HEADER_TOKEN_LIMIT:
         header = f"卡別：{kind_text}｜適用 {count} 張卡（清單見本文件第一段）"
     return {"kind": kind_text, "cards": entries, "short_name": short_name, "header": header}
+
+
+def make_manual_label(path: str, entry: dict, catalog: list[Card]) -> dict:
+    """使用者人工確認的標籤紀錄：卡別與卡片照人工檔，標頭等欄位的格式同 make_label。
+
+    cards 的每一項可以是已知卡名、「全部信用卡」「全部金融卡」，或不在已知清單的自由描述
+    （例如「台新VISA、JCB信用卡」）。自由描述不能含「／」「｜」，含的話報錯，不自動修改。
+
+    Args:
+        path: 文件相對路徑（錯誤訊息用）。
+        entry: 人工檔裡這份文件的紀錄：kind、cards、decision（decision 可省略）。
+        catalog: 全部已知卡片，用來算「全部」展開後的張數。
+
+    Returns:
+        標籤紀錄（同 labelled 的欄位，source 是「人工確認」加 decision）。
+
+    Raises:
+        ValueError: 缺 kind 或 cards、卡別不是信用卡／金融卡／信用卡及金融卡、cards 是空的或有項目含分隔符號。
+    """
+    kind, cards = entry.get("kind"), entry.get("cards")
+    if kind not in (*KINDS, "及".join(KINDS)):
+        raise ValueError(f"人工標籤 {path} 的卡別不合法：{kind!r}")
+    if not isinstance(cards, list) or not cards or not all(isinstance(card, str) and card for card in cards):
+        raise ValueError(f"人工標籤 {path} 的 cards 必須是非空字串清單：{cards!r}")
+    for card in cards:
+        if LIST_SEPARATOR in card or "｜" in card:
+            raise ValueError(f"人工標籤 {path} 的卡片描述含分隔符號「{LIST_SEPARATOR}」或「｜」：{card}")
+    all_kinds = {f"全部{k}": k for k in KINDS}
+    count = sum(sum(c.kind == all_kinds[card] for c in catalog) if card in all_kinds else 1 for card in cards)
+    label = compose_label(kind, list(cards), sum(card in all_kinds for card in cards), count)
+    decision = entry.get("decision", "")
+    source = f"人工確認：{decision}" if decision else "人工確認"
+    return {**label, "source": source, "needs_review": False, "reason": "", "suggested": None}
 
 
 # ==============================
@@ -385,12 +473,14 @@ def read_docs(data_dir: Path) -> list[Doc]:
 
 # 卡片頁標題以外的寫法。key 是（卡別，官網群組編號 cgXXX）。內文裡的寫法和卡片頁的 h1 不同時才需要補
 # （例如 h1 是「新光三越御璽/鈦金/白金卡」，內文寫「新光三越白金卡」）。
+# 泛稱「新光三越聯名卡」同時是 cg008、cg014 兩張卡的別名（使用者 2026-11-20 決定：內文出現就兩張都算）
+SHIN_KONG_ALIASES = ("新光三越聯名卡", "台新新光三越聯名卡")
 EXTRA_ALIASES: dict[tuple[str, str], tuple[str, ...]] = {
     ("信用卡", "cg003"): ("國泰航空翱翔鈦金卡", "國泰航空鈦金卡"),
-    ("信用卡", "cg008"): ("新光三越御璽卡", "新光三越鈦金卡", "新光三越白金卡"),
+    ("信用卡", "cg008"): ("新光三越御璽卡", "新光三越鈦金卡", "新光三越白金卡", *SHIN_KONG_ALIASES),
     ("信用卡", "cg009"): ("昇恆昌御璽卡", "昇恆昌白金卡", "昇恆昌普卡"),
     ("信用卡", "cg010"): ("大全聯卡", "大潤發聯名卡"),  # 官網：2025/9/12 起原大潤發聯名卡更名為大全聯信用卡
-    ("信用卡", "cg014"): ("新光三越無限卡", "新光三越世界卡"),
+    ("信用卡", "cg014"): ("新光三越無限卡", "新光三越世界卡", *SHIN_KONG_ALIASES),
     ("信用卡", "cg019"): ("friDay聯名卡",),
     ("信用卡", "cg039"): ("雙幣卡",),
     ("信用卡", "cg042"): ("Gogoro聯名卡",),
@@ -422,6 +512,7 @@ EXTRA_CARDS: tuple[Card, ...] = (
     Card("信用卡", "比漾聯名卡", ("比漾聯名卡",)),
     Card("信用卡", "棉花田聯名卡", ("棉花田聯名卡",)),
     Card("信用卡", "SKM Park Outlets聯名卡", ("SKM Park Outlets聯名卡",)),
+    Card("信用卡", "企業卡", ("企業卡", "企業信用卡")),  # 使用者 2026-11-20 決定算一張信用卡
 )
 # 不確定是不是「一張卡」的詞：不加進已知清單，每次產報告時列出文件數，讓使用者決定
 UNDECIDED_TERMS: tuple[tuple[str, str], ...] = (
@@ -434,7 +525,6 @@ UNDECIDED_TERMS: tuple[tuple[str, str], ...] = (
     ("普卡", "卡片階級，多張卡共用"),
     ("頂級卡", "卡片階級的泛稱（美饌優惠專案用語）"),
     ("商務卡", "台新商務卡、街口商務卡等多張卡的泛稱"),
-    ("企業卡", "卡別泛稱（約定條款的適用對象）"),
     ("台新Visa卡", "卡組織泛稱，不是一張卡"),
     ("Visa信用卡", "卡組織泛稱，不是一張卡"),
     ("Visa無限卡", "卡組織加階級，不是一張卡"),
@@ -443,7 +533,6 @@ UNDECIDED_TERMS: tuple[tuple[str, str], ...] = (
     ("悠遊聯名卡", "系列名稱（信用卡與金融卡都有），多數出現在約定條款連結"),
     ("一卡通聯名卡", "系列名稱，只出現在行動裝置支付的約定條款"),
     ("icash聯名卡", "系列名稱，只出現在行動裝置支付的約定條款"),
-    ("新光三越聯名卡", "新光三越卡的泛稱（卡片頁有 cg008、cg014 兩張）"),
     ("新光三越卡", "新光三越卡的泛稱（卡片頁有 cg008、cg014 兩張）"),
     ("國泰航空聯名卡", "國泰航空卡的泛稱（國泰航空翱翔鈦金卡、國泰航空世界卡兩張）"),
     ("昇恆昌聯名卡", "昇恆昌卡的泛稱（昇恆昌無限卡、昇恆昌御璽/白金/普卡）"),
@@ -598,26 +687,40 @@ def linked_pages(data_dir: Path, docs: list[Doc]) -> dict[str, list[str]]:
     return links
 
 
-def label_data_dir(data_dir: Path) -> dict[str, dict]:
+def label_data_dir(data_dir: Path, manual: dict[str, dict] | None = None) -> dict[str, dict]:
     """替資料夾裡每份有實體檔的文件產生標籤。
 
-    規則依序是：卡片頁用頁面 h1 對應的卡名；richart/ 兩份文件依檔名；其他有頁面快照的文件，
+    規則依序是：人工標籤（manual 有這份文件就直接用，跳過其餘規則）；卡片頁用頁面 h1 對應的卡名；richart/ 兩份文件依檔名；其他有頁面快照的文件，
     在 _meta/print（主內容區）比對已知卡名；沒有頁面快照的權益附件與活動圖片沿用連到它的頁面的標籤；
     其他一律列為待人工確認。
 
     Args:
         data_dir: 資料根目錄（含 _meta/manifest.jsonl、_meta/html、_meta/print 與各類別資料夾）。
+        manual: 人工標籤，文件相對路徑對 {kind, cards, decision}；None 表示沒有。
 
     Returns:
         文件相對路徑對標籤紀錄。
+
+    Raises:
+        ValueError: manual 裡有路徑不在 manifest 的實體檔文件中，或人工標籤格式不合法（見 make_manual_label）。
     """
     docs = read_docs(data_dir)
+    manual = manual or {}
+    if unknown := sorted(set(manual) - {doc.path for doc in docs}):
+        raise ValueError(f"人工標籤的路徑在 manifest 找不到：{'、'.join(unknown)}")
     catalog, by_cg = build_catalog(data_dir, docs)
     by_name = {card.name: card for card in catalog}
     cards_of: dict[str, list[Card]] = {}
     labels: dict[str, dict] = {}
     for doc in docs:
-        if doc.category in CARD_PAGE_KINDS:
+        if doc.path in manual:
+            labels[doc.path] = make_manual_label(doc.path, manual[doc.path], catalog)
+            # 附件與活動圖片沿用這一頁的標籤；只有每一項都對得到已知卡（卡名或「全部」）時才能沿用，
+            # 含自由描述時不放進 cards_of，沿用它的文件會列為待人工確認
+            resolved = [[c for c in catalog if f"全部{c.kind}" == name] or [by_name.get(name)] for name in labels[doc.path]["cards"]]
+            if all(cards and None not in cards for cards in resolved):
+                cards_of[doc.path] = [card for cards in resolved for card in cards]
+        elif doc.category in CARD_PAGE_KINDS:
             match = re.search(r"/(cg\d+)/", doc.url)
             card = by_cg.get((CARD_PAGE_KINDS[doc.category], match.group(1))) if match else None
             if card:
@@ -633,7 +736,7 @@ def label_data_dir(data_dir: Path) -> dict[str, dict]:
             else:
                 labels[doc.path] = pending("Richart 卡片頁對應的卡名不在已知清單", suggest(doc, catalog))
         elif (snapshot := data_dir / "_meta" / "print" / f"{doc.stem}.html").is_file():
-            found = find_cards("".join(parse_page(snapshot).text), catalog)
+            found = match_cards("".join(parse_page(snapshot).text), catalog)
             if found:
                 cards_of[doc.path] = found
                 labels[doc.path] = labelled(found, catalog, "頁面內文")
@@ -829,12 +932,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         argv: 不含程式名稱的參數。
 
     Returns:
-        解析結果：data_dir、labels、review。
+        解析結果：data_dir、labels、review、manual。
     """
     parser = argparse.ArgumentParser(description="為台新知識庫的每份文件產生卡片標籤與抽查報告。")
     parser.add_argument("--data-dir", type=Path, default=REPO_ROOT / "data" / "taishin_credit_card", help="資料根目錄")
     parser.add_argument("--labels", type=Path, help="標籤檔路徑（預設是 <資料根目錄>/_meta/document_labels.json）")
     parser.add_argument("--review", type=Path, default=REPO_ROOT / "output" / "rag_opt" / "labels_review.md", help="抽查報告路徑")
+    parser.add_argument("--manual", type=Path, default=MANUAL_LABELS_PATH, help="人工標籤檔（版本控制的資料檔）")
     return parser.parse_args(argv)
 
 
@@ -849,7 +953,8 @@ def main(argv: list[str]) -> int:
     """
     args = parse_args(argv)
     labels_path = args.labels or args.data_dir / "_meta" / "document_labels.json"
-    labels = label_data_dir(args.data_dir)
+    manual = json.loads(args.manual.read_text(encoding="utf-8"))
+    labels = label_data_dir(args.data_dir, manual)
     labels_path.write_text(json.dumps(labels, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     args.review.parent.mkdir(parents=True, exist_ok=True)
     args.review.write_text(render_review(args.data_dir, labels), encoding="utf-8")
