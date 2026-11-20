@@ -145,6 +145,20 @@ class MakeLabelTest(unittest.TestCase):
         self.assertEqual(label["cards"], ["全部信用卡", "VISA金融卡"])
         self.assertEqual(label["short_name"], "多卡")
 
+    def test_corporate_card_is_not_required_for_all_credit_cards(self) -> None:
+        catalog = CATALOG + [Card("信用卡", "企業卡", ("企業卡",))]
+        without = [c for c in catalog if c.kind == "信用卡" and c.name != "企業卡"]
+        label = label_cards.make_label(without, catalog)
+        self.assertEqual(label["cards"], ["全部信用卡"])
+        self.assertEqual(label["short_name"], "全部")
+        label = label_cards.make_label([c for c in catalog if c.kind == "信用卡"], catalog)
+        self.assertEqual(label["cards"], ["全部信用卡"])
+
+    def test_missing_any_other_credit_card_is_still_not_all_credit_cards(self) -> None:
+        catalog = CATALOG + [Card("信用卡", "企業卡", ("企業卡",))]
+        label = label_cards.make_label([card("台新Richart卡"), card("雙幣信用卡"), catalog[-1]], catalog)
+        self.assertEqual(label["short_name"], "多卡")
+
     def test_header_over_150_tokens_points_to_the_first_paragraph(self) -> None:
         many = [Card("信用卡", f"台新測試聯名卡第{i:02d}號", ()) for i in range(30)]
         catalog = many + [Card("信用卡", "另一張卡", ())]
@@ -726,6 +740,28 @@ class ExtraCardsTest(unittest.TestCase):
             self.data.add("卡片", "card_cg047_card001.pdf", f"{WWW}/overview/cg047/card001/", html=card_page("台新Richart卡"))
             entry = self.offer(text)
             self.assertEqual((entry["kind"], entry["cards"]), ("信用卡", ["企業卡"]), text)
+
+    def test_corporate_card_in_an_exclusion_sentence_does_not_count(self) -> None:
+        for text in ("限台新Richart卡持卡人(不含簽帳金融卡、企業卡)", "台新Richart卡，企業卡除外", "台新Richart卡；排除企業信用卡"):
+            self.data = FakeData(Path(self._tmp.name) / f"excluded_{abs(hash(text))}")
+            self.data.add("卡片", "card_cg047_card001.pdf", f"{WWW}/overview/cg047/card001/", html=card_page("台新Richart卡"))
+            self.assertEqual(self.offer(text)["cards"], ["台新Richart卡"], text)
+
+    def test_corporate_card_still_counts_at_another_place_that_is_not_excluded(self) -> None:
+        filler = "這是一段和卡別無關的說明文字，" * 3
+        entry = self.offer(f"台新Richart卡不含企業卡。{filler}適用企業卡持卡人。")
+        self.assertEqual(entry["cards"], ["台新Richart卡", "企業卡"])
+
+    def test_exclusion_word_further_than_15_characters_away_does_not_exclude_the_corporate_card(self) -> None:
+        near = self.offer("台新Richart卡不含" + "一二三四五六七八九十一二三" + "企業卡")  # 不含與企業卡之間 13 字
+        self.assertEqual(near["cards"], ["台新Richart卡"])
+        self.data = FakeData(Path(self._tmp.name) / "far")
+        self.data.add("卡片", "card_cg047_card001.pdf", f"{WWW}/overview/cg047/card001/", html=card_page("台新Richart卡"))
+        far = self.offer("台新Richart卡不含" + "一二三四五六七八九十一二三四五六七八九十" + "企業卡")  # 20 字
+        self.assertEqual(far["cards"], ["台新Richart卡", "企業卡"])
+
+    def test_other_cards_ignore_the_exclusion_words_around_them(self) -> None:
+        self.assertEqual(self.offer("不含台新Richart卡")["cards"], ["台新Richart卡"])
 
     def test_card_brand_words_are_not_matched(self) -> None:
         self.assertTrue(self.offer("限刷台新Visa卡或台新JCB信用卡")["needs_review"])

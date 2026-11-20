@@ -60,6 +60,7 @@ richart_discounts 建議台新Richart卡，檔名含 BENZ 建議 Mercedes-Benz�
   「全台新信用卡」算全部信用卡、「簽帳金融卡會員」算全部金融卡（GENERAL_TERMS）。內文只寫「台新信用卡」仍不算。
   泛稱的誤差：「簽帳金融卡會員」會把沒有簽帳功能的金融卡（例如勞動保障卡）也算進去，使用者接受；
   「Richart簽帳金融卡會員」這類帶卡名的寫法也會同時觸發（泛稱不遮蔽、也不被卡名遮蔽）。
+  判斷「全部信用卡」時不要求比對到企業卡（Q54，OPTIONAL_FOR_ALL）：比對到其他所有信用卡就算全部。
 - ASSUMPTION：內文比對讀 _meta/print（主內容區）而不是 _meta/html（整頁），因為整頁含導覽選單，會讓每頁都比到卡名。
 - ASSUMPTION：卡名裡的「/」換成「・」（例如「新光三越御璽・鈦金・白金卡」）：「／」是清單分隔符號，而且卡名要放進檔名；
   內文比對仍認得原本的 h1 寫法。
@@ -73,7 +74,9 @@ richart_discounts 建議台新Richart卡，檔名含 BENZ 建議 Mercedes-Benz�
 
 已知極限：
 - 子字串比對不看上下文：內文寫「不含雙幣卡」也會算成適用雙幣信用卡（使用者接受，報告另列否定詞清單）。
-  加入「企業卡」後這點更明顯：「（不含簽帳金融卡、企業卡）」這類排除句會讓文件多出企業卡。
+  例外只有「企業卡」（Q53）：它幾乎只出現在「不含簽帳金融卡、企業卡」這類排除句，所以位置前後 EXCLUSION_WINDOW 字內有
+  「不含、除外、排除」就不算這次出現，同一份文件其他位置仍算。誤差：視窗是字數不是語意，排除句與清單句相隔太近時
+  清單句的企業卡也會被排掉，排除詞離得太遠則擋不住。
 - 官網新增卡片頁時，卡名會自動進清單，但內文別名要手動補。
 
 Dependencies: tiktoken（LightRAG 已依賴，不是新增依賴）。
@@ -138,11 +141,40 @@ def compact(text: str) -> str:
     return re.sub(r"\s+", "", text)
 
 
+# 「企業卡」專用的排除規則（使用者 2026-11-20 決定 Q53）：它幾乎只出現在「不含簽帳金融卡、企業卡」這類排除句，
+# 子字串比對會把它誤算成適用卡。企業卡的位置前後 EXCLUSION_WINDOW 字（去空白後）內有 EXCLUSION_WORDS 就不算這次出現，
+# 同一份文件其他沒被排除的位置仍算；其他卡不看上下文（Q42 不變）。
+# 誤差：視窗是字數不是語意，排除句與清單句相隔不到視窗時，清單句的企業卡也會被排掉；
+# 超出視窗的排除句（「不含」離企業卡太遠）擋不住。
+EXCLUSION_CARDS = ("企業卡",)
+EXCLUSION_WORDS = ("不含", "除外", "排除")
+EXCLUSION_WINDOW = 15
+# 判斷「全部信用卡」「全部金融卡」時不要求比對到的卡（使用者 2026-11-20 決定 Q54）：比對到其他所有卡就算全部；
+# 企業卡比對到了也照樣算在適用卡片裡。
+OPTIONAL_FOR_ALL = ("企業卡",)
+
+
+def is_excluded(body: str, start: int, end: int) -> bool:
+    """卡名前後 EXCLUSION_WINDOW 字內有沒有排除詞。
+
+    Args:
+        body: 去空白後的內文。
+        start: 卡名起點。
+        end: 卡名終點。
+
+    Returns:
+        有排除詞時是 True。
+    """
+    window = body[max(0, start - EXCLUSION_WINDOW) : end + EXCLUSION_WINDOW]
+    return any(word in window for word in EXCLUSION_WORDS)
+
+
 def occurrences(text: str, catalog: list[Card]) -> list[tuple[Card, int, int]]:
     """內文裡每一處卡名的位置。
 
     先比對長的寫法並把比到的位置遮掉，所以「元氣VISA金融卡」不會同時算成「VISA金融卡」。
     同一個寫法可以是多張卡的別名（例如「新光三越聯名卡」），比到時每張卡都算。
+    EXCLUSION_CARDS 的卡在排除句裡的出現不算（見 EXCLUSION_WINDOW）。
 
     Args:
         text: 頁面內文。
@@ -151,7 +183,8 @@ def occurrences(text: str, catalog: list[Card]) -> list[tuple[Card, int, int]]:
     Returns:
         (卡片, 起點, 終點)，位置是 compact(text) 的索引，順序依出現位置。
     """
-    remaining = compact(text).lower()
+    body = compact(text).lower()
+    remaining = body
     owners: dict[str, list[Card]] = {}
     for card in catalog:
         for alias in card.aliases:
@@ -159,7 +192,11 @@ def occurrences(text: str, catalog: list[Card]) -> list[tuple[Card, int, int]]:
     found: list[tuple[Card, int, int]] = []
     for alias in sorted(owners, key=len, reverse=True):
         for match in re.finditer(re.escape(alias), remaining):
-            found.extend((card, match.start(), match.end()) for card in owners[alias])
+            found.extend(
+                (card, match.start(), match.end())
+                for card in owners[alias]
+                if not (card.name in EXCLUSION_CARDS and is_excluded(body, match.start(), match.end()))
+            )
         remaining = remaining.replace(alias, "\0" * len(alias))
     return sorted(found, key=lambda item: item[1])
 
@@ -244,7 +281,8 @@ def token_counter():
 def make_label(cards: list[Card], catalog: list[Card]) -> dict:
     """卡片清單轉成標籤：卡別、適用卡片、簡短卡名與標頭文字。
 
-    某一卡別的卡片全部在清單裡時，該卡別的卡名清單換成「全部信用卡」或「全部金融卡」。
+    某一卡別的卡片全部在清單裡時，該卡別的卡名清單換成「全部信用卡」或「全部金融卡」
+    （OPTIONAL_FOR_ALL 的卡不要求在清單裡）。
     標頭超過 HEADER_TOKEN_LIMIT 個 token 時，改寫成「適用 N 張卡（清單見本文件第一段）」，
     N 是實際張數（「全部」展開後的張數）。
 
@@ -262,8 +300,8 @@ def make_label(cards: list[Card], catalog: list[Card]) -> dict:
     count = 0
     for kind in kinds:
         chosen = [card for card in cards if card.kind == kind]
-        in_catalog = [card for card in catalog if card.kind == kind]
-        if len(in_catalog) > 1 and set(chosen) == set(in_catalog):
+        in_catalog = [card for card in catalog if card.kind == kind and card.name not in OPTIONAL_FOR_ALL]
+        if len(in_catalog) > 1 and set(in_catalog) <= set(chosen):
             entries.append(f"全部{kind}")
             all_entries += 1
         else:
