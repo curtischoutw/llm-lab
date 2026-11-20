@@ -66,9 +66,11 @@ CLI 只負責參數與輸出格式，這裡負責行為。
 - chunk 標頭與依標題切塊（只在有設 DOCUMENT_HEADERS_FILE 時啟用，演算法見 rag_lab.chunking）：台新知識庫的卡片名稱分散在
   幾百份文件，預設的 chunker 只依 token 切，chunk 不知道自己屬於哪張卡，檢索常撈到別張卡的文件。啟用時 build_rag 把
   chunking.chunk_by_headings 當 chunking_func 傳給 LightRAG，LabRAGAnything.parse_document 另把回傳的 content list 改寫
-  （chunking.rewrite_content_list）：最前面放標頭標記區塊（LightRAG 呼叫 chunking_func 時不傳檔名，chunker 只能從內容讀標頭）、
+  （chunking.rewrite_content_list）：最前面放標頭標記區塊（文件沒有文字項目時不放；LightRAG 呼叫 chunking_func 時不傳檔名，chunker 只能從內容讀標頭）、
   有 text_level 的文字項目改成 `#` 標題、表格與圖片的 caption 加卡片標籤（它們另外成 chunk，不經過 chunking_func）。掛勾點與表格縮小
-  相同，只改回傳的那一份，文件 ID、解析快取 key 與內容都不變。匯入的文件檔名（不含資料夾）不在標頭檔裡時，parse_document 拋
+  相同，只改回傳的那一份，解析快取 key 與內容都不變；文件 ID 則納入這份文件的標頭文字（標頭或卡片標籤變了，chunk 內容就變，要被
+  當成新版本重新切塊；沒設標頭檔時文件 ID 與以前完全相同，既有知識庫的增量更新靠它）。標頭檔存在但 MinerU 沒解析出內容時，
+  不加標頭，空的 content list 照常觸發 _ingest_one 的「沒有解析出內容」錯誤。匯入的文件檔名（不含資料夾）不在標頭檔裡時，parse_document 拋
   PipelineError，該文件記成失敗、不寫入知識庫，其餘文件照常；沒有標頭就不匯入。沒設 DOCUMENT_HEADERS_FILE 時以上全部不做，
   chunk 內容與數量和以前相同。自訂 chunking_func 之後 RAG-Anything 不再替文字 chunk 標頁碼（processor 只在 chunker 是
   LightRAG 預設的才標），所以文字 chunk 沒有 page_idx；rag_lab 目前沒有用到頁碼。
@@ -182,6 +184,7 @@ reject_unmanaged_library_env()
 from lightrag import QueryParam  # noqa: E402
 from lightrag.base import DocStatus  # noqa: E402
 from lightrag.kg.shared_storage import finalize_share_data  # noqa: E402
+from lightrag.utils import compute_mdhash_id  # noqa: E402
 from raganything import RAGAnything, RAGAnythingConfig  # noqa: E402
 from raganything.callbacks import ProcessingCallback  # noqa: E402
 
@@ -262,7 +265,8 @@ class LabRAGAnything(RAGAnything):
             **kwargs: 轉給 RAGAnything.parse_document。
 
         Returns:
-            (content_list, doc_id)；doc_id 是原始 content list 的內容雜湊。
+            (content_list, doc_id)；沒設標頭檔時，doc_id 是原始 content list 的內容雜湊；設了標頭檔時，是原始雜湊加上
+            這份文件標頭文字的雜湊（content list 是空的時候不加，仍是原始雜湊）。
 
         Raises:
             PipelineError: 有設標頭檔，但這份文件的檔名不在裡面。
@@ -282,8 +286,12 @@ class LabRAGAnything(RAGAnything):
             return len(self.lightrag.tokenizer.encode(text))
 
         content_list = tables.limit_table_sizes(content_list, count_tokens)
-        if header is None:
+        if header is None or not content_list:
+            # 沒解析出內容時不加標頭：_ingest_one 靠 content_list 是空的判斷「MinerU 沒有解析出內容」
             return content_list, doc_id
+        # 文件 ID 納入標頭文字：標頭（卡片標籤）變了，chunk 內容就變了，要被視為新版本重新切塊；
+        # 內容相同、標頭相同的文件 ID 不變，增量更新照常略過
+        doc_id = compute_mdhash_id(f"{doc_id}\n{header}", prefix="doc-")
         return chunking.rewrite_content_list(content_list, header, count_tokens), doc_id
 
     async def _process_multimodal_content_batch_type_aware(self, *args, **kwargs):

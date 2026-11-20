@@ -1734,6 +1734,19 @@ class DocumentHeadersTest(PipelineCase):
         reingest = self.ingest(DOCUMENT_HEADERS_FILE=str(self.headers_file))
         self.assertIn("略過", reingest.stdout)
 
+    def test_changing_the_header_re_chunks_the_document_and_replaces_the_old_version(self):
+        self.assertEqual(self.ingest(DOCUMENT_HEADERS_FILE=str(self.headers_file)).returncode, 0)
+        new_header = "卡別：信用卡｜適用卡片：甲卡／乙卡／丙卡"
+        self.headers_file.write_text(json.dumps({"paper.pdf": new_header}), encoding="utf-8")
+
+        result = self.ingest(DOCUMENT_HEADERS_FILE=str(self.headers_file))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("略過", result.stdout)
+        self.assertEqual(self.text_chunks(), [f"{new_header}\n章節：{FAKE_HEADING}\n\n{FAKE_BODY}"])
+        statuses = json.loads((self.working_dir / "kv_store_doc_status.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(statuses), 1)
+
     def test_a_document_missing_from_the_headers_file_fails_and_nothing_is_written(self):
         stranger = self.tmp / "stranger.pdf"
         stranger.write_bytes(b"%PDF-1.4 stranger")
@@ -1755,6 +1768,64 @@ class DocumentHeadersTest(PipelineCase):
         self.assertRegex(result.stderr, r"匯入失敗：stranger\.pdf")
         self.assertNotRegex(result.stderr, r"匯入失敗：paper\.pdf")
         self.assertEqual(self.text_chunks(), [f"{HEADER}\n章節：{FAKE_HEADING}\n\n{FAKE_BODY}"])
+
+
+# ==============================
+# parse_document 的標頭改寫（文件 ID、空內容）
+# ==============================
+
+
+class ParseDocumentWithHeadersTest(unittest.TestCase):
+    """LabRAGAnything.parse_document：RAG-Anything 的解析以假值取代，只看標頭改寫對回傳值的影響。"""
+
+    ORIGINAL_ID = "doc-0123456789abcdef0123456789abcdef"
+    TEXT = [{"type": "text", "text": "內文", "page_idx": 0}]
+
+    def parse(self, headers: dict[str, str] | None, content_list: list[dict]) -> tuple[list[dict], str]:
+        """以固定的原始 content list 與文件 ID 執行 parse_document。
+
+        Args:
+            headers: 檔名 → 標頭；None 表示沒設 DOCUMENT_HEADERS_FILE。
+            content_list: 假的 RAG-Anything 解析結果。
+
+        Returns:
+            parse_document 的回傳值 (content_list, doc_id)。
+        """
+        from types import SimpleNamespace
+
+        from raganything import RAGAnything
+
+        from rag_lab import pipeline
+
+        async def fake_parse(self, file_path, *args, **kwargs):
+            return list(content_list), self.ORIGINAL_ID
+
+        rag = object.__new__(pipeline.LabRAGAnything)
+        rag.lightrag = SimpleNamespace(tokenizer=tiktoken.get_encoding("o200k_base"))
+        rag.document_headers = headers
+        with mock.patch.object(RAGAnything, "parse_document", lambda *a, **k: fake_parse(self, *a, **k)):
+            return asyncio.run(rag.parse_document("/tmp/paper.pdf"))
+
+    def test_without_a_headers_file_the_document_id_is_the_one_rag_anything_computed(self):
+        content, doc_id = self.parse(None, self.TEXT)
+
+        self.assertEqual(doc_id, self.ORIGINAL_ID)
+        self.assertEqual(content, self.TEXT)
+
+    def test_with_a_headers_file_the_document_id_depends_on_the_header_text(self):
+        _, first = self.parse({"paper.pdf": "卡別：信用卡｜適用卡片：甲卡"}, self.TEXT)
+        _, again = self.parse({"paper.pdf": "卡別：信用卡｜適用卡片：甲卡"}, self.TEXT)
+        _, other = self.parse({"paper.pdf": "卡別：信用卡｜適用卡片：乙卡"}, self.TEXT)
+
+        self.assertEqual(first, again)
+        self.assertNotEqual(first, other)
+        self.assertNotEqual(first, self.ORIGINAL_ID)
+        self.assertRegex(first, r"^doc-[0-9a-f]{32}$")
+
+    def test_empty_parse_result_stays_empty_so_the_ingest_guard_can_fire(self):
+        content, _ = self.parse({"paper.pdf": "卡別：信用卡｜適用卡片：甲卡"}, [])
+
+        self.assertEqual(content, [])
 
 
 if __name__ == "__main__":

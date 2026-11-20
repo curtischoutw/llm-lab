@@ -23,13 +23,17 @@
 
 關鍵設計決策：
 - 可以重跑：已經是新檔名的不再改。eval 題目與標頭檔每次都由 manifest 目前的檔名推出「原檔名到現在檔名」的對照，
-  所以上次做到一半中斷（檔案改了、題目還沒改）重跑會補完。
+  所以上次做到一半中斷（檔案改了、題目還沒改）重跑會補完。檔案已改成新檔名、manifest 還寫原檔名時（改檔名與寫 manifest 之間中斷），
+  label_cards.read_docs 認得資料夾裡改過名的檔案，重跑以資料夾裡的檔名更新 manifest，並補回標籤檔與標頭檔。
 - 頁面快照（_meta/html、_meta/print）、標籤檔與人工標籤檔仍然用原檔名當 key，所以不改快照檔名；
   fetch_taishin.py 的快照名稱本來就由網址決定，不依賴文件檔名。
 - 已經有新檔名的文件不重新評估標籤：標籤之後變了要改名，由使用者手動處理（檔名穩定比跟著標籤變動重要）。
 
 已知極限：
-- 磁碟上有、但 manifest 沒有紀錄的檔案不處理。
+- 磁碟上有、但 manifest 沒有紀錄的檔案（fetch 某個類別的列表失敗時，那個類別這次沒有 manifest 紀錄）不改名、不現算標籤；
+  標籤檔已有可用標籤的會留在標頭檔裡。卡片頁資料夾有這樣的檔案時，卡名清單不完整，這次不現算任何新標籤，缺標籤的文件下次再試。
+- 待人工確認的文件每次都會重新現算（label_data_dir 一次算整個資料夾，約 1.5 秒）：標籤檔不記錄待人工確認的結果，
+  官網新增卡片頁後它們才有機會比對到卡名。沒有文件缺標籤時不會重算。
 - 標籤檔裡有條目但 needs_review 仍是 true 的文件，要使用者先改標籤檔才會改名。
 
 Dependencies: label_cards（同資料夾；它用 tiktoken，LightRAG 已依賴，不是新增依賴）。
@@ -44,8 +48,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import label_cards  # noqa: E402
+from rag_lab.formats import NOT_A_DOCUMENT_PREFIXES  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_EVAL_FILE = REPO_ROOT / "eval" / "questions.taishin.jsonl"
@@ -94,8 +100,36 @@ def read_labels_file(data_dir: Path) -> dict[str, dict]:
     return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
 
 
+def unlisted_files(data_dir: Path, docs: list[label_cards.Doc]) -> dict[str, str]:
+    """類別資料夾裡有檔案、但 manifest 沒有紀錄的文件（fetch 某個類別的列表失敗時，那個類別這次沒有 manifest 紀錄）。
+
+    Args:
+        data_dir: 資料根目錄。
+        docs: manifest 裡有實體檔的文件（label_cards.read_docs）。
+
+    Returns:
+        原檔名路徑對現在的檔名；隱藏檔與 Office 鎖定檔（NOT_A_DOCUMENT_PREFIXES）不算；
+        原檔名路徑和 manifest 裡某份文件相同的檔案（同一份文件的另一個檔名）也不算。
+    """
+    listed = {doc.path for doc in docs}
+    unlisted: dict[str, str] = {}
+    for folder in sorted(set(label_cards.CATEGORY_FOLDERS.values())):
+        if not (data_dir / folder).is_dir():
+            continue
+        for file in sorted((data_dir / folder).iterdir()):
+            path = f"{folder}/{label_cards.original_filename(file.name)}"
+            if file.is_file() and not file.name.startswith(NOT_A_DOCUMENT_PREFIXES) and path not in listed:
+                unlisted[path] = file.name
+    return unlisted
+
+
 def resolve_labels(data_dir: Path, manual: dict[str, dict]) -> tuple[dict[str, dict], dict[str, dict], list[str]]:
     """每份有實體檔的文件的標籤：標籤檔優先，檔裡沒有的現算。
+
+    ASSUMPTION：現算要用全部卡片頁建卡名清單。卡片頁資料夾（cards、debit_cards）裡有檔案不在 manifest（fetch 那個類別失敗）時，
+    清單不完整，這次不現算新標籤（缺標籤的文件保留原檔名，下次 fetch 再試），免得用殘缺的清單算出錯的「全部」或漏掉的卡。
+    label_data_dir 一次算整個資料夾（卡名清單與連結頁面都要看全部文件），所以沒有「只算缺的」；
+    沒有文件缺標籤時不呼叫它。
 
     Args:
         data_dir: 資料根目錄。
@@ -112,10 +146,13 @@ def resolve_labels(data_dir: Path, manual: dict[str, dict]) -> tuple[dict[str, d
     labels = read_labels_file(data_dir)
     present = {doc.path for doc in docs}
     unused = sorted(set(manual) - present)
-    added: dict[str, dict] = {}
-    if missing := [doc.path for doc in docs if doc.path not in labels]:
-        computed = label_cards.label_data_dir(data_dir, {path: entry for path, entry in manual.items() if path in present})
-        added = {path: computed[path] for path in missing if usable(computed[path])}
+    card_page_folders = {label_cards.CATEGORY_FOLDERS[category] for category in label_cards.CARD_PAGE_KINDS}
+    card_pages_incomplete = any(path.split("/")[0] in card_page_folders for path in unlisted_files(data_dir, docs))
+    missing = [doc.path for doc in docs if doc.path not in labels]
+    if not missing or card_pages_incomplete:
+        return labels, {}, unused
+    computed = label_cards.label_data_dir(data_dir, {path: entry for path, entry in manual.items() if path in present})
+    added = {path: computed[path] for path in missing if usable(computed[path])}
     return {**labels, **{path: computed[path] for path in missing}}, added, unused
 
 
@@ -157,6 +194,7 @@ def plan_names(
     files: dict[str, str] = {}
     kept: list[tuple[str, str]] = []
     current: dict[str, str] = {}
+    on_disk = {doc.path: doc.filename for doc in label_cards.read_docs(data_dir)}
     for index, row in enumerate(rows):
         folder = label_cards.CATEGORY_FOLDERS[row["category"]]
         filename = row["filename"]
@@ -165,9 +203,13 @@ def plan_names(
         if original != filename:
             current[original] = filename
             continue
+        if on_disk.get(path, filename) != filename:
+            # 上次改名做到一半中斷：檔案已經是新檔名、manifest 還沒跟上。以資料夾裡的檔名為準，不重新評估標籤
+            row_names[index] = current[original] = on_disk[path]
+            continue
         label = labels.get(path)
         if not usable(label):
-            reason = "manifest 有紀錄但沒有實體檔，標籤檔也沒有它" if label is None else f"待人工確認：{label['reason']}"
+            reason = "標籤檔沒有它（沒有實體檔，或卡片頁不完整而這次沒有現算）" if label is None else f"待人工確認：{label['reason']}"
             kept.append((path, reason))
             continue
         new = label_cards.labelled_filename(label, original)
@@ -181,6 +223,9 @@ def plan_names(
 def build_headers(data_dir: Path, labels: dict[str, dict], files: dict[str, str]) -> dict[str, str]:
     """標頭檔內容：新檔名對標頭文字。
 
+    ASSUMPTION：資料夾裡有檔案、但 manifest 沒有紀錄的文件（fetch 某個類別失敗），只要標籤檔已有可用的標籤就留在標頭檔裡，
+    用它現在的檔名；它們這次不改名、不現算標籤。
+
     Args:
         data_dir: 資料根目錄。
         labels: 全部標籤。
@@ -192,19 +237,21 @@ def build_headers(data_dir: Path, labels: dict[str, dict], files: dict[str, str]
     Raises:
         ValueError: 兩份文件的新檔名相同，或要改成的新檔名在資料夾裡已有檔案。
     """
+    docs = label_cards.read_docs(data_dir)
+    entries = [(doc.path, doc.filename, files.get(doc.path, doc.filename)) for doc in docs]
+    entries += [(path, name, name) for path, name in unlisted_files(data_dir, docs).items()]
     headers: dict[str, str] = {}
     owners: dict[str, str] = {}
-    for doc in label_cards.read_docs(data_dir):
-        label = labels.get(doc.path)
+    for path, filename, name in entries:
+        label = labels.get(path)
         if not usable(label):
             continue
-        name = files.get(doc.path, doc.filename)
         if name in owners:
-            raise ValueError(f"{owners[name]} 與 {doc.path} 的新檔名相同（同一個新檔名：{name}），標頭檔的 key 會撞")
-        folder = doc.path.split("/")[0]
-        if name != doc.filename and (data_dir / folder / name).exists():
-            raise ValueError(f"{folder}/{name} 已經有檔案，不能把 {doc.path} 改成這個名字")
-        owners[name] = doc.path
+            raise ValueError(f"{owners[name]} 與 {path} 的新檔名相同（同一個新檔名：{name}），標頭檔的 key 會撞")
+        folder = path.split("/")[0]
+        if name != filename and (data_dir / folder / name).exists():
+            raise ValueError(f"{folder}/{name} 已經有檔案，不能把 {path} 改成這個名字")
+        owners[name] = path
         headers[name] = label["header"]
     return dict(sorted(headers.items()))
 

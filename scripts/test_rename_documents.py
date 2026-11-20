@@ -19,6 +19,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -212,6 +213,101 @@ class HeadersTest(RenameFixture):
         report = self.migrate(manual=manual)
         self.assertIn("offers/信用卡_全部_offer_WM_2.pdf", self.files())
         self.assertEqual(report.unused_manual, ["offers/not_here.pdf"])
+
+
+class InterruptionTest(RenameFixture):
+    def headers(self) -> dict[str, str]:
+        """標頭檔的內容。
+
+        Returns:
+            新檔名對標頭文字。
+        """
+        return json.loads((self.root / "_meta" / "document_headers.json").read_text(encoding="utf-8"))
+
+    def test_rerun_after_an_interruption_between_renaming_files_and_writing_the_manifest_converges(self) -> None:
+        real_rename = Path.rename
+        calls = []
+
+        def rename_then_crash(path: Path, target: Path) -> Path:
+            calls.append(path.name)
+            if len(calls) == 2:
+                raise KeyboardInterrupt("模擬在第二個檔案改名時中斷")
+            return real_rename(path, target)
+
+        with mock.patch.object(Path, "rename", rename_then_crash), self.assertRaises(KeyboardInterrupt):
+            self.migrate()
+        # 中斷時：第一個檔案已改名，manifest、標頭檔與題目檔都還沒動
+        self.assertEqual(self.manifest_filenames()[0], RICHART_OLD)
+        self.assertFalse((self.root / "_meta" / "document_headers.json").exists())
+
+        self.migrate()
+
+        self.assertEqual(self.manifest_filenames(), [RICHART_NEW, DUAL_NEW, OFFER_NEW, UNLABELLED_OLD, "offer_WM_3.pdf"])
+        self.assertEqual(sorted(self.headers()), sorted([RICHART_NEW, DUAL_NEW, OFFER_NEW]))
+        self.assertEqual(self.sources()["q1"], RICHART_NEW)
+
+    def test_rerun_after_an_interruption_with_all_files_renamed_but_the_manifest_not_written_converges(self) -> None:
+        manifest_before = (self.root / "_meta" / "manifest.jsonl").read_bytes()
+        self.migrate()
+        (self.root / "_meta" / "manifest.jsonl").write_bytes(manifest_before)
+        (self.root / "_meta" / "document_headers.json").unlink()
+        (self.root / "_meta" / "document_labels.json").unlink()
+
+        self.migrate()
+
+        self.assertEqual(self.manifest_filenames(), [RICHART_NEW, DUAL_NEW, OFFER_NEW, UNLABELLED_OLD, "offer_WM_3.pdf"])
+        self.assertEqual(sorted(self.headers()), sorted([RICHART_NEW, DUAL_NEW, OFFER_NEW]))
+
+
+class CategoryMissingFromManifestTest(RenameFixture):
+    """fetch 某個類別的列表失敗時，manifest 沒有那個類別的紀錄，但檔案還在資料夾裡。"""
+
+    def drop_from_manifest(self, category: str) -> None:
+        """從 manifest 拿掉某個類別的紀錄（檔案與頁面快照不動）。
+
+        Args:
+            category: manifest 的類別名稱。
+        """
+        self.data.rows = [row for row in self.data.rows if row["category"] != category]
+        self.data.finish()
+
+    def headers(self) -> dict[str, str]:
+        """標頭檔的內容。
+
+        Returns:
+            新檔名對標頭文字。
+        """
+        return json.loads((self.root / "_meta" / "document_headers.json").read_text(encoding="utf-8"))
+
+    def test_headers_keep_the_documents_of_a_category_whose_manifest_rows_are_missing(self) -> None:
+        self.migrate()
+        self.data.rows = [dict(row, filename=name) for row, name in zip(self.data.rows, self.manifest_filenames())]
+        self.drop_from_manifest("活動")
+
+        self.migrate()
+
+        self.assertEqual(sorted(self.headers()), sorted([RICHART_NEW, DUAL_NEW, OFFER_NEW]))
+
+    def test_new_documents_are_not_labelled_while_the_card_pages_are_missing_from_the_manifest(self) -> None:
+        self.migrate()
+        self.data.rows = [dict(row, filename=name) for row, name in zip(self.data.rows, self.manifest_filenames())]
+        self.data.add("活動", "offer_WM_4.pdf", OFFER_URL.format(4), html=page("限企業卡持卡人參加"))
+        self.drop_from_manifest("卡片")
+
+        report = self.migrate()
+
+        self.assertIn("offers/offer_WM_4.pdf", self.files())
+        self.assertEqual(report.labels_added, 0)
+        self.assertEqual(sorted(self.headers()), sorted([RICHART_NEW, DUAL_NEW, OFFER_NEW]))
+
+
+class LabelRecomputeTest(RenameFixture):
+    def test_labels_are_not_recomputed_when_no_document_lacks_a_label(self) -> None:
+        manual = {f"offers/{UNLABELLED_OLD}": {"kind": "信用卡", "cards": ["全部信用卡"], "decision": "使用者確認"}}
+        self.migrate(manual=manual)
+        with mock.patch.object(rename_documents.label_cards, "label_data_dir") as recompute:
+            self.migrate(manual=manual)
+        recompute.assert_not_called()
 
 
 class EvalSourcesTest(RenameFixture):

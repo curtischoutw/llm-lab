@@ -24,8 +24,10 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import label_cards  # noqa: E402
+from rag_lab.chunking import parse_header  # noqa: E402
 from label_cards import Card  # noqa: E402
 
 
@@ -159,11 +161,12 @@ class MakeLabelTest(unittest.TestCase):
         label = label_cards.make_label([card("台新Richart卡"), card("雙幣信用卡"), catalog[-1]], catalog)
         self.assertEqual(label["short_name"], "多卡")
 
-    def test_header_over_150_tokens_points_to_the_first_paragraph(self) -> None:
+    def test_header_over_150_tokens_is_shortened_to_a_header_parse_header_accepts(self) -> None:
         many = [Card("信用卡", f"台新測試聯名卡第{i:02d}號", ()) for i in range(30)]
         catalog = many + [Card("信用卡", "另一張卡", ())]
         label = label_cards.make_label(many, catalog)
-        self.assertEqual(label["header"], "卡別：信用卡｜適用 30 張卡（清單見本文件第一段）")
+        self.assertEqual(label["header"], "卡別：信用卡｜適用卡片：共 30 張卡")
+        self.assertEqual(parse_header(label["header"]), ("信用卡", ["共 30 張卡"]))
         self.assertEqual(len(label["cards"]), 30)
 
 
@@ -496,10 +499,11 @@ class ManualLabelTest(unittest.TestCase):
         entry = self.label({self.offer: {"kind": "信用卡及金融卡", "cards": ["全部信用卡", "全部金融卡"], "decision": ""}})[self.offer]
         self.assertEqual(entry["short_name"], "全部")
 
-    def test_header_over_150_tokens_points_to_the_first_paragraph(self) -> None:
+    def test_header_over_150_tokens_is_shortened_to_a_header_parse_header_accepts(self) -> None:
         cards = [f"台新測試聯名卡第{i:02d}號" for i in range(30)]
         entry = self.label({self.offer: {"kind": "信用卡", "cards": cards, "decision": ""}})[self.offer]
-        self.assertEqual(entry["header"], "卡別：信用卡｜適用 30 張卡（清單見本文件第一段）")
+        self.assertEqual(entry["header"], "卡別：信用卡｜適用卡片：共 30 張卡")
+        self.assertEqual(parse_header(entry["header"]), ("信用卡", ["共 30 張卡"]))
         self.assertEqual(entry["cards"], cards)
 
     def test_card_description_with_a_list_separator_is_an_error(self) -> None:
