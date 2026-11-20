@@ -145,6 +145,20 @@ class MakeLabelTest(unittest.TestCase):
         self.assertEqual(label["cards"], ["全部信用卡", "VISA金融卡"])
         self.assertEqual(label["short_name"], "多卡")
 
+    def test_corporate_card_is_not_required_for_all_credit_cards(self) -> None:
+        catalog = CATALOG + [Card("信用卡", "企業卡", ("企業卡",))]
+        without = [c for c in catalog if c.kind == "信用卡" and c.name != "企業卡"]
+        label = label_cards.make_label(without, catalog)
+        self.assertEqual(label["cards"], ["全部信用卡"])
+        self.assertEqual(label["short_name"], "全部")
+        label = label_cards.make_label([c for c in catalog if c.kind == "信用卡"], catalog)
+        self.assertEqual(label["cards"], ["全部信用卡"])
+
+    def test_missing_any_other_credit_card_is_still_not_all_credit_cards(self) -> None:
+        catalog = CATALOG + [Card("信用卡", "企業卡", ("企業卡",))]
+        label = label_cards.make_label([card("台新Richart卡"), card("雙幣信用卡"), catalog[-1]], catalog)
+        self.assertEqual(label["short_name"], "多卡")
+
     def test_header_over_150_tokens_points_to_the_first_paragraph(self) -> None:
         many = [Card("信用卡", f"台新測試聯名卡第{i:02d}號", ()) for i in range(30)]
         catalog = many + [Card("信用卡", "另一張卡", ())]
@@ -334,6 +348,28 @@ class CardNameTest(unittest.TestCase):
         labels = label_cards.label_data_dir(self.data.finish())
         self.assertEqual(labels[key]["cards"], ["新光三越御璽・鈦金・白金卡"])
 
+    def shin_kong_mitsukoshi(self) -> None:
+        """加新光三越兩張卡的卡片頁（cg008 御璽/鈦金/白金、cg014 無限/世界）。"""
+        self.data.add("卡片", "card_cg008_card001.pdf", f"{WWW}/overview/cg008/card001/", html=card_page("新光三越御璽/鈦金/白金卡"))
+        self.data.add("卡片", "card_cg014_card001.pdf", f"{WWW}/overview/cg014/card001/", html=card_page("新光三越無限/世界卡"))
+
+    def test_one_alias_can_name_several_cards(self) -> None:
+        self.shin_kong_mitsukoshi()
+        keys = [
+            self.data.add("活動", f"offer_WM_{i}.pdf", f"{WWW}/WM_{i}", html=page(text))
+            for i, text in enumerate(("持新光三越聯名卡消費", "持台新新光三越聯名卡消費"))
+        ]
+        labels = label_cards.label_data_dir(self.data.finish())
+        for key in keys:
+            self.assertEqual(labels[key]["cards"], ["新光三越御璽・鈦金・白金卡", "新光三越無限・世界卡"], key)
+            self.assertEqual(labels[key]["short_name"], "多卡", key)
+
+    def test_a_more_specific_spelling_is_not_swallowed_by_the_shared_alias(self) -> None:
+        self.shin_kong_mitsukoshi()
+        key = self.data.add("活動", "offer_WM_1.pdf", f"{WWW}/WM_1", html=page("限新光三越無限卡持卡人"))
+        labels = label_cards.label_data_dir(self.data.finish())
+        self.assertEqual(labels[key]["cards"], ["新光三越無限・世界卡"])
+
     def test_credit_and_debit_cards_with_the_same_group_number_stay_separate(self) -> None:
         self.data.add("卡片", "card_cg003_card001.pdf", f"{WWW}/credit/overview/cg003/card001/", html=card_page("國泰航空翱翔鈦金卡/鈦金卡"))
         self.data.add("金融卡卡片頁", "debit_card_cg003_card01.pdf", f"{WWW}/credit/payment/cg003/card01/", html=card_page("財富管理Visa金融卡"))
@@ -359,6 +395,126 @@ class CardNameTest(unittest.TestCase):
         labels = label_cards.label_data_dir(self.data.finish())
         self.assertEqual(labels[key]["cards"], ["全部金融卡"])
         self.assertEqual(labels[key]["short_name"], "全部")
+
+
+class GeneralTermTest(unittest.TestCase):
+    """內文出現「全台新信用卡」算全部信用卡、「簽帳金融卡會員」算全部金融卡（使用者 2026-11-20 決定）。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.data = FakeData(Path(self._tmp.name))
+        self.data.add("卡片", "card_cg047_card001.pdf", f"{WWW}/overview/cg047/card001/", html=card_page("台新Richart卡"))
+        self.data.add("金融卡卡片頁", "debit_card_cg001_card01.pdf", f"{WWW}/payment/cg001/card01/", html=card_page("VISA金融卡"))
+
+    def offer(self, text: str) -> dict:
+        """加一份只有一段內文的活動，回傳它的標籤。
+
+        Args:
+            text: 活動內文。
+
+        Returns:
+            該活動的標籤紀錄。
+        """
+        key = self.data.add("活動", "offer_WM_1.pdf", f"{WWW}/WM_1", html=page(text))
+        return label_cards.label_data_dir(self.data.finish())[key]
+
+    def test_all_taishin_credit_cards_phrase_is_all_credit_cards(self) -> None:
+        entry = self.offer("活動期間全台新信用卡刷卡享回饋")
+        self.assertEqual((entry["kind"], entry["cards"], entry["short_name"]), ("信用卡", ["全部信用卡"], "全部"))
+        self.assertEqual(entry["source"], "頁面內文")
+
+    def test_debit_card_member_phrase_is_all_debit_cards(self) -> None:
+        entry = self.offer("簽帳金融卡會員專屬優惠")
+        self.assertEqual((entry["kind"], entry["cards"], entry["short_name"]), ("金融卡", ["全部金融卡"], "全部"))
+
+    def test_phrase_and_a_named_card_of_the_other_kind_are_both_kept(self) -> None:
+        entry = self.offer("全台新信用卡與VISA金融卡持卡人")
+        self.assertEqual((entry["kind"], entry["cards"]), ("信用卡及金融卡", ["全部信用卡", "VISA金融卡"]))
+
+    def test_plain_taishin_credit_card_wording_is_still_not_matched(self) -> None:
+        self.assertTrue(self.offer("限台新信用卡持卡人")["needs_review"])
+
+
+class ManualLabelTest(unittest.TestCase):
+    """使用者人工確認的標籤優先於所有自動規則；格式規則同 make_label。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.data = FakeData(Path(self._tmp.name))
+        self.data.add("卡片", "card_cg012_card0001.pdf", f"{WWW}/overview/cg012/card0001/", html=card_page("太陽卡"))
+        self.data.add("卡片", "card_cg047_card001.pdf", f"{WWW}/overview/cg047/card001/", html=card_page("台新Richart卡"))
+        self.data.add("金融卡卡片頁", "debit_card_cg001_card01.pdf", f"{WWW}/payment/cg001/card01/", html=card_page("VISA金融卡"))
+        self.offer = self.data.add("活動", "offer_WM_1.pdf", f"{WWW}/WM_1", html=page("限太陽卡持卡人"))
+        self.pending = self.data.add("下載", "download_x.pdf", f"{WWW}/files/download_x.pdf")
+
+    def label(self, manual: dict) -> dict:
+        """對目前的假資料加上人工標籤後產生標籤。
+
+        Args:
+            manual: 人工標籤（路徑 -> {kind, cards, decision}）。
+
+        Returns:
+            label_data_dir 的結果。
+        """
+        return label_cards.label_data_dir(self.data.finish(), manual)
+
+    def test_manual_label_replaces_the_automatic_one(self) -> None:
+        entry = self.label({self.offer: {"kind": "信用卡", "cards": ["台新Richart卡"], "decision": "使用者改"}})[self.offer]
+        self.assertEqual(entry["kind"], "信用卡")
+        self.assertEqual(entry["cards"], ["台新Richart卡"])
+        self.assertEqual(entry["short_name"], "台新Richart卡")
+        self.assertEqual(entry["header"], "卡別：信用卡｜適用卡片：台新Richart卡")
+        self.assertEqual(entry["source"], "人工確認：使用者改")
+        self.assertFalse(entry["needs_review"])
+        self.assertEqual((entry["reason"], entry["suggested"]), ("", None))
+
+    def test_manual_label_resolves_a_document_that_needed_review(self) -> None:
+        self.assertTrue(self.label({})[self.pending]["needs_review"])
+        entry = self.label({self.pending: {"kind": "金融卡", "cards": ["全部金融卡"], "decision": "照建議"}})[self.pending]
+        self.assertFalse(entry["needs_review"])
+        self.assertEqual((entry["cards"], entry["short_name"]), (["全部金融卡"], "全部"))
+
+    def test_documents_without_a_manual_label_keep_the_automatic_label(self) -> None:
+        labels = self.label({self.pending: {"kind": "信用卡", "cards": ["全部信用卡"], "decision": ""}})
+        self.assertEqual(labels[self.offer]["cards"], ["太陽卡"])
+        self.assertEqual(labels[self.offer]["source"], "頁面內文")
+
+    def test_free_description_that_is_not_a_known_card_is_accepted_as_is(self) -> None:
+        entry = self.label({self.offer: {"kind": "信用卡", "cards": ["台新VISA、JCB信用卡"], "decision": ""}})[self.offer]
+        self.assertEqual(entry["cards"], ["台新VISA、JCB信用卡"])
+        self.assertEqual(entry["short_name"], "台新VISA、JCB信用卡")
+        self.assertEqual(entry["header"], "卡別：信用卡｜適用卡片：台新VISA、JCB信用卡")
+
+    def test_all_of_one_kind_plus_other_cards_is_several_cards(self) -> None:
+        entry = self.label({self.offer: {"kind": "信用卡及金融卡", "cards": ["全部信用卡", "VISA金融卡"], "decision": ""}})[self.offer]
+        self.assertEqual(entry["short_name"], "多卡")
+        self.assertEqual(entry["header"], "卡別：信用卡及金融卡｜適用卡片：全部信用卡／VISA金融卡")
+
+    def test_all_of_both_kinds_is_all(self) -> None:
+        entry = self.label({self.offer: {"kind": "信用卡及金融卡", "cards": ["全部信用卡", "全部金融卡"], "decision": ""}})[self.offer]
+        self.assertEqual(entry["short_name"], "全部")
+
+    def test_header_over_150_tokens_points_to_the_first_paragraph(self) -> None:
+        cards = [f"台新測試聯名卡第{i:02d}號" for i in range(30)]
+        entry = self.label({self.offer: {"kind": "信用卡", "cards": cards, "decision": ""}})[self.offer]
+        self.assertEqual(entry["header"], "卡別：信用卡｜適用 30 張卡（清單見本文件第一段）")
+        self.assertEqual(entry["cards"], cards)
+
+    def test_card_description_with_a_list_separator_is_an_error(self) -> None:
+        for bad in ("台新VISA／JCB信用卡", "台新VISA｜JCB信用卡"):
+            with self.assertRaisesRegex(ValueError, "分隔符號"):
+                self.label({self.offer: {"kind": "信用卡", "cards": [bad], "decision": ""}})
+
+    def test_path_that_is_not_in_the_manifest_is_an_error(self) -> None:
+        with self.assertRaisesRegex(ValueError, "offers/offer_WM_404.pdf"):
+            self.label({"offers/offer_WM_404.pdf": {"kind": "信用卡", "cards": ["全部信用卡"], "decision": ""}})
+
+    def test_unknown_kind_or_empty_cards_is_an_error(self) -> None:
+        for bad in ({"kind": "預付卡", "cards": ["x"]}, {"kind": "信用卡", "cards": []}):
+            with self.assertRaises(ValueError):
+                self.label({self.offer: {**bad, "decision": ""}})
 
 
 class LinkedDocumentTest(unittest.TestCase):
@@ -415,6 +571,22 @@ class LinkedDocumentTest(unittest.TestCase):
         self.assertTrue(entry["needs_review"])
         self.assertIn("rights/right0101.docx", entry["reason"])
 
+    def test_attachment_follows_the_manual_label_of_the_page_that_links_to_it(self) -> None:
+        page_key = self.rights_page("right0101", "台新Richart卡專屬", "/files/x.pdf")
+        key = self.data.add("權益附件", "attachment_x.pdf", f"{WWW}/files/x.pdf")
+        manual = {page_key: {"kind": "信用卡", "cards": ["雙幣信用卡", "太陽卡"], "decision": ""}}
+        entry = label_cards.label_data_dir(self.data.finish(), manual)[key]
+        self.assertEqual(entry["cards"], ["雙幣信用卡", "太陽卡"])
+        self.assertFalse(entry["needs_review"])
+
+    def test_attachment_linked_from_a_page_with_a_free_description_label_needs_review(self) -> None:
+        page_key = self.rights_page("right0101", "台新Richart卡專屬", "/files/x.pdf")
+        key = self.data.add("權益附件", "attachment_x.pdf", f"{WWW}/files/x.pdf")
+        manual = {page_key: {"kind": "信用卡", "cards": ["台新VISA、JCB信用卡"], "decision": ""}}
+        entry = label_cards.label_data_dir(self.data.finish(), manual)[key]
+        self.assertTrue(entry["needs_review"])
+        self.assertIn("rights/right0101.docx", entry["reason"])
+
     def test_offer_image_takes_the_label_of_its_offer_page(self) -> None:
         self.data.add("活動", "offer_WM_20260903.pdf", f"{WWW}/WM_20260903", html=page("雙幣信用卡限定"))
         key = self.data.add("活動圖片", "offer_image_WM_20260903_banner_image.jpg", "https://mkp.example/upload/WM_20260903/WM_20260903_banner_image.jpg")
@@ -449,16 +621,23 @@ class ReviewAndOutputTest(unittest.TestCase):
         self.data.add("下載", "download_x.pdf", f"{WWW}/files/download_x.pdf")
         self.data.finish()
 
-    def run_main(self) -> tuple[Path, Path]:
+    def run_main(self, manual: dict | None = None) -> tuple[Path, Path]:
         """對假資料跑 main，輸出到暫存資料夾。
+
+        Args:
+            manual: 人工標籤檔的內容；None 表示空的人工檔（不用 repo 裡真實的人工檔）。
 
         Returns:
             (標籤檔, 抽查報告) 的路徑。
         """
         labels_path = self.root / "document_labels.json"
         review_path = self.root / "out" / "labels_review.md"
+        manual_path = self.root / "manual.json"
+        manual_path.write_text(json.dumps(manual or {}, ensure_ascii=False), encoding="utf-8")
         with contextlib.redirect_stdout(io.StringIO()):
-            code = label_cards.main(["--data-dir", str(self.root / "data"), "--labels", str(labels_path), "--review", str(review_path)])
+            code = label_cards.main(
+                ["--data-dir", str(self.root / "data"), "--labels", str(labels_path), "--review", str(review_path), "--manual", str(manual_path)]
+            )
         self.assertEqual(code, 0)
         return labels_path, review_path
 
@@ -468,6 +647,12 @@ class ReviewAndOutputTest(unittest.TestCase):
         expected = {f"{FOLDERS[row['category']]}/{row['filename']}" for row in self.data.rows}
         self.assertEqual(set(labels), expected)
         self.assertEqual(labels["offers/offer_WM_0.pdf"]["short_name"], "台新Richart卡")
+
+    def test_manual_file_given_on_the_command_line_overrides_the_automatic_label(self) -> None:
+        labels_path, review_path = self.run_main({"downloads/download_x.pdf": {"kind": "信用卡", "cards": ["全部信用卡"], "decision": "使用者確認"}})
+        entry = json.loads(labels_path.read_text(encoding="utf-8"))["downloads/download_x.pdf"]
+        self.assertEqual((entry["cards"], entry["source"], entry["needs_review"]), (["全部信用卡"], "人工確認：使用者確認", False))
+        self.assertIn("| downloads | 1 | 0 |", review_path.read_text(encoding="utf-8"))
 
     def test_rerun_gives_identical_files(self) -> None:
         labels_path, review_path = self.run_main()
@@ -547,7 +732,36 @@ class ExtraCardsTest(unittest.TestCase):
             self.assertEqual(entry["short_name"], "台新Richart卡", old_name)
 
     def test_tier_words_that_are_not_a_card_name_are_not_matched(self) -> None:
-        self.assertTrue(self.offer("限御璽卡、白金卡、鈦金卡持卡人，不含企業卡")["needs_review"])
+        self.assertTrue(self.offer("限御璽卡、白金卡、鈦金卡持卡人，不含商務卡")["needs_review"])
+
+    def test_corporate_card_is_a_credit_card_and_its_long_spelling_is_the_same_card(self) -> None:
+        for text in ("適用企業卡", "適用企業信用卡"):
+            self.data = FakeData(Path(self._tmp.name) / f"corporate_{len(text)}")
+            self.data.add("卡片", "card_cg047_card001.pdf", f"{WWW}/overview/cg047/card001/", html=card_page("台新Richart卡"))
+            entry = self.offer(text)
+            self.assertEqual((entry["kind"], entry["cards"]), ("信用卡", ["企業卡"]), text)
+
+    def test_corporate_card_in_an_exclusion_sentence_does_not_count(self) -> None:
+        for text in ("限台新Richart卡持卡人(不含簽帳金融卡、企業卡)", "台新Richart卡，企業卡除外", "台新Richart卡；排除企業信用卡", "限台新Richart卡持卡人參加，簽帳金融卡、企業卡恕不適用"):
+            self.data = FakeData(Path(self._tmp.name) / f"excluded_{abs(hash(text))}")
+            self.data.add("卡片", "card_cg047_card001.pdf", f"{WWW}/overview/cg047/card001/", html=card_page("台新Richart卡"))
+            self.assertEqual(self.offer(text)["cards"], ["台新Richart卡"], text)
+
+    def test_corporate_card_still_counts_at_another_place_that_is_not_excluded(self) -> None:
+        filler = "這是一段和卡別無關的說明文字，" * 3
+        entry = self.offer(f"台新Richart卡不含企業卡。{filler}適用企業卡持卡人。")
+        self.assertEqual(entry["cards"], ["台新Richart卡", "企業卡"])
+
+    def test_exclusion_word_further_than_15_characters_away_does_not_exclude_the_corporate_card(self) -> None:
+        near = self.offer("台新Richart卡不含" + "一二三四五六七八九十一二三" + "企業卡")  # 不含與企業卡之間 13 字
+        self.assertEqual(near["cards"], ["台新Richart卡"])
+        self.data = FakeData(Path(self._tmp.name) / "far")
+        self.data.add("卡片", "card_cg047_card001.pdf", f"{WWW}/overview/cg047/card001/", html=card_page("台新Richart卡"))
+        far = self.offer("台新Richart卡不含" + "一二三四五六七八九十一二三四五六七八九十" + "企業卡")  # 20 字
+        self.assertEqual(far["cards"], ["台新Richart卡", "企業卡"])
+
+    def test_other_cards_ignore_the_exclusion_words_around_them(self) -> None:
+        self.assertEqual(self.offer("不含台新Richart卡")["cards"], ["台新Richart卡"])
 
     def test_card_brand_words_are_not_matched(self) -> None:
         self.assertTrue(self.offer("限刷台新Visa卡或台新JCB信用卡")["needs_review"])
@@ -658,9 +872,17 @@ class ReviewSectionsTest(unittest.TestCase):
         data.add("活動", "offer_WM_3.pdf", f"{WWW}/WM_3", html=page("這是一段很長的說明。" * 30, title="無卡名活動"))
         data.add("下載", "download_01BENZ_x.pdf", f"{WWW}/files/download_01BENZ_x.pdf")
         data.finish()
+        (self.root / "manual.json").write_text("{}", encoding="utf-8")
         review_path = self.root / "review.md"
         with contextlib.redirect_stdout(io.StringIO()):
-            label_cards.main(["--data-dir", str(self.root / "data"), "--labels", str(self.root / "labels.json"), "--review", str(review_path)])
+            label_cards.main(
+                [
+                    "--data-dir", str(self.root / "data"),
+                    "--labels", str(self.root / "labels.json"),
+                    "--review", str(review_path),
+                    "--manual", str(self.root / "manual.json"),
+                ]
+            )
         self.review = review_path.read_text(encoding="utf-8")
 
     def section(self, heading: str) -> str:
