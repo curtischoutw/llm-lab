@@ -4,7 +4,7 @@
 
 **Blocked by:** 03（兩張都改 `.env`、`.env.example`、README，依序做避免衝突）
 
-**Status:** ready-for-agent
+**Status:** resolved（已 merge 進 feat/rag-optimization，ba8c9f8）
 
 - [ ] `.env` 與 `.env.example`：`EMBED_MODEL=mlx-community/Qwen3-Embedding-4B-4bit-DWQ`、`EMBED_DIM=2560`，`EMBED_QUERY_PREFIX` 不變。改 `.env` 前先備份。
 - [ ] `README.md` 的 server 啟動指令、`scripts/vlm_server.py`、`scripts/smoke_test.py` 裡寫到 0.6B 的地方改成 4B。用 grep 找全部出現的地方，回報改了哪些。

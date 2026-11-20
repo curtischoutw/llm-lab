@@ -4,7 +4,7 @@
 
 **Blocked by:** 無（真實標頭檔由 02 產生，用在 06；這張的離線檢查用自己寫的測試標頭）
 
-**Status:** ready-for-agent
+**Status:** resolved（已 merge 進 feat/rag-optimization，ba8c9f8）
 
 - [x] `DOCUMENT_HEADERS_FILE`：選填，指向 JSON（key 是檔名，值是標頭文字）。檔案不存在或格式錯誤時 ConfigError。沒設時下面的改寫與自訂 chunker 都不啟用，匯入行為和現在完全一樣（chunk 內容與數量相同）。
 - [x] 有設、但匯入的文件不在檔裡：在 `parse_document` 讓該文件記成失敗，報告寫出原因，不寫入知識庫。

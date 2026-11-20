@@ -4,7 +4,7 @@
 
 **Blocked by:** 01
 
-**Status:** implemented（實際遷移待主對話執行）
+**Status:** resolved（已 merge 進 feat/rag-optimization，ba8c9f8）
 
 - [x] `document_filename`（`scripts/fetch_taishin.py:2513`）產生 `<卡別>_<簡短卡名｜多卡｜全部>_<原檔名>`，所有會被匯入的類別都套用，包含活動圖片（`IMAGES`；`fetch_taishin.py:2092` 起比較新舊 banner 檔名的地方要一起改，其他呼叫點在 2113、2144、2540、2706、2788、2913）。新抓的文件在下載當下就能產生標籤（用 01 的同一套規則），不用另外跑 01 的腳本。
 - [x] 查明 `fetch_taishin.py` 怎麼對照既有檔案、manifest 與 `_meta/html`、`_meta/print` 快照（判斷「已存在就略過」「未變」），改完之後增量更新照常運作：對遷移後的資料跑一次不連網的檢查（或測試），確認不會把已存在的文件當成新文件重抓。

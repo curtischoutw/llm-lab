@@ -4,7 +4,7 @@
 
 **Blocked by:** 無
 
-**Status:** ready-for-agent
+**Status:** resolved（已 merge 進 feat/rag-optimization，ba8c9f8）
 
 - [ ] 腳本放在 `scripts/`，檔頭照 code standards 寫清楚規則。輸入是 manifest（`_meta/manifest.jsonl`）、類別資料夾、`_meta/html` 的頁面快照，不連網。
 - [ ] 卡片頁（`cards/`、`debit_cards/`、`richart/`）：網址的 `cgXXX` 或頁面標題對應卡名，建立已知卡名清單（信用卡、金融卡分開）。

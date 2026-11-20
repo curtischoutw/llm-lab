@@ -4,7 +4,7 @@
 
 **Blocked by:** 無
 
-**Status:** ready-for-agent
+**Status:** resolved（已 merge 進 feat/rag-optimization，ba8c9f8）
 
 - [ ] `rag_lab/config.py` 的 Settings 新增兩個欄位。`KB_ENTITY_TYPES` 是逗號分隔，去掉前後空白，空項目或整個空字串以 ConfigError 中止。缺少時 ConfigError，訊息照現有欄位的格式。
 - [ ] `rag_lab/pipeline.py` 的 `build_rag` 把 `addon_params={"language": ..., "entity_types": [...]}` 放進 `lightrag_kwargs`。`SUMMARY_LANGUAGE`、`ENTITY_TYPES` 仍留在 `UNMANAGED_LIBRARY_ENV`。
