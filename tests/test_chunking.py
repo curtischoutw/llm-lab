@@ -13,7 +13,7 @@ Dependencies: 標準函式庫。
 
 import unittest
 
-from rag_lab.chunking import chunk_by_headings, rewrite_content_list
+from rag_lab.chunking import chunk_by_headings, parse_header, rewrite_content_list, shorten_header
 
 MARKER_START = "<<<RAG_LAB_HEADER"
 MARKER_END = "RAG_LAB_HEADER>>>"
@@ -162,8 +162,18 @@ class HeaderTest(unittest.TestCase):
 
         self.assertEqual(len(chunks), 2)
         self.assertTrue(chunks[0]["content"].startswith(header + "\n章節：甲節"))
-        self.assertTrue(chunks[1]["content"].startswith("卡別：信用卡｜適用 40 張卡（清單見本文件第一段）\n章節：乙節"))
+        self.assertTrue(chunks[1]["content"].startswith("卡別：信用卡｜適用卡片：共 40 張卡\n章節：乙節"))
         self.assertNotIn("第000號卡", chunks[1]["content"])
+
+    def test_shortened_header_is_accepted_by_parse_header_and_does_not_claim_a_list(self):
+        cards = [f"第{i:03d}號卡" for i in range(40)]
+        header = "卡別：信用卡及金融卡｜適用卡片：" + "／".join(cards)
+
+        short = shorten_header(header)
+
+        self.assertEqual(parse_header(short), ("信用卡及金融卡", ["共 40 張卡"]))
+        self.assertNotIn("清單", short)
+        self.assertNotIn("本文件", short)
 
     def test_header_within_150_tokens_is_kept_in_every_chunk(self):
         header = "卡別：信用卡｜適用卡片：" + "／".join(f"卡{i}" for i in range(20))  # 約 70 字元
@@ -213,7 +223,7 @@ class HeaderFormatTest(unittest.TestCase):
 
         chunks = chunk(document(header, "# 甲節", body("甲", 200), "# 乙節", body("乙", 200)))
 
-        self.assertTrue(chunks[1]["content"].startswith("卡別：信用卡及金融卡｜適用 40 張卡（清單見本文件第一段）\n章節：乙節"))
+        self.assertTrue(chunks[1]["content"].startswith("卡別：信用卡及金融卡｜適用卡片：共 40 張卡\n章節：乙節"))
 
 
 class NoHeadingTest(unittest.TestCase):
@@ -283,7 +293,28 @@ class RewriteContentListTest(unittest.TestCase):
         result = rewrite_content_list(self.sample(), header, count_tokens)
 
         table = next(item for item in result if item["type"] == "table")
-        self.assertEqual(table["table_caption"][0], "卡片標籤：卡別：信用卡｜適用 40 張卡（清單見本文件第一段）")
+        self.assertEqual(table["table_caption"][0], "卡片標籤：卡別：信用卡｜適用卡片：共 40 張卡")
+
+    def test_document_without_text_items_gets_no_header_text_item_but_its_captions_keep_the_label(self):
+        image_and_table = [
+            {"type": "image", "img_path": "a.png", "page_idx": 0},
+            {"type": "table", "table_body": "<table></table>", "table_caption": ["表一"], "page_idx": 0},
+            {"type": "equation", "text": "x=1"},
+        ]
+
+        result = rewrite_content_list(image_and_table, "卡別：信用卡｜適用卡片：甲卡", count_tokens)
+
+        self.assertEqual([item["type"] for item in result], ["image", "table", "equation"])
+        self.assertEqual(result[0]["image_caption"], ["卡片標籤：卡別：信用卡｜適用卡片：甲卡"])
+        self.assertEqual(result[1]["table_caption"], ["卡片標籤：卡別：信用卡｜適用卡片：甲卡", "表一"])
+        self.assertNotIn(MARKER_START, str(result))
+
+    def test_document_with_only_blank_text_items_gets_no_header_text_item(self):
+        blank = [{"type": "text", "text": "  \n "}, {"type": "image", "img_path": "a.png"}]
+
+        result = rewrite_content_list(blank, "卡別：信用卡｜適用卡片：甲卡", count_tokens)
+
+        self.assertNotIn(MARKER_START, str(result))
 
     def test_input_is_not_modified(self):
         original = self.sample()

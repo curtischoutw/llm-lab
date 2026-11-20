@@ -44,7 +44,7 @@ richart_discounts 建議台新Richart卡，檔名含 BENZ 建議 Mercedes-Benz�
 
 標籤內容（make_label）：某一卡別的已知卡片全部出現時，該卡別寫「全部信用卡」或「全部金融卡」；
 簡短卡名：一張卡寫卡名，多張寫「多卡」，全部寫「全部」；兩種卡別都有時卡別寫「信用卡及金融卡」。
-標頭是「卡別：…｜適用卡片：…」，超過 150 個 token 時改寫成「適用 N 張卡（清單見本文件第一段）」。
+標頭是「卡別：…｜適用卡片：…」，超過 150 個 token 時改寫成「適用卡片：共 N 張卡」（rag_lab.chunking.short_header：縮短邏輯只留那一份，格式 parse_header 接受）。
 
 檔名格式（rag-optimization ticket 02）：文件改名後是 <卡別>_<簡短卡名>_<原檔名>（labelled_filename）。標籤檔、人工標籤檔與頁面快照
 一律用原檔名當 key，read_docs 把已經改名的文件還原成原檔名（original_filename），所以改名之後重跑本腳本得到同樣的 key。
@@ -84,7 +84,7 @@ richart_discounts 建議台新Richart卡，檔名含 BENZ 建議 Mercedes-Benz�
   清單句的企業卡也會被排掉，排除詞離得太遠則擋不住。
 - 官網新增卡片頁時，卡名會自動進清單，但內文別名要手動補。
 
-Dependencies: tiktoken（LightRAG 已依賴，不是新增依賴）。
+Dependencies: tiktoken（LightRAG 已依賴，不是新增依賴）；rag_lab.chunking（專案內，只用標準函式庫，取標頭縮短格式與長度上限）。
 """
 
 import argparse
@@ -100,10 +100,13 @@ from urllib.parse import unquote, urljoin, urlparse
 
 import tiktoken
 
+# 標頭縮短的格式與長度上限沿用 rag_lab/chunking.py（只用標準函式庫）；腳本在 scripts/ 底下，要先把 repo 根目錄放進 sys.path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from rag_lab.chunking import HEADER_MAX_TOKENS, short_header  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANUAL_LABELS_PATH = Path(__file__).resolve().parent / "label_cards_manual.json"
 KINDS = ("信用卡", "金融卡")
-HEADER_TOKEN_LIMIT = 150
 LIST_SEPARATOR = "／"
 
 
@@ -152,8 +155,9 @@ def compact(text: str) -> str:
 # 誤差：視窗是字數不是語意，排除句與清單句相隔不到視窗時，清單句的企業卡也會被排掉；
 # 超出視窗的排除句（「不含」離企業卡太遠）擋不住。
 EXCLUSION_CARDS = ("企業卡",)
-# 用詞與否定詞清單（NEGATION_WORDS，Q42）相同，例如「簽帳金融卡、企業卡恕不適用」。
-EXCLUSION_WORDS = ("不適用", "除外", "排除", "不含", "恕不", "非上述")
+# 否定詞清單（Q42 的報告與企業卡排除規則共用同一份），例如「簽帳金融卡、企業卡恕不適用」。
+NEGATION_WORDS = ("不適用", "除外", "排除", "不含", "恕不", "非上述")
+EXCLUSION_WORDS = NEGATION_WORDS
 EXCLUSION_WINDOW = 15
 # 判斷「全部信用卡」「全部金融卡」時不要求比對到的卡（使用者 2026-11-20 決定 Q54）：比對到其他所有卡就算全部；
 # 企業卡比對到了也照樣算在適用卡片裡。
@@ -243,7 +247,6 @@ def match_cards(text: str, catalog: list[Card]) -> list[Card]:
     return [card for card in catalog if card in hit]
 
 
-NEGATION_WORDS = ("不適用", "除外", "排除", "不含", "恕不", "非上述")
 NEGATION_WINDOW = 30
 
 
@@ -289,7 +292,7 @@ def make_label(cards: list[Card], catalog: list[Card]) -> dict:
 
     某一卡別的卡片全部在清單裡時，該卡別的卡名清單換成「全部信用卡」或「全部金融卡」
     （OPTIONAL_FOR_ALL 的卡不要求在清單裡）。
-    標頭超過 HEADER_TOKEN_LIMIT 個 token 時，改寫成「適用 N 張卡（清單見本文件第一段）」，
+    標頭超過 HEADER_MAX_TOKENS 個 token 時，改寫成 rag_lab.chunking.short_header 的「適用卡片：共 N 張卡」，
     N 是實際張數（「全部」展開後的張數）。
 
     Args:
@@ -335,8 +338,8 @@ def compose_label(kind_text: str, entries: list[str], all_entries: int, count: i
     else:
         short_name = "多卡"
     header = f"卡別：{kind_text}｜適用卡片：{LIST_SEPARATOR.join(entries)}"
-    if token_counter()(header) > HEADER_TOKEN_LIMIT:
-        header = f"卡別：{kind_text}｜適用 {count} 張卡（清單見本文件第一段）"
+    if token_counter()(header) > HEADER_MAX_TOKENS:
+        header = short_header(kind_text, count)
     return {"kind": kind_text, "cards": entries, "short_name": short_name, "header": header}
 
 
@@ -552,20 +555,32 @@ def squash(text: str) -> str:
 def read_docs(data_dir: Path) -> list[Doc]:
     """讀 manifest，留下有實體檔的文件。檔名已改成新格式（labelled_filename）的文件，path 與 stem 還原成原檔名。
 
+    manifest 寫的檔名在資料夾裡找不到、但資料夾裡有同一份文件改過名的檔案（改名做到一半中斷：檔案已改、manifest 還沒改）時，
+    也算有實體檔，Doc.filename 是那個檔案現在的檔名。
+
     Args:
         data_dir: 資料根目錄（含 _meta/manifest.jsonl 與各類別資料夾）。
 
     Returns:
         有實體檔的文件，順序同 manifest。
     """
+    renamed: dict[str, dict[str, str]] = {}
+
+    def renamed_in(folder: str) -> dict[str, str]:
+        if folder not in renamed:
+            names = sorted(p.name for p in (data_dir / folder).iterdir() if p.is_file()) if (data_dir / folder).is_dir() else []
+            renamed[folder] = {original_filename(name): name for name in names if original_filename(name) != name}
+        return renamed[folder]
+
     docs = []
     with (data_dir / "_meta" / "manifest.jsonl").open(encoding="utf-8") as manifest:
         for line in manifest:
             row = json.loads(line)
             folder = CATEGORY_FOLDERS[row["category"]]
             original = original_filename(row["filename"])
-            if (data_dir / folder / row["filename"]).is_file():
-                docs.append(Doc(f"{folder}/{original}", row["category"], row["url"], original.rsplit(".", 1)[0], row["filename"]))
+            current = row["filename"] if (data_dir / folder / row["filename"]).is_file() else renamed_in(folder).get(original)
+            if current is not None:
+                docs.append(Doc(f"{folder}/{original}", row["category"], row["url"], original.rsplit(".", 1)[0], current))
     return docs
 
 
