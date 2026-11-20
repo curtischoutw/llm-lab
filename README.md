@@ -549,5 +549,5 @@ PPT、Word、圖片（主知識庫，在 3 篇論文之後匯入 `data/documents
 下載腳本的測試對本機假 HTTP server 執行，不連網路，不在上面的 `unittest` 範圍內，要另外執行：
 
 ```sh
-.venv/bin/python -m unittest scripts/test_fetch_papers.py scripts/test_fetch_documents.py scripts/test_fetch_taishin.py
+.venv/bin/python -m unittest scripts/test_fetch_papers.py scripts/test_fetch_documents.py scripts/test_fetch_taishin.py scripts/test_label_cards.py scripts/test_rename_documents.py
 ```

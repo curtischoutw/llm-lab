@@ -924,5 +924,72 @@ class ReviewSectionsTest(unittest.TestCase):
         self.assertIn("| 台新Visa卡 | 0 |", section)
 
 
+# ==============================
+# 檔名格式：<卡別>_<簡短卡名>_<原檔名>
+# ==============================
+
+def label_of(kind: str, short_name: str) -> dict:
+    """只有檔名用得到欄位的標籤。
+
+    Args:
+        kind: 卡別。
+        short_name: 簡短卡名。
+
+    Returns:
+        標籤紀錄（只填 kind 與 short_name）。
+    """
+    return {"kind": kind, "short_name": short_name}
+
+
+class LabelledFilenameTest(unittest.TestCase):
+    def test_single_card_name_goes_between_kind_and_original_name(self) -> None:
+        name = label_cards.labelled_filename(label_of("信用卡", "台新Richart卡"), "card_cg047_card001.pdf")
+        self.assertEqual(name, "信用卡_台新Richart卡_card_cg047_card001.pdf")
+
+    def test_both_kinds_and_all_cards_use_the_short_names_of_the_spec(self) -> None:
+        self.assertEqual(
+            label_cards.labelled_filename(label_of("信用卡及金融卡", "全部"), "download_a.pdf"),
+            "信用卡及金融卡_全部_download_a.pdf",
+        )
+        self.assertEqual(label_cards.labelled_filename(label_of("金融卡", "多卡"), "x.pdf"), "金融卡_多卡_x.pdf")
+
+    def test_free_description_with_a_fullwidth_comma_is_kept(self) -> None:
+        name = label_cards.labelled_filename(label_of("信用卡", "台新VISA、JCB信用卡"), "rights_x.docx")
+        self.assertEqual(name, "信用卡_台新VISA、JCB信用卡_rights_x.docx")
+
+    def test_characters_that_are_not_safe_in_a_file_name_are_an_error(self) -> None:
+        for bad in ("a/b", "a\\b", "a:b", "a*b", "a?b", 'a"b', "a<b", "a>b", "a|b", "a,b", "a_b", "a\nb"):
+            with self.subTest(short_name=bad), self.assertRaisesRegex(ValueError, "不安全"):
+                label_cards.labelled_filename(label_of("信用卡", bad), "x.pdf")
+
+    def test_name_over_the_byte_limit_falls_back_to_the_multi_card_short_name(self) -> None:
+        long_description = "台新" + "測試描述" * 30
+        name = label_cards.labelled_filename(label_of("信用卡", long_description), "rights_x.docx")
+        self.assertEqual(name, "信用卡_多卡_rights_x.docx")
+
+    def test_original_filename_strips_the_prefix_and_leaves_original_names_alone(self) -> None:
+        self.assertEqual(label_cards.original_filename("信用卡_台新Richart卡_card_cg047_card001.pdf"), "card_cg047_card001.pdf")
+        self.assertEqual(label_cards.original_filename("信用卡及金融卡_全部_download_a.pdf"), "download_a.pdf")
+        self.assertEqual(label_cards.original_filename("金融卡_Gogoro Rewards聯名卡_x_y.pdf"), "x_y.pdf")
+        self.assertEqual(label_cards.original_filename("card_cg047_card001.pdf"), "card_cg047_card001.pdf")
+        self.assertEqual(label_cards.original_filename("download__115_001final.pdf"), "download__115_001final.pdf")
+
+
+class RenamedDataDirTest(unittest.TestCase):
+    """檔名已經改成新格式的資料夾：標籤的 key 與頁面快照仍然用原檔名。"""
+
+    def test_documents_with_new_names_are_labelled_under_their_original_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = FakeData(Path(tmp))
+            data.add("卡片", "信用卡_台新Richart卡_card_cg047_card001.pdf", f"{WWW}/overview/cg047/card001/", html=None)
+            snapshot = card_page("台新Richart卡")
+            stem = "card_cg047_card001"
+            (data.root / "_meta" / "html" / f"{stem}.html").write_text(snapshot, encoding="utf-8")
+            (data.root / "_meta" / "print" / f"{stem}.html").write_text(snapshot, encoding="utf-8")
+            labels = label_cards.label_data_dir(data.finish())
+        self.assertEqual(list(labels), ["cards/card_cg047_card001.pdf"])
+        self.assertEqual(labels["cards/card_cg047_card001.pdf"]["cards"], ["台新Richart卡"])
+
+
 if __name__ == "__main__":
     unittest.main()
