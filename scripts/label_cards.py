@@ -46,6 +46,11 @@ richart_discounts 建議台新Richart卡，檔名含 BENZ 建議 Mercedes-Benz�
 簡短卡名：一張卡寫卡名，多張寫「多卡」，全部寫「全部」；兩種卡別都有時卡別寫「信用卡及金融卡」。
 標頭是「卡別：…｜適用卡片：…」，超過 150 個 token 時改寫成「適用 N 張卡（清單見本文件第一段）」。
 
+檔名格式（rag-optimization ticket 02）：文件改名後是 <卡別>_<簡短卡名>_<原檔名>（labelled_filename）。標籤檔、人工標籤檔與頁面快照
+一律用原檔名當 key，read_docs 把已經改名的文件還原成原檔名（original_filename），所以改名之後重跑本腳本得到同樣的 key。
+卡別或簡短卡名含路徑分隔、:*?"<>|、逗號、底線或控制字元時報錯（逗號是 eval 題目 source 欄的分隔符號，底線是檔名三段的分隔）；
+空白不算不安全（目前只有「Gogoro Rewards聯名卡」含空白）。改名本身由 rename_documents.py 做。
+
 標籤檔格式：key 是文件相對於資料根目錄的路徑，值有 kind、cards、short_name、header、source、needs_review、reason、suggested。
 待人工確認的文件 needs_review 是 true，kind 是空字串、cards 是空清單、short_name 與 header 是 null：
 下游（改檔名、標頭檔）看到 needs_review 是 true 要停下來，不能當成有標籤。使用者修正時直接改這個檔
@@ -369,6 +374,61 @@ def make_manual_label(path: str, entry: dict, catalog: list[Card]) -> dict:
 
 
 # ==============================
+# 檔名格式
+# ==============================
+
+# 檔名前綴的卡別；長的在前，original_filename 的比對才不會把「信用卡及金融卡」切成「信用卡」
+FILENAME_KINDS = ("信用卡及金融卡", "信用卡", "金融卡")
+# 檔名裡不能出現的字元：路徑分隔、Windows／macOS 保留字元、控制字元，加上兩個本專案的分隔符號：
+# 「_」（檔名三段的分隔，改回原檔名要靠它）與「,」（eval 題目的 source 欄用逗號分隔多個來源）
+UNSAFE_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|,_\x00-\x1f]')
+# ASSUMPTION：檔名位元組數上限 200（macOS、Linux 單一檔名上限 255，留空間給後綴）。
+# 超過時簡短卡名改用「多卡」：完整的卡片清單在標頭檔裡，檔名只是方便人看。目前資料最長 102 位元組，沒有用到
+FILENAME_BYTE_LIMIT = 200
+FALLBACK_SHORT_NAME = "多卡"
+_PREFIXED_FILENAME = re.compile(rf"^(?:{'|'.join(FILENAME_KINDS)})_[^_]+_(.+)$")
+
+
+def labelled_filename(label: dict, filename: str) -> str:
+    """文件的新檔名：<卡別>_<簡短卡名>_<原檔名>。
+
+    Args:
+        label: 標籤紀錄，要有 kind 與 short_name（needs_review 為 true 的紀錄沒有，不能傳進來）。
+        filename: 原檔名。
+
+    Returns:
+        新檔名。位元組數超過 FILENAME_BYTE_LIMIT 時簡短卡名改寫成「多卡」。
+
+    Raises:
+        ValueError: 卡別或簡短卡名含不能放進檔名的字元（UNSAFE_FILENAME_CHARS），或是空的。
+    """
+    kind, short_name = label["kind"], label["short_name"]
+    for part in (kind, short_name):
+        if not part or UNSAFE_FILENAME_CHARS.search(part):
+            raise ValueError(f"卡別或簡短卡名含不安全的檔名字元（路徑分隔、:*?\"<>|、逗號、底線、控制字元）或是空的：{part!r}")
+    name = f"{kind}_{short_name}_{filename}"
+    if len(name.encode("utf-8")) > FILENAME_BYTE_LIMIT:
+        name = f"{kind}_{FALLBACK_SHORT_NAME}_{filename}"
+    return name
+
+
+def original_filename(filename: str) -> str:
+    """新檔名還原成原檔名；本來就是原檔名的原樣回傳。
+
+    原檔名（fetch_taishin.py 的 local_name）以英文類別前綴開頭，不會被當成帶卡別前綴。
+    頁面快照（_meta/html、_meta/print）、標籤檔與人工標籤檔都用原檔名當 key。
+
+    Args:
+        filename: 檔名（新或舊格式）。
+
+    Returns:
+        原檔名。
+    """
+    match = _PREFIXED_FILENAME.match(filename)
+    return match.group(1) if match else filename
+
+
+# ==============================
 # 讀 manifest 與頁面快照
 # ==============================
 
@@ -394,16 +454,18 @@ class Doc:
     """manifest 裡一份有實體檔的文件。
 
     Attributes:
-        path: 相對於資料根目錄的路徑（標籤檔的 key）。
+        path: 相對於資料根目錄的原檔名路徑（標籤檔的 key）。檔案已改成新檔名時，path 仍是原檔名。
         category: manifest 的類別。
         url: 文件網址。
-        stem: 檔名去掉副檔名，也是 _meta/html 與 _meta/print 的快照檔名。
+        stem: 原檔名去掉副檔名，也是 _meta/html 與 _meta/print 的快照檔名。
+        filename: 檔案現在的檔名（新或舊格式）。
     """
 
     path: str
     category: str
     url: str
     stem: str
+    filename: str
 
 
 class _PageParser(HTMLParser):
@@ -488,7 +550,7 @@ def squash(text: str) -> str:
 
 
 def read_docs(data_dir: Path) -> list[Doc]:
-    """讀 manifest，留下有實體檔的文件。
+    """讀 manifest，留下有實體檔的文件。檔名已改成新格式（labelled_filename）的文件，path 與 stem 還原成原檔名。
 
     Args:
         data_dir: 資料根目錄（含 _meta/manifest.jsonl 與各類別資料夾）。
@@ -500,9 +562,10 @@ def read_docs(data_dir: Path) -> list[Doc]:
     with (data_dir / "_meta" / "manifest.jsonl").open(encoding="utf-8") as manifest:
         for line in manifest:
             row = json.loads(line)
-            path = f"{CATEGORY_FOLDERS[row['category']]}/{row['filename']}"
-            if (data_dir / path).is_file():
-                docs.append(Doc(path, row["category"], row["url"], row["filename"].rsplit(".", 1)[0]))
+            folder = CATEGORY_FOLDERS[row["category"]]
+            original = original_filename(row["filename"])
+            if (data_dir / folder / row["filename"]).is_file():
+                docs.append(Doc(f"{folder}/{original}", row["category"], row["url"], original.rsplit(".", 1)[0], row["filename"]))
     return docs
 
 

@@ -766,8 +766,12 @@ class ScriptTestCase(unittest.TestCase):
         path: str | None = None,
         extra_env: dict[str, str] | None = None,
         extra_args: list[str] | None = None,
+        label_names: bool = False,
     ) -> subprocess.CompletedProcess:
         """以假 server、假 Chrome、假 LibreOffice 與 self.out 執行腳本。
+
+        預設加 --keep-names：下載、更新與下架的案例關心的是下載行為，預設的 Richart 卡片頁與說明頁在結束時會被改成
+        帶卡片標籤的檔名，案例若逐一寫死原檔名會全部對不上。改檔名的行為由 LabelledFileNameTests 驗證（label_names=True）。
 
         Args:
             chrome: TAISHIN_CHROME 的值；預設為假 Chrome wrapper。
@@ -775,6 +779,7 @@ class ScriptTestCase(unittest.TestCase):
             path: PATH 的完整值；預設是把放了假 LibreOffice 的 self.office_bin 放在原本的 PATH 前面。
             extra_env: 另外加進行程環境變數的項目。
             extra_args: 接在 --out 後面的命令列參數（例如更新模式的 --update）。
+            label_names: True 時不加 --keep-names，結束時依卡片標籤改檔名。
 
         Returns:
             已完成的行程（文字模式）。
@@ -791,7 +796,7 @@ class ScriptTestCase(unittest.TestCase):
             **(extra_env or {}),
         }
         return subprocess.run(
-            [sys.executable, str(SCRIPT), "--out", str(self.out), *(extra_args or [])],
+            [sys.executable, str(SCRIPT), "--out", str(self.out), *([] if label_names else ["--keep-names"]), *(extra_args or [])],
             capture_output=True,
             text=True,
             timeout=60,
@@ -4888,6 +4893,131 @@ class UpdateModeOfferImageTests(ScriptTestCase):
         result = self.run_update()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.image_requests(), [banner_path(2)], "svg 佔 1 個、現有 6 張佔 6 個，只剩 1 個名額，補活動 2")
+
+
+# ==============================
+# 卡片標籤檔名：下載結束時依標籤改名
+# ==============================
+
+RICHART_LABELLED = "信用卡_台新Richart卡_card_cg047_card001.pdf"
+DAQUANLIAN_LABELLED = "信用卡_大全聯信用卡_card_cg010_card001.pdf"
+
+
+def card_html_with_heading(heading: str) -> str:
+    """產生有 h1 卡名的卡片頁（官網的卡片頁以 h1 當卡名，標籤靠它對應卡名）。
+
+    Args:
+        heading: h1 的卡名。
+
+    Returns:
+        卡片頁的 HTML。
+    """
+    return card_html(heading).replace(f'<div class="title"><p>{heading}</p></div>', f"<h1>{heading}</h1>")
+
+
+class LabelledFileNameTests(ScriptTestCase):
+    """新文件下載結束時依卡片標籤改成 <卡別>_<簡短卡名>_<原檔名>；之後的執行認得新檔名。"""
+
+    def run_script(self, **kwargs) -> subprocess.CompletedProcess:
+        """這個類別的案例都要改檔名；參數同 ScriptTestCase.run_script。"""
+        return super().run_script(label_names=True, **kwargs)
+
+    def first_download(self) -> None:
+        """下載兩張有卡名的卡片頁與一份比對不到卡的下載區 PDF。"""
+        self.serve_cards({RICHART: card_html_with_heading("台新Richart卡"), DAQUANLIAN: card_html_with_heading("大全聯信用卡")})
+        self.serve_downloads([[TERMS]])
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.server.requests.clear()
+
+    def card_files(self) -> list[str]:
+        """cards/ 底下的檔案（相對路徑，排序）。"""
+        return sorted(f for f in self.files_under_out() if f.startswith("cards/"))
+
+    def card_results(self) -> dict[str, str]:
+        """下載清單中卡片類別的紀錄：檔名對結果。"""
+        return {r["filename"]: r["result"] for r in self.manifest() if r["category"] == "卡片"}
+
+    def test_new_card_pages_are_renamed_by_their_label_and_the_manifest_and_headers_follow(self) -> None:
+        self.first_download()
+        self.assertEqual(self.card_files(), sorted([f"cards/{RICHART_LABELLED}", f"cards/{DAQUANLIAN_LABELLED}"]))
+        self.assertIn(RICHART_LABELLED, self.card_results())
+        headers = json.loads((self.out / "_meta" / "document_headers.json").read_text(encoding="utf-8"))
+        self.assertEqual(headers[RICHART_LABELLED], "卡別：信用卡｜適用卡片：台新Richart卡")
+
+    def test_page_snapshots_keep_the_names_derived_from_the_url(self) -> None:
+        self.first_download()
+        self.assertTrue((self.out / "_meta" / "html" / "card_cg047_card001.html").is_file())
+        self.assertTrue((self.out / "_meta" / "print" / "card_cg010_card001.html").is_file())
+
+    def test_documents_without_a_label_keep_the_original_name_and_are_listed_in_the_output(self) -> None:
+        self.serve_cards({RICHART: card_html_with_heading("台新Richart卡")})
+        self.serve_downloads([[TERMS]])
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.out / "downloads" / "download_terms_1150.pdf").is_file())
+        self.assertIn("依卡片標籤改檔名：改名", result.stdout)
+        self.assertIn("  downloads/download_terms_1150.pdf：", result.stdout)
+
+    def test_keep_names_leaves_every_new_document_with_its_original_name_and_writes_no_label_files(self) -> None:
+        self.serve_cards({RICHART: card_html_with_heading("台新Richart卡")})
+        result = super().run_script(label_names=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.card_files(), ["cards/card_cg047_card001.pdf"])
+        self.assertNotIn("依卡片標籤改檔名", result.stdout)
+        self.assertFalse((self.out / "_meta" / "document_headers.json").exists())
+
+    def test_the_output_lists_the_final_file_names(self) -> None:
+        self.serve_cards({RICHART: card_html_with_heading("台新Richart卡")})
+        result = self.run_script()
+        self.assertIn(f"已下載 卡片 {RICHART_LABELLED}", result.stdout)
+
+    def test_rerun_skips_the_renamed_cards_without_requesting_them_or_downloading_them_again(self) -> None:
+        self.first_download()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.server.paths().count(RICHART), 0)
+        self.assertEqual(self.card_files(), sorted([f"cards/{RICHART_LABELLED}", f"cards/{DAQUANLIAN_LABELLED}"]))
+        self.assertEqual(self.card_results(), {RICHART_LABELLED: "已存在略過", DAQUANLIAN_LABELLED: "已存在略過"})
+
+    def test_update_mode_recognises_the_renamed_cards_as_unchanged(self) -> None:
+        self.first_download()
+        before = (self.out / "cards" / RICHART_LABELLED).read_bytes()
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.out / "cards" / RICHART_LABELLED).read_bytes(), before)
+        self.assertEqual(self.card_results(), {RICHART_LABELLED: "未變", DAQUANLIAN_LABELLED: "未變"})
+        self.assertIn("卡片：未變 2", result.stdout)
+
+    def test_update_mode_changed_content_replaces_the_renamed_file_in_place(self) -> None:
+        self.first_download()
+        changed = card_html_with_heading("台新Richart卡").replace("COLLAPSED-TEXT", "NEW-TEXT")
+        self.serve_cards({RICHART: changed, DAQUANLIAN: card_html_with_heading("大全聯信用卡")})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.card_results(), {RICHART_LABELLED: "內容變更", DAQUANLIAN_LABELLED: "未變"})
+        self.assertEqual(len(self.card_files()), 2)
+
+    def test_card_missing_from_the_list_is_moved_with_snapshots_named_by_the_url(self) -> None:
+        self.first_download()
+        self.serve_cards({RICHART: card_html_with_heading("台新Richart卡")})
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        removed = self.out / "_meta" / "removed" / date.today().isoformat()
+        self.assertTrue((removed / "cards" / DAQUANLIAN_LABELLED).is_file())
+        self.assertTrue((removed / "html" / "card_cg010_card001.html").is_file())
+        self.assertTrue((removed / "print" / "card_cg010_card001.html").is_file())
+        self.assertFalse((self.out / "cards" / DAQUANLIAN_LABELLED).exists())
+        self.assertEqual(self.card_results()[DAQUANLIAN_LABELLED], "下架")
+
+    def test_interrupted_run_leaves_original_names_that_the_next_run_renames_without_downloading_again(self) -> None:
+        self.first_download()
+        for name in (RICHART_LABELLED, DAQUANLIAN_LABELLED):
+            (self.out / "cards" / name).rename(self.out / "cards" / name.split("_", 2)[2])
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.server.paths().count(RICHART), 0)
+        self.assertEqual(self.card_files(), sorted([f"cards/{RICHART_LABELLED}", f"cards/{DAQUANLIAN_LABELLED}"]))
 
 
 if __name__ == "__main__":
