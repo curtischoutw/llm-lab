@@ -742,7 +742,7 @@ class ExtraCardsTest(unittest.TestCase):
             self.assertEqual((entry["kind"], entry["cards"]), ("信用卡", ["企業卡"]), text)
 
     def test_corporate_card_in_an_exclusion_sentence_does_not_count(self) -> None:
-        for text in ("限台新Richart卡持卡人(不含簽帳金融卡、企業卡)", "台新Richart卡，企業卡除外", "台新Richart卡；排除企業信用卡"):
+        for text in ("限台新Richart卡持卡人(不含簽帳金融卡、企業卡)", "台新Richart卡，企業卡除外", "台新Richart卡；排除企業信用卡", "限台新Richart卡持卡人參加，簽帳金融卡、企業卡恕不適用"):
             self.data = FakeData(Path(self._tmp.name) / f"excluded_{abs(hash(text))}")
             self.data.add("卡片", "card_cg047_card001.pdf", f"{WWW}/overview/cg047/card001/", html=card_page("台新Richart卡"))
             self.assertEqual(self.offer(text)["cards"], ["台新Richart卡"], text)
