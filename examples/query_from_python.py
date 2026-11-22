@@ -3,7 +3,7 @@
 為什麼存在：CLI（`python -m rag_lab query`）適合手動問一題；要在程式裡拿到答案字串再自行處理時，
 用 rag_lab.pipeline.Session。這支範例示範最少的用法：開一個 Session，逐題提問、印出問答。
 
-執行方式（在 repo 根目錄；需要先 ingest 過、兩個模型 server 都開著）：
+執行方式（在 repo 根目錄；需要先 ingest 過、模型 server 開著）：
     .venv/bin/python -m examples.query_from_python
 
 關鍵設計決策：
@@ -24,8 +24,8 @@ Dependencies: rag_lab。
 from rag_lab.pipeline import Session
 
 QUESTIONS = [
-    "What are the two retrieval levels in LightRAG?",
-    "What is the main idea of RAG-Anything?",
+    "台新Richart卡國內一般消費回饋是多少？",
+    "簽帳金融卡在海外提款要收哪些費用？",
 ]
 
 

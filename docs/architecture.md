@@ -61,7 +61,7 @@ rag_storage/   知識圖譜＋向量庫＋快取（＝知識庫本體）
 | `CLAUDE.md` | 給 Claude Code 的專案說明 | 是 | — | 不能 |
 | `.env` | 實際使用的設定（含 API 金鑰欄位） | 否 | 從 `.env.example` 複製後修改 | 刪了所有指令都會因缺設定而失敗 |
 | `.venv/` | 專案的 Python 3.12 虛擬環境 | 否 | `python -m venv` ＋ `pip install -r requirements.txt` | 可以，照 README 第 3 節重建 |
-| `data/taishin_pilot/` | 台新信用卡知識庫試匯入（2026-10-30）用的 7 份文件，是指向 `data/taishin_credit_card/` 的 symlink；檔名改成帶卡片標籤之後，symlink 指向的舊檔名已不存在 | 否 | 手動建立 symlink | 可以，不影響已建好的知識庫 |
+| `data/taishin_pilot/` | 台新信用卡知識庫試匯入（2026-10-30）用的 7 份文件，是指向 `data/taishin_credit_card/` 的 symlink；2026-11-22 已改指向帶卡片標籤的新檔名 | 否 | 手動建立 symlink | 可以，不影響已建好的知識庫 |
 | `data/taishin_credit_card/` | 目前知識庫的來源文件，分 11 個資料夾、325 份（份數見 README 第 4 節），檔名是 `<卡別>_<卡名>_<原檔名>`；`_meta/` 放原始 HTML、轉檔用的 HTML、下載清單 `manifest.jsonl`、卡片標籤 `document_labels.json` 與標頭檔 `document_headers.json`，不匯入。台新官網禁止未經授權的重製，只放本機 | 否 | `scripts/fetch_taishin.py` | 可以，重新下載即可；但官網內容會變，重新下載的不一定是同一批文件 |
 | `data/papers/` | 前一版知識庫用的 5 篇 arXiv PDF；2026-10-30 已刪除，可用腳本重新下載 | 否 | `scripts/fetch_papers.py` | 可以，重新下載即可 |
 | `data/documents/` | 前一版知識庫用的 6 份文件（PPT 2、Word 2、圖片 2）；2026-10-30 已刪除，可用腳本重新下載 | 否 | `scripts/fetch_documents.py` | 可以，重新下載即可 |
@@ -277,8 +277,8 @@ with Session() as session:
 from rag_lab.pipeline import Session
 
 QUESTIONS = [
-    "What are the two retrieval levels in LightRAG?",
-    "What is the main idea of RAG-Anything?",
+    "台新Richart卡國內一般消費回饋是多少？",
+    "簽帳金融卡在海外提款要收哪些費用？",
 ]
 
 with Session() as session:
@@ -304,7 +304,6 @@ with Session() as session:
 - `Session` 讀的是開啟當下的知識庫。開著的期間如果另一個 process（例如另一個終端機的 `python -m rag_lab ingest`）匯入新論文，這個 `Session` 看不到，要關掉重開。
 - 呼叫途中按 Ctrl-C 中斷後，不保證 `Session` 的狀態一致；中斷後應關閉 `Session` 再開新的。
 - 本機 Gemma 4 每題約 43 秒（2026-11-12 的 28 題 mix eval 花 20 分 10 秒）；同一個問題再問一次會命中 LLM 快取，幾秒內回答。
-- `examples/query_from_python.py` 的兩個範例問題還是前一版知識庫（RAG 論文）的題目，對台新知識庫問不出有意義的答案；只用來示範 `Session` 的寫法。
 
 ## 5. 設定
 
