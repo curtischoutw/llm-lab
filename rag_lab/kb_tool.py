@@ -13,6 +13,10 @@
   查詢以佇列交給它。
 - `Session` 在 server 的 lifespan 裡建立：SDK 進入 stdio 模式後才把 fd 1 導到 stderr，
   在那之前建立的話，LightRAG／MinerU 印到 stdout 的內容會混進 MCP 協定的訊息。
+- 同一時間只跑一個查詢：有查詢進行中時，新的呼叫不排隊，立刻回傳 BUSY_MESSAGE（一般文字結果，讓 agent 轉告
+  使用者）；本機模型一題約 43 秒，排隊會讓後來的人看不出發生什麼事。
+- 空白問題、端點或查詢失敗（EndpointError、PipelineError）以 MCP 工具錯誤（ToolError → isError）回傳，訊息說明原因
+  （rag_lab 的錯誤訊息本身不含 API key）；預期之外的例外留紀錄後照樣拋出。server 繼續服務下一個呼叫。
 - 每次呼叫附加一行 JSONL 紀錄（預設 `output/kb_tool_calls.jsonl`），即使之後移除客服 agent，
   也看得到知識庫實際被問了什麼、答了什麼。
 
@@ -38,13 +42,19 @@ from pathlib import Path
 
 import anyio.to_thread
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from rag_lab import pipeline
+from rag_lab.models import EndpointError
+from rag_lab.pipeline import PipelineError
 
 SERVER_NAME = "rag-lab-knowledge-base"
 TOOL_NAME = "query_knowledge_base"
 MODE = "mix"
 DEFAULT_LOG = Path("output") / "kb_tool_calls.jsonl"
+
+BUSY_MESSAGE = "目前有其他人在查詢，請稍候再問"
+EMPTY_QUESTION_MESSAGE = "問題是空白的，請提供要查詢的問題"
 
 TOOL_DESCRIPTION = (
     "查詢台新銀行信用卡與金融卡的知識庫，回傳知識庫產生的完整答案。"
@@ -157,24 +167,50 @@ def build_server(log_path: Path) -> MCPServer:
             await anyio.to_thread.run_sync(worker.close)
 
     server = MCPServer(name=SERVER_NAME, lifespan=lifespan)
+    # 同一時間只跑一個查詢；工具函式都在 server 的 event loop 上執行，檢查與設定之間沒有 await，不需要鎖
+    busy = False
 
     @server.tool(name=TOOL_NAME, description=TOOL_DESCRIPTION, structured_output=False)
     async def query_knowledge_base(question: str) -> str:
+        nonlocal busy
         started_at = datetime.now().astimezone().isoformat(timespec="seconds")
         start = time.monotonic()
-        answer = await anyio.to_thread.run_sync(worker.ask, question)
-        append_record(
-            log_path,
-            {
-                "started_at": started_at,
-                "question": question,
-                "answer": answer,
-                "status": "ok",
-                "error": None,
-                "seconds": round(time.monotonic() - start, 3),
-                "mode": MODE,
-            },
-        )
+
+        def record(status: str, answer: str | None = None, error: str | None = None) -> None:
+            seconds = 0.0 if status == "busy" else round(time.monotonic() - start, 3)
+            append_record(
+                log_path,
+                {
+                    "started_at": started_at,
+                    "question": question,
+                    "answer": answer,
+                    "status": status,
+                    "error": error,
+                    "seconds": seconds,
+                    "mode": MODE,
+                },
+            )
+
+        if not question.strip():
+            record("error", error=EMPTY_QUESTION_MESSAGE)
+            raise ToolError(EMPTY_QUESTION_MESSAGE)
+        if busy:
+            record("busy")
+            return BUSY_MESSAGE
+        busy = True
+        try:
+            answer = await anyio.to_thread.run_sync(worker.ask, question)
+        except (EndpointError, PipelineError) as exc:
+            message = f"知識庫查詢失敗：{exc}"
+            record("error", error=message)
+            raise ToolError(message) from exc
+        except Exception as exc:
+            # 預期之外的失敗：留紀錄後照樣拋出，SDK 回給 agent 的只有固定的「Error executing tool」
+            record("error", error=f"{type(exc).__name__}: {exc}")
+            raise
+        finally:
+            busy = False
+        record("ok", answer=answer)
         return answer
 
     return server

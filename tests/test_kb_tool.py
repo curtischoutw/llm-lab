@@ -22,7 +22,7 @@ from mcp import Client
 from mcp.client.stdio import StdioServerParameters
 
 from tests.fake_openai_server import CHAT_REPLY
-from tests.test_cli import OPTIONAL_FIELDS, REPO_ROOT, REQUIRED_FIELDS
+from tests.test_cli import OPTIONAL_FIELDS, REPO_ROOT, REQUIRED_FIELDS, SECRET
 from tests.test_pipeline import INGEST_TIMEOUT, PipelineCase, closed_port_url
 
 TOOL_NAME = "query_knowledge_base"
@@ -184,3 +184,141 @@ def datetime_with_zone(text: str):
     from datetime import datetime
 
     return datetime.fromisoformat(text)
+
+
+# ==============================
+# 忙碌回覆與錯誤處理（ticket 02）
+# ==============================
+
+BUSY_MESSAGE = "目前有其他人在查詢，請稍候再問"
+
+
+class BusyTest(KnowledgeBaseToolCase):
+    def test_a_call_during_a_running_query_gets_the_busy_reply_at_once(self):
+        self.server.chat_delay = 3.0
+        self.server.reset_max_inflight()  # setUp 的匯入會同時送 2 個 chat 請求，只量查詢期間
+
+        async def steps(client):
+            first = asyncio.create_task(client.call_tool(TOOL_NAME, {"question": QUESTION}))
+            await asyncio.sleep(1.0)
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            second = await client.call_tool(TOOL_NAME, {"question": "What links Alpha and Beta?"})
+            second_seconds = loop.time() - started
+            return await first, second, second_seconds
+
+        first, second, second_seconds = self.run_client(steps)
+
+        self.assertFalse(second.is_error, answer_text(second))
+        self.assertEqual(answer_text(second), BUSY_MESSAGE)
+        self.assertLess(second_seconds, 1.5)  # 不等第一個查詢（每個 chat 請求延遲 3 秒）
+        self.assertFalse(first.is_error, answer_text(first))
+        self.assertEqual(answer_text(first), CHAT_REPLY)
+        self.assertEqual(self.server.max_inflight_chat, 1)
+        busy = [r for r in self.records() if r["status"] == "busy"]
+        self.assertEqual(len(busy), 1)
+        self.assertEqual(busy[0]["question"], "What links Alpha and Beta?")
+        self.assertIsNone(busy[0]["answer"])
+        self.assertEqual(busy[0]["seconds"], 0)
+        self.assertEqual(sorted(r["status"] for r in self.records()), ["busy", "ok"])
+
+    def test_after_the_running_query_finishes_the_next_call_is_answered(self):
+        async def steps(client):
+            first = await client.call_tool(TOOL_NAME, {"question": QUESTION})
+            second = await client.call_tool(TOOL_NAME, {"question": "What links Alpha and Beta?"})
+            return first, second
+
+        first, second = self.run_client(steps)
+
+        self.assertEqual(answer_text(second), CHAT_REPLY)
+        self.assertNotIn("busy", [r["status"] for r in self.records()])
+
+
+class ErrorTest(KnowledgeBaseToolCase):
+    def test_a_blank_question_is_a_tool_error_without_querying(self):
+        async def steps(client):
+            return await client.call_tool(TOOL_NAME, {"question": "  \n "})
+
+        before = len(self.server.requests)
+        result = self.run_client(steps)
+
+        self.assertTrue(result.is_error)
+        self.assertIn("問題是空白的", answer_text(result))
+        self.assertEqual(len(self.server.requests), before)  # 沒有送出任何模型請求
+        [record] = self.records()
+        self.assertEqual(record["status"], "error")
+        self.assertIsNone(record["answer"])
+        self.assertIn("問題是空白的", record["error"])
+
+    def test_a_failed_query_is_a_tool_error_with_the_reason_and_the_next_call_succeeds(self):
+        async def steps(client):
+            self.server.fail_chat = True
+            failed = await client.call_tool(TOOL_NAME, {"question": QUESTION})
+            self.server.fail_chat = False
+            ok = await client.call_tool(TOOL_NAME, {"question": "What links Alpha and Beta?"})
+            return failed, ok
+
+        failed, ok = self.run_client(steps)
+
+        self.assertTrue(failed.is_error)
+        self.assertIn("知識庫查詢失敗", answer_text(failed))
+        self.assertNotIn(SECRET, answer_text(failed))
+        self.assertFalse(ok.is_error, answer_text(ok))
+        self.assertEqual(answer_text(ok), CHAT_REPLY)
+        error, success = self.records()
+        self.assertEqual(error["status"], "error")
+        self.assertIsNone(error["answer"])
+        self.assertIn("知識庫查詢失敗", error["error"])
+        self.assertNotIn(SECRET, error["error"])
+        self.assertEqual(success["status"], "ok")
+
+    def test_a_rerank_failure_is_a_tool_error_naming_rerank(self):
+        async def steps(client):
+            self.server.rerank_fault = "http500"
+            failed = await client.call_tool(TOOL_NAME, {"question": QUESTION})
+            self.server.rerank_fault = None
+            ok = await client.call_tool(TOOL_NAME, {"question": QUESTION})
+            return failed, ok
+
+        failed, ok = self.run_client(steps)
+
+        self.assertTrue(failed.is_error)
+        self.assertIn("rerank 失敗", answer_text(failed))
+        self.assertNotIn(SECRET, answer_text(failed))
+        self.assertEqual(answer_text(ok), CHAT_REPLY)
+        self.assertEqual([r["status"] for r in self.records()], ["error", "ok"])
+
+    def test_an_unreachable_rerank_endpoint_is_a_tool_error_naming_the_endpoint(self):
+        # server 啟動只檢查 LLM 與 embedding；rerank 端點在查詢前檢查，連不上時拋 EndpointError
+        async def steps(client):
+            return await client.call_tool(TOOL_NAME, {"question": QUESTION})
+
+        result = self.run_client(steps, RERANK_BASE_URL=closed_port_url())
+
+        self.assertTrue(result.is_error)
+        self.assertIn("知識庫查詢失敗", answer_text(result))
+        self.assertIn("Rerank 端點", answer_text(result))
+        [record] = self.records()
+        self.assertEqual(record["status"], "error")
+        self.assertIn("Rerank 端點", record["error"])
+
+    def test_an_unexpected_exception_is_recorded_and_still_fails_the_call(self):
+        crash = {"PYTHONPATH": str(Path(__file__).parent / "query_crash"), "CRASH_QUERY_CONTAINING": "Crash"}
+
+        async def steps(client):
+            crashed = await client.call_tool(TOOL_NAME, {"question": "Crash this question"})
+            ok = await client.call_tool(TOOL_NAME, {"question": QUESTION})
+            return crashed, ok
+
+        crashed, ok = self.run_client(steps, **crash)
+
+        self.assertTrue(crashed.is_error)
+        # 預期之外的例外照樣拋出：SDK 只回固定訊息，不含例外內容
+        self.assertNotIn("injected unexpected failure", answer_text(crashed))
+        self.assertNotIn("知識庫查詢失敗", answer_text(crashed))
+        self.assertEqual(answer_text(ok), CHAT_REPLY)
+        error, success = self.records()
+        self.assertEqual(error["status"], "error")
+        self.assertEqual(error["error"], "RuntimeError: injected unexpected failure")
+        self.assertIsNone(error["answer"])
+        self.assertEqual(success["status"], "ok")
