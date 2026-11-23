@@ -130,5 +130,5 @@
 ## Further Notes
 
 - hermes-agent 的事實（安裝旗標、設定鍵、檔案位置）來自 2026-11-23 讀取的官方文件與 `scripts/install.sh`；部分頁面只讀了前段，實作時以實機行為為準。
-- 移除步驟：`hermes gateway stop`（若在跑）→ 刪除 `~/GitHub/hermes-sandbox/` → 確認 `~/.local/bin/hermes` 與 rc 檔的 PATH 行已不存在，ticket 03 快照比對列出的 sandbox 外項目也已處理。llm-lab 裡的知識庫工具與紀錄保留。
+- 移除步驟：`hermes gateway stop`（若在跑）→ 刪除 `~/GitHub/hermes-sandbox/` → 確認 `~/.local/bin/hermes`（及 `hermes-acp`、`hermes-agent`）與 rc 檔的 PATH 行已不存在 → 鑰匙圈若有 service「Hermes Agent vault key」的項目一併刪除，ticket 03 快照比對列出的 sandbox 外項目也已處理。llm-lab 裡的知識庫工具與紀錄保留。
 - 依「一律先開 branch」的慣例，本 spec 與後續 tickets 的 commit 走 branch，不直接進 main。
