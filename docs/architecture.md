@@ -9,10 +9,10 @@ data/ 底下的文件（PDF、Office 文件、圖片）
       │  python -m rag_lab ingest
       ▼
 MinerU 解析（文字、圖、表、公式） ──► output/<文件>_<雜湊>/   解析結果與切出的圖片
-      │
+      │  設了 DOCUMENT_HEADERS_FILE 時：文件開頭放卡片標籤標頭，文字依標題切塊（rag_lab/chunking.py）
       ▼
 LightRAG 建圖：LLM 抽實體與關係，embedding 建向量
-VLM／LLM 描述圖、表、公式，併入同一張圖（太大的表格先縮短、依列切成小表，每張各自描述）
+VLM／LLM 描述圖、表、公式，併入同一張圖（太大的表格先縮短、依列切成小表，每張各自描述；caption 加上標頭）
       │
       ▼
 rag_storage/   知識圖譜＋向量庫＋快取（＝知識庫本體）
@@ -27,14 +27,14 @@ rag_storage/   知識圖譜＋向量庫＋快取（＝知識庫本體）
 
 `ingest` 接受 PDF、PPT、Word、Excel 與 8 種圖片格式（副檔名清單在 `rag_lab/formats.py`）。解析由 RAG-Anything 的 `parse_document` 依副檔名分派：圖片直接交給 MinerU；`.png`、`.jpg`、`.jpeg` 以外的圖片先由 RAG-Anything 用 Pillow 轉成 png；Office 文件（.ppt .pptx .doc .docx .xls .xlsx）先由 RAG-Anything 呼叫 PATH 上的 LibreOffice（`libreoffice`，找不到再試 `soffice`）轉成 PDF，寫在 `PARSER_OUTPUT_DIR` 底下，再交給 MinerU。專案只決定放行哪些副檔名，不判斷怎麼解析。沒有安裝 LibreOffice 時，RAG-Anything 的原始錯誤（含安裝方式）成為那份文件的匯入失敗原因，專案沒有改寫它。
 
-三個模型與 reranker 都經由 HTTP 端點呼叫（前三個是 OpenAI 相容端點），端點寫在 `.env`：
+三個模型與 reranker 都經由 HTTP 端點呼叫（前三個是 OpenAI 相容端點），端點寫在 `.env`。本機由同一個 `scripts/vlm_server.py`（port 8081）提供，各用哪個模型見 README 第 1 節：
 
-| 用途 | 本機的 server | 什麼時候會呼叫 |
-|---|---|---|
-| LLM | `mlx_lm.server`（port 8080） | 建圖時抽實體、描述表格與公式；查詢時抽關鍵字（請求帶 JSON schema，但 `rag_lab` 自己用 `json_repair` 解析回應）、產生答案 |
-| VLM | `scripts/vlm_server.py`（port 8081） | 建圖時描述圖片；`query --vlm-enhanced` 時看檢索到的圖片 |
-| embedding | 同上（port 8081） | 建圖時把 chunk、實體、關係轉成向量；查詢時把問題轉成向量 |
-| reranker | 同上（port 8081，啟動時加 `--reranker-model BAAI/bge-reranker-v2-m3`） | 查詢時重新排序候選 chunk；匯入不呼叫 |
+| 用途 | 什麼時候會呼叫 |
+|---|---|
+| LLM | 建圖時抽實體、描述表格與公式；查詢時抽關鍵字（請求帶 JSON schema，但 `rag_lab` 自己用 `json_repair` 解析回應）、產生答案 |
+| VLM | 建圖時描述圖片；`query --vlm-enhanced` 時看檢索到的圖片。目前和 LLM 是同一個模型 |
+| embedding | 建圖時把 chunk、實體、關係轉成向量；查詢時把問題轉成向量 |
+| reranker | 查詢時重新排序候選 chunk；匯入不呼叫 |
 
 ## 2. 目錄
 
@@ -46,30 +46,31 @@ rag_storage/   知識圖譜＋向量庫＋快取（＝知識庫本體）
 | `examples/` | 從 Python 呼叫 `rag_lab` 的範例 | 是 | — | 不能 |
 | `scripts/` | 維運工具：下載台新信用卡內容、論文與其他格式的文件，啟動 VLM server，檢查端點；另有 macOS 上 LibreOffice 用的 fontconfig 設定 | 是 | — | 不能 |
 | `tests/` | 自動測試與測試用的假 server、假 MinerU、假 LibreOffice | 是 | — | 不能 |
-| `eval/` | `eval` 指令的題目檔（JSONL）：範例 `questions.example.jsonl`（論文）、`questions.formats.jsonl`（`data/documents/` 的 6 份文件，其中 2 題跨格式題同時問到論文）、`questions.format_check.jsonl`（`data/format_check/`，只用在格式驗證知識庫）、`questions.taishin.jsonl`（台新信用卡知識庫的 20 題，7 個類別） | 是 | 手寫 | 範例檔被測試引用，不能刪；另外三份是 README 第 5 節實測數據的題目 |
-| `docs/` | 這份架構文件；`taishin-eval-final.html` 是台新知識庫第三次 eval 的逐題對照（由 `output/reranker_verify/final_review.py` 產生後複製進來）；`docs/agents/` 是給 Claude Code 技能讀的設定（issue tracker 位置、triage 標籤、domain 文件的讀法） | 是 | 手寫 | 不能 |
+| `eval/` | `eval` 指令的題目檔（JSONL）：範例 `questions.example.jsonl`（論文）、`questions.formats.jsonl`（`data/documents/` 的 6 份文件，其中 2 題跨格式題同時問到論文）、`questions.format_check.jsonl`（`data/format_check/`，只用在格式驗證知識庫）、`questions.taishin.jsonl`（台新知識庫的 28 題：信用卡 20 題、金融卡 8 題；`source` 欄是帶卡片標籤的新檔名） | 是 | 手寫 | 範例檔被測試引用，不能刪；另外三份是歷次實測的題目 |
+| `docs/` | 這份架構文件；`*.html` 是各次 eval 的逐題對照（`taishin-eval-final`、`debit-card-eval`、`gemma4-vs-qwen-eval`、`answer-prompt-eval`，由 `output/` 底下的產生器產生後複製進來）；`docs/adr/` 是架構決策紀錄；`docs/agents/` 是給 Claude Code 技能讀的設定（issue tracker 位置、triage 標籤、domain 文件的讀法） | 是 | 手寫 | 不能 |
 | `.scratch/rag-anything-lab/` | 主程式的規格 `spec.md` 與 7 張 ticket（`issues/`）。ticket 03–07 末尾有實測結果段落，README 的數據出自這裡 | 是 | 手寫 | 不建議：設計決策與實測結果記錄在這裡 |
 | `.scratch/architecture-and-python-api/` | 這份架構文件、Python 範例、`Session` API 的規格與 5 張 ticket（01–05） | 是 | 手寫 | 不建議，理由同上 |
 | `.scratch/taishin-credit-card-kb/` | 台新信用卡知識庫的規格、13 張 ticket（01–13）與兩份改善答案品質的提案（`proposal-answer-quality.md`、`proposal-cross-card-subquestions.md`，含實驗結果） | 是 | 手寫 | 不建議，理由同上 |
 | `.scratch/local-reranker/` | 查詢時用本機 reranker 重新排序候選 chunk 的規格與 3 張 ticket（01–03）；ticket 03 末尾有實機驗收結果 | 是 | 手寫 | 不建議，理由同上 |
 | `.scratch/lightrag-env-overrides/` | 1 張還沒做的 ticket：LightRAG、RAG-Anything 會讀環境變數，rag_lab 沒有管理的變數可能改變結果 | 是 | 手寫 | 不建議，理由同上 |
 | `.scratch/multi-format-documents/` | 支援 PPT、Word、Excel、圖片的規格與 6 張 ticket（01–06）；ticket 05、06 末尾有實測結果段落 | 是 | 手寫 | 不建議，理由同上 |
+| `.scratch/` 其他資料夾 | 之後各階段的規格與 ticket：`chunk-truncation`（大 chunk 擋住 context）、`incremental-update`（對照表、替換、`--prune`）、`keyword-extraction-json`、`ingest-stage-timing`、`debit-card`（加入金融卡）、`gemma4-switch`（換成 Gemma 4）、`answer-prompt-card-type`（回答附加指示）、`rag-optimization`（卡片標籤、依標題切塊、中文抽取、4B embedding 與重匯，進行中） | 是 | 手寫 | 不建議，理由同上 |
 | `GLOSSARY.md` | 專案用語（文件、格式、知識庫、權益、回饋方案、切換等）的定義與要避免的說法 | 是 | 手寫 | 不建議：規格與 ticket 依這些用語撰寫 |
 | `.env.example` | 所有設定欄位與註解，預設值對應本機 MLX server | 是 | — | 不能 |
 | `requirements.txt` | 專案 venv 的相依套件：`raganything[image]==1.4.3` 鎖定版本（`[image]` 帶入 Pillow，用來轉換 BMP、TIFF、GIF、WebP 圖片），`lightrag-hku<1.5` 與 `mineru[core]<4` 只限制上限，其餘由 raganything 帶入 | 是 | — | 不能 |
 | `CLAUDE.md` | 給 Claude Code 的專案說明 | 是 | — | 不能 |
 | `.env` | 實際使用的設定（含 API 金鑰欄位） | 否 | 從 `.env.example` 複製後修改 | 刪了所有指令都會因缺設定而失敗 |
-| `.venv/` | 專案的 Python 3.12 虛擬環境 | 否 | `python -m venv` ＋ `pip install -r requirements.txt` | 可以，照 README 第 1 節重建 |
-| `data/taishin_pilot/` | 台新信用卡知識庫試匯入用的 7 份文件，是指向 `data/taishin_credit_card/` 的 symlink（README 第 5 節） | 否 | 手動建立 symlink | 可以，不影響已建好的知識庫 |
-| `data/taishin_credit_card/` | 目前知識庫的來源文件，分 6 個資料夾：`cards/`（16）、`rights/`（43）、`downloads/`（19）、`rights_attachments/`（17）、`offers/`（208）、`offer_images/`（8），括號是 2026-10-31 的份數；`_meta/` 放原始 HTML、轉檔用的 HTML 與下載清單 `manifest.jsonl`，不匯入。台新官網禁止未經授權的重製，只放本機 | 否 | `scripts/fetch_taishin.py` | 可以，重新下載即可；但官網內容會變，重新下載的不一定是同一批文件 |
+| `.venv/` | 專案的 Python 3.12 虛擬環境 | 否 | `python -m venv` ＋ `pip install -r requirements.txt` | 可以，照 README 第 3 節重建 |
+| `data/taishin_pilot/` | 台新信用卡知識庫試匯入（2026-10-30）用的 7 份文件，是指向 `data/taishin_credit_card/` 的 symlink；2026-11-22 已改指向帶卡片標籤的新檔名 | 否 | 手動建立 symlink | 可以，不影響已建好的知識庫 |
+| `data/taishin_credit_card/` | 目前知識庫的來源文件，分 11 個資料夾、325 份（份數見 README 第 4 節），檔名是 `<卡別>_<卡名>_<原檔名>`；`_meta/` 放原始 HTML、轉檔用的 HTML、下載清單 `manifest.jsonl`、卡片標籤 `document_labels.json` 與標頭檔 `document_headers.json`，不匯入。台新官網禁止未經授權的重製，只放本機 | 否 | `scripts/fetch_taishin.py` | 可以，重新下載即可；但官網內容會變，重新下載的不一定是同一批文件 |
 | `data/papers/` | 前一版知識庫用的 5 篇 arXiv PDF；2026-10-30 已刪除，可用腳本重新下載 | 否 | `scripts/fetch_papers.py` | 可以，重新下載即可 |
 | `data/documents/` | 前一版知識庫用的 6 份文件（PPT 2、Word 2、圖片 2）；2026-10-30 已刪除，可用腳本重新下載 | 否 | `scripts/fetch_documents.py` | 可以，重新下載即可 |
 | `data/format_check/` | 已刪除（2026-10-30），可用腳本重新下載。原本是 5 份格式驗證用文件：Excel 2，舊格式 .ppt、.doc、.xls 各 1。和 `data/documents/` 分開，用資料夾匯入時不會混在一起 | 否 | `scripts/fetch_documents.py --group format_check` | 可以，重新下載即可 |
-| `data/corpus/` | 前一版知識庫匯入論文用的資料夾，放指向 `data/papers/` 其中 3 篇的 symlink；2026-10-30 已刪除 | 否 | README 第 4 節的 `ln -sf` | 可以，不影響已建好的知識庫 |
-| `rag_storage/` | **知識庫本體**：知識圖譜、向量庫、文件狀態、LLM 快取（路徑由 `.env` 的 `WORKING_DIR` 決定）。目前是台新信用卡知識庫：311 份文件，實體 15,747、關係 31,239 | 否 | `ingest` | 刪了就要重新 `ingest`，台新信用卡知識庫約 30 小時（README 第 4 節）。前一版知識庫（3 篇論文約 1.7 小時，6 份文件約 0.7 小時）已在 2026-10-30 刪除 |
+| `data/corpus/` | 前一版知識庫匯入論文用的資料夾，放指向 `data/papers/` 其中 3 篇的 symlink；2026-10-30 已刪除 | 否 | 手動建立 symlink | 可以，不影響已建好的知識庫 |
+| `rag_storage/` | **知識庫本體**：知識圖譜、向量庫、文件狀態、LLM 快取（路徑由 `.env` 的 `WORKING_DIR` 決定）。目前是台新知識庫，2026-11-20 起用 rag-optimization 的設定重匯 325 份，chunk、實體、關係數完成後記在 ticket 06 | 否 | `ingest` | 刪了就要重新 `ingest`，這次重匯超過 36 小時（README 第 7 節）。前一版知識庫已在 2026-10-30 刪除 |
 | `rag_storage.before-formats/` | 前一版知識庫匯入 `data/documents/` 之前的備份；2026-10-30 已刪除 | 否 | ticket 06 手動複製 | — |
 | `output/<文件>_<雜湊>/`、`output/office/<主檔名>_<雜湊>/`、`output/<主檔名>.pdf` | MinerU 的解析結果：Markdown、content list、切出來的圖片（路徑由 `PARSER_OUTPUT_DIR` 決定）。PDF 與圖片在 `<文件>_<雜湊>/`；Office 文件從 ticket 10 起，LibreOffice 轉出的 PDF 與解析結果都在 `office/<主檔名>_<雜湊>/`，雜湊是原檔絕對路徑 md5 的前 8 碼；ticket 10 之前匯入的 Office 文件，轉出的 PDF 留在 `output/<主檔名>.pdf` | 否 | `ingest` | 不建議：知識庫記錄的是這裡圖片的絕對路徑，`--vlm-enhanced` 查詢要讀這些圖片 |
-| `output/` 其他子目錄 | 開發過程的量測紀錄與 log（`ticket03_run/`、`ticket05_run/`、`formats_check_run/`、`formats_main_run/`、`crash_repro/`、`backend_bench/`；台新信用卡知識庫的 `taishin_pilot/`、`taishin_full/`（匯入）、`taishin_eval/`、`taishin_eval2/`、`reranker_verify/`（3 次 eval 的判讀）、`taishin_eval_promptA/`、`taishin_eval_rerank/`、`taishin_eval_subq/`（改善答案的實驗）等），ticket 的實測段落引用它們當證據；`crash_repro/tools/watchdog.sh` 是記憶體監控腳本 | 否 | 開發時手動產生 | 可以，但會失去原始證據 |
+| `output/` 其他子目錄 | 開發過程的量測紀錄與 log（`ticket03_run/`、`ticket05_run/`、`formats_check_run/`、`formats_main_run/`、`crash_repro/`、`backend_bench/`；台新信用卡知識庫的 `taishin_pilot/`、`taishin_full/`（匯入）、`taishin_eval/`、`taishin_eval2/`、`reranker_verify/`（3 次 eval 的判讀）、`taishin_eval_promptA/`、`taishin_eval_rerank/`、`taishin_eval_subq/`（改善答案的實驗）、`gemma4_01/`、`gemma4_02/`、`answer_prompt_01/`（換模型與回答指示的 eval）、`rag_opt/`（回答品質優化的實驗、改名備份與重匯 log）等），ticket 的實測段落引用它們當證據；`crash_repro/tools/watchdog.sh` 是記憶體監控腳本 | 否 | 開發時手動產生 | 可以，但會失去原始證據 |
 | `eval_results/` | `eval` 產生的 Markdown 對照表，檔名 `eval_<時間戳記>.md` | 否 | `eval` | 可以 |
 | `.claude/` | Claude Code 的本機設定與 subagent 用的 worktree | 否 | Claude Code | 不影響專案的程式 |
 
@@ -85,7 +86,6 @@ rag_storage/   知識圖譜＋向量庫＋快取（＝知識庫本體）
 | `kv_store_llm_response_cache.json` | LLM 回應快取；同一個問題再問一次會直接命中，不呼叫 LLM |
 | `kv_store_parse_cache.json` | RAG-Anything 的解析快取，重複匯入同一個檔案時不重跑 MinerU |
 | `rag_lab_documents.json` | **rag_lab 自己的檔案，不是 LightRAG 的**：匯入對照表，見下面的「匯入對照表」 |
-| `kv_store_llm_response_cache.json.bak-<時間>` | 手動刪除 `:query:` 快取項目之前的備份（2026-11-01 的第二、三次 eval 前各一份），rag_lab 不讀；可以刪 |
 
 ### 匯入對照表
 
@@ -127,11 +127,12 @@ rag_storage/   知識圖譜＋向量庫＋快取（＝知識庫本體）
 模組之間的依賴（箭頭指向被 import 的一方）：
 
 ```
-__main__ ──► config
+__main__ ──► config ──► chunking
    │  ├────► formats
    │  ├────► evaluation
    │  ├────► pipeline ──► models ──► config
    │  │         ├───────► config
+   │  │         ├───────► chunking
    │  │         ├───────► registry
    │  │         ├───────► tables
    │  │         ├───────► formats
@@ -149,6 +150,7 @@ __main__ ──► config
 | `config.py` | 從 `.env` 與環境變數讀設定並驗證；必填欄位缺漏或格式錯就拋錯，不給預設值（只有 `EMBED_QUERY_PREFIX` 是選填，預設空字串）；環境裡出現 rag_lab 沒管理的 LightRAG／RAG-Anything／MinerU 變數（`UNMANAGED_LIBRARY_ENV`，39 個）也拋錯，`pipeline` 與 `models` 在 import lightrag 之前就呼叫這項檢查 | `get_settings() -> Settings`、`reject_unmanaged_library_env()`、`UNMANAGED_LIBRARY_ENV`、`ConfigError` |
 | `models.py` | 把三個 OpenAI 相容端點包成 RAG-Anything 需要的模型函式、把 rerank 端點包成 LightRAG 的 rerank 函式；失敗包成帶端點名稱與位址的錯誤；抽關鍵字的請求照樣帶 JSON schema，但回應改由 `json_repair` 解析並整理成 LightRAG 的關鍵字格式（`KEYWORD_RESPONSE_FORMAT`、`_parse_keyword_output`），解析不出時拋 `EndpointError`；計數圖、表、公式描述的失敗與描述後的內容寫入知識庫的失敗（RAG-Anything 自己會吞掉）；判定 rerank 失敗（含回應內容驗證）並以 `BaseException` 子類 `RerankFailure` 拋出，穿過 LightRAG（LightRAG 自己會吞掉一般例外） | `llm_model_func`、`vision_model_func`、`build_embedding_func()`、`rerank_model_func`、`check_reachable(...)`、`EndpointError` |
 | `registry.py` | 匯入對照表 `WORKING_DIR/rag_lab_documents.json` 的讀寫：每份處理成功的文件的絕對路徑 → 文件 ID、匯入時間、來源資料夾。沒有檔案視為空表；檔案存在但讀不了、不是合法 JSON 或格式不符就拋 `RegistryError`（訊息含檔案路徑），不當成空表；寫入先寫暫存檔 `rag_lab_documents.json.tmp` 再改名。只靠標準函式庫，不 import `pipeline`，`pipeline` 把 `RegistryError` 轉成 `PipelineError`。用途與格式見下面的「匯入對照表」 | `load(working_dir)`、`save(working_dir, documents)`、`registry_path(working_dir)`、`RegistryError` |
+| `chunking.py` | 依標題切塊的 LightRAG `chunking_func`：每個 chunk 開頭是卡片標籤標頭加章節名稱，少於 100 token 的節併進下一節，標頭超過 150 token 時其餘 chunk 改用短標頭；另外把 content list 改寫成 chunker 吃得進去的格式（標題加 `#`、文件開頭放標頭區塊、表格與圖片的 caption 加標頭）。只靠標準函式庫；只在設了 `DOCUMENT_HEADERS_FILE` 時使用 | `chunk_by_headings(...)`、`rewrite_content_list(...)`、`parse_header`、`shorten_header`、`HEADER_MAX_TOKENS` |
 | `tables.py` | 把太大的表格縮短（拿掉值為 1 的 `rowspan`／`colspan`），仍超過 800 token 就依列切成小表，每張重複表頭列；只靠標準函式庫。`pipeline.LabRAGAnything.parse_document` 在 RAG-Anything 算好文件 ID、存好解析快取之後，才對回傳給呼叫端的 content list 套用它，所以文件 ID 與解析快取不變 | `limit_table_sizes(content_list, count_tokens)`、`TABLE_BODY_MAX_TOKENS` |
 | `pipeline.py` | 核心流程：建立 RAGAnything 實例（`LabRAGAnything`：切大表格、計數寫入失敗）、匯入（解析、建圖、多模態描述）、查詢、批次比較；把 LightRAG 會吞掉的錯誤轉成可偵測的失敗（圖表公式描述或多模態寫入失敗的文件，整批結束後改記成 `failed`）；匯入時讀寫對照表並把每份成功的文件分類（新增、替換、沒變）；指定來源資料夾時列出來源已不在的文件，加 `prune` 才刪（`_prune_missing`，重用 `_remove_version`）；內容變了的文件先匯入新版本再刪舊版本，新版本失敗時清掉寫了一半的部分；`Session` 讓同一個 process 只初始化一次、依序呼叫 | `Session`（`ingest`、`query`、`evaluate`、`close`）、模組函式 `ingest(documents) -> IngestSummary`、`query(question, mode, vlm_enhanced=False) -> str`、`evaluate(questions, modes=None) -> list[list[Cell]]`（`modes` 指定只跑哪幾種檢索模式，`None` 為五種）、`PipelineError`、`SessionError`、`SessionClosedError` |
 | `evaluation.py` | `eval` 的題目檔讀取驗證與 Markdown 對照表排版，不需要任何模型；`resolve_modes` 把指定的檢索模式整理成依 `RETRIEVAL_MODES` 排序、不重複的 tuple，空的或不認得的名稱拋 `ValueError`（訊息列出可用的模式） | `load_questions(path)`、`render_report(...)`、`resolve_modes(modes)`、`RETRIEVAL_MODES`、`QuestionFileError` |
@@ -162,13 +164,18 @@ __main__ ──► config
 |---|---|---|
 | `fetch_papers.py` | 下載 5 篇 RAG 論文到 `data/papers/`，先比對 arXiv 標題，已存在的完整檔案會略過 | 專案 venv 或系統 python3（只用標準函式庫） |
 | `fetch_documents.py` | 下載 11 份公開文件（PPT、Word、Excel、圖片）：6 份到 `data/documents/`，5 份到 `data/format_check/`；先寫 `.part`，SHA-256 相符才改名，已存在且雜湊正確的檔案會略過，可用 `--group` 只下載一組 | 專案 venv 或系統 python3（只用標準函式庫） |
-| `fetch_taishin.py` | 從台新銀行官網的四個列表找出網址，下載卡片頁、權益子頁、文件下載區 PDF、權益附件、活動頁與活動主視覺到 `data/taishin_credit_card/`，並寫下載清單 `_meta/manifest.jsonl`；網頁先取主內容區，再用 Chrome 列印成 PDF 或用 LibreOffice 轉成 `.docx`；請求間隔預設 2 秒，可用 `TAISHIN_REQUEST_INTERVAL_SEC` 改 | 專案 venv；需要 Google Chrome 與 LibreOffice |
-| `libreoffice-fonts-macos.conf` | macOS 上 LibreOffice 轉檔用的 fontconfig 設定，由 `.env` 的 `FONTCONFIG_FILE` 指向；沒有它時，匯入權益 `.docx` 時轉出的 PDF 沒有中文字（README 第 1 節） | 不執行，是設定檔 |
-| `vlm_server.py` | 啟動 VLM＋embedding 的 `mlx_vlm.server`，先把 MLX 的 GPU cache 上限設為 1 GB，避免 ingest 時記憶體不足 | pipx 安裝的 mlx-vlm 的 python |
+| `fetch_taishin.py` | 從台新官網與 richart.tw 找出網址，下載 11 類文件到 `data/taishin_credit_card/`，並寫下載清單 `_meta/manifest.jsonl`；網頁先取主內容區，再用 Chrome 列印成 PDF 或用 LibreOffice 轉成 `.docx`；下載完成後依卡片標籤改檔名（`--keep-names` 不改）；`--update` 比對內容並處理下架；請求間隔預設 2 秒，可用 `TAISHIN_REQUEST_INTERVAL_SEC` 改 | 專案 venv；需要 Google Chrome 與 LibreOffice |
+| `label_cards.py` | 依規則替每份文件產生卡片標籤（卡別＋適用卡片），寫出 `_meta/document_labels.json` 與抽查報告；`label_cards_manual.json` 的人工標籤優先 | 專案 venv（只用標準函式庫） |
+| `label_cards_manual.json` | 人工標籤（107 份），規則判斷不了或判錯的文件以這裡為準 | 不執行，是資料檔 |
+| `rename_documents.py` | 把文件改成帶卡片標籤的檔名，同步改 eval 題目檔的 `source` 欄並產生標頭檔 `_meta/document_headers.json`；中斷後重跑會接著做；`--dry-run` 只列清單 | 專案 venv（只用標準函式庫） |
+| `libreoffice-fonts-macos.conf` | macOS 上 LibreOffice 轉檔用的 fontconfig 設定，由 `.env` 的 `FONTCONFIG_FILE` 指向；沒有它時，匯入權益 `.docx` 時轉出的 PDF 沒有中文字（README 第 3 節） | 不執行，是設定檔 |
+| `vlm_server.py` | 啟動提供 LLM、VLM、embedding、reranker 的 `mlx_vlm.server`，先把 MLX 的 GPU cache 上限設為 1 GB，避免 ingest 時記憶體不足 | pipx 安裝的 mlx-vlm 的 python |
 | `smoke_test.py` | 確認三個端點都能用：chat、看 base64 圖片、embedding 維度 | 專案 venv |
 | `test_fetch_papers.py` | `fetch_papers.py` 的離線測試（對本機假 arXiv server） | `python -m unittest scripts.test_fetch_papers` |
 | `test_fetch_documents.py` | `fetch_documents.py` 的離線測試（對本機假 HTTP server）：雜湊核對、斷線與 HTTP 失敗、本地檔案系統錯誤、略過已存在的檔案、`--group`、清單與 spec 表格的對照 | `python -m unittest scripts/test_fetch_documents.py` |
-| `test_fetch_taishin.py` | `fetch_taishin.py` 的離線測試（對本機假 HTTP server 與 `tests/fake_chrome.py`、假 LibreOffice）：列表解析、主內容區、轉檔、過期與外部網域略過、權益附件、下載清單 | `python -m unittest scripts/test_fetch_taishin.py` |
+| `test_fetch_taishin.py` | `fetch_taishin.py` 的離線測試（對本機假 HTTP server 與 `tests/fake_chrome.py`、假 LibreOffice）：列表解析、主內容區、轉檔、過期與外部網域略過、權益附件、下載清單、下載後改名 | `python -m unittest scripts/test_fetch_taishin.py` |
+| `test_label_cards.py` | `label_cards.py` 的測試：卡名比對、通稱、排除句、人工標籤優先 | `python -m unittest scripts/test_label_cards.py` |
+| `test_rename_documents.py` | `rename_documents.py` 的測試：新檔名、題目檔改寫、標頭檔、重跑不重複改名、中斷後續做 | `python -m unittest scripts/test_rename_documents.py` |
 
 ### 3.3 `tests/`：自動測試
 
@@ -189,6 +196,10 @@ __main__ ──► config
 | `test_registry.py` | 匯入對照表：第一次匯入記「新增」並寫入一筆（單檔與資料夾的來源資料夾、symlink 解析成實體路徑）、再次匯入沒變的文件記「沒變」且不呼叫模型、對照表有這個路徑但知識庫沒有該文件時重新匯入、沒有對照表的現有知識庫補登並記「沒變」、新路徑內容與已對照的路徑相同時記「新增」且不寫入知識庫、對照表壞掉時在處理任何文件之前失敗並指出檔案路徑、對照表寫不進去時失敗（CLI 結束碼 1，Python API 拋 `PipelineError`）；Python API 版涵蓋模組函式與 `Session` 的 `summary.added`、`summary.unchanged` |
 | `test_prune.py` | 來源已不在與 `--prune`：沒有 prune 只列出、知識庫與對照表不變且結束碼 0；prune 刪除並移除對照表那一筆、保留抽取快取（同一份文件再回來時不再呼叫實體抽取）；只處理來源資料夾等於這次資料夾的紀錄；單一檔案匯入的文件在它所在的資料夾 prune 時也在範圍內；別的路徑共用同一個版本時只移除那一筆；刪除失敗（`tests/delete_failure`）結束碼 1 且對照表不變；資料夾不存在或沒有支援的文件結束碼 2 且不做移除；單一檔案加 `--prune` 結束碼 2、單一檔案不檢查移除；對照表的來源資料夾記 `ingest` 的資料夾、指向資料夾外的 symlink 檔也找得到；Python API 版涵蓋 `summary.missing`／`removed`／`remove_failed`、來源資料夾不存在或沒有文件與沒有來源資料夾卻給 prune 時拋 `PipelineError`、指定的來源資料夾寫進對照表 |
 | `test_replace.py` | 替換變更的文件：改過內容的路徑再次匯入記「替換」、查詢只看到新內容；新版本匯入失敗（例外、圖片描述失敗）時清掉新版本、舊版本與對照表不變、沒有失敗紀錄、重試成功記「替換」；清掉寫了一半的部分失敗與刪舊版本失敗（`tests/delete_failure` 讓 LightRAG 的第 1 次刪除失敗）時報告寫出新舊兩個文件 ID、結束碼 1，下次補刪；替換中斷後補刪舊版本；記的舊 ID 不在知識庫時記「新增」；別的路徑共用舊版本時不刪；新文件失敗維持失敗紀錄；資料夾匯入；Python API 版涵蓋 `summary.replaced` 與失敗的 `report.error` |
+| `test_answer_cache.py` | 知識庫有改動時清掉查詢答案快取：新增、替換、prune、寫入後失敗會清；解析失敗、沒變、共用版本不清；查詢關鍵字與抽取快取保留 |
+| `test_migrate.py` | 對照表建立之前匯入的文件：用檔名到文件狀態找舊版本，剛好一份就替換、0 份當新增、多份記成失敗並列出候選 |
+| `test_chunking.py` | `chunking.py` 的純函式測試：標題處切開、超長節再切、短節合併、標頭與短標頭、沒有標題的文件、純圖片文件不放標頭 |
+| `test_config.py` | `KB_LANGUAGE`、`KB_ENTITY_TYPES` 的讀取：缺少、空值、逗號分隔解析 |
 | `test_graph.py` | `graph` 指令的抽樣與可重現性 |
 | `test_eval.py` | `eval` 指令的題目檔驗證與結果表、rerank 的順序、rerank 失敗只記在發生的那幾格、rerank 端點不可達時查詢前就失敗 |
 | `test_keyword_json.py` | 抽關鍵字的輸出 JSON 有小錯：少 `]` 時 `query`、Python API、`eval` 照常完成且修好的關鍵字被拿去檢索；合法輸出的關鍵字不變；去掉 think 標籤；只保留字串項目；兩個欄位都是空陣列不算失敗；解析不出關鍵字格式時 `query` 結束碼 1、Python API 拋 `PipelineError`、`eval` 記成該格失敗，訊息含「抽關鍵字的輸出不是合法的 JSON」與輸出開頭（最多 200 字元）；請求仍帶同一份 JSON schema、不重試 |
@@ -203,19 +214,19 @@ __main__ ──► config
 
 ## 4. 知識庫建好之後怎麼使用
 
-以下都要在 repo 根目錄執行，並先開好兩個模型 server（README 第 3 節）。只有 `graph` 不需要 server。
+以下都要在 repo 根目錄執行，並先開好模型 server（README 第 5 節）。只有 `graph` 不需要 server。
 
 ### 4.1 命令列
 
 ```sh
-.venv/bin/python -m rag_lab query "What are the two retrieval levels in LightRAG?"   # 問一題，預設 mix 模式
+.venv/bin/python -m rag_lab query "台新Richart卡國內一般消費回饋是多少？"            # 問一題，預設 mix 模式
 .venv/bin/python -m rag_lab query --mode naive "..."                                # 指定檢索模式
-.venv/bin/python -m rag_lab eval eval/questions.example.jsonl                       # 題目檔 × 五種模式，寫出對照表
+.venv/bin/python -m rag_lab eval eval/questions.taishin.jsonl --modes mix           # 題目檔只跑 mix，寫出對照表
 .venv/bin/python -m rag_lab graph                                                   # 抽樣看知識圖譜
-.venv/bin/python -m rag_lab ingest data/papers/2005.11401.pdf                       # 再加一篇論文進知識庫
+.venv/bin/python -m rag_lab ingest data/taishin_credit_card/offers                  # 匯入或更新一個資料夾
 ```
 
-五種檢索模式的差別：
+五種檢索模式的差別（這個專案的評估只用 `mix`）：
 
 | 模式 | 檢索什麼 |
 |---|---|
@@ -237,8 +248,8 @@ from pathlib import Path
 from rag_lab.pipeline import Session
 
 with Session() as session:
-    summary = session.ingest([Path("data/papers/2310.11511.pdf")])  # Self-RAG 論文
-    answer = session.query("What is Self-RAG?", mode="mix")
+    summary = session.ingest([Path("data/taishin_credit_card/offers/信用卡_台新Richart卡_offer_WM_20260109093931667.pdf")])
+    answer = session.query("台新Richart卡國內一般消費回饋是多少？", mode="mix")
 ```
 
 | 方法 | 回傳 | 失敗時 |
@@ -266,8 +277,8 @@ with Session() as session:
 from rag_lab.pipeline import Session
 
 QUESTIONS = [
-    "What are the two retrieval levels in LightRAG?",
-    "What is the main idea of RAG-Anything?",
+    "台新Richart卡國內一般消費回饋是多少？",
+    "簽帳金融卡在海外提款要收哪些費用？",
 ]
 
 with Session() as session:
@@ -292,14 +303,14 @@ with Session() as session:
 已知極限：
 - `Session` 讀的是開啟當下的知識庫。開著的期間如果另一個 process（例如另一個終端機的 `python -m rag_lab ingest`）匯入新論文，這個 `Session` 看不到，要關掉重開。
 - 呼叫途中按 Ctrl-C 中斷後，不保證 `Session` 的狀態一致；中斷後應關閉 `Session` 再開新的。
-- 本機 4B LLM 每題 52–66 秒；同一個問題再問一次會命中 LLM 快取，4 秒（README 第 5 節）。
+- 本機 Gemma 4 每題約 43 秒（2026-11-12 的 28 題 mix eval 花 20 分 10 秒）；同一個問題再問一次會命中 LLM 快取，幾秒內回答。
 
 ## 5. 設定
 
-所有欄位與註解在 `.env.example`；搬機器、換模型時要改哪些欄位，見 README 第 6 節。改程式之外的東西（端點、模型、路徑、並行數、查詢 token 上限）都只改 `.env`。
+所有欄位與註解在 `.env.example`；搬機器、換模型時要改哪些欄位，見 README 第 8 節。改程式之外的東西（端點、模型、路徑、並行數、查詢 token 上限）都只改 `.env`。
 
 查詢時的 rerank 由 `RERANK_BASE_URL`、`RERANK_MODEL`、`RERANK_API_KEY` 三個必填欄位設定（驗證規則同其他端點），不能關閉；eval 對照表表頭的「固定查詢設定」由實際送進 LightRAG 的查詢參數（`pipeline.query_kwargs`）產生，與 `RERANK_MODEL` 一起記下當時用的 reranker；LLM 快取的 key 不含 `RERANK_MODEL`、`LLM_MODEL`，換模型後要先刪掉 `:query:` 快取項目才能比較（見 README）。
 
-LightRAG 與 RAG-Anything 在 import 時會從環境變數和目前工作目錄的 `.env` 讀幾十個設定當預設值；RAG-Anything 以子行程執行的 `mineru` 繼承行程環境，也讀一批 `MINERU_*` 變數。這些都會悄悄改變匯入與查詢結果。`config.reject_unmanaged_library_env` 檢查環境（先載入目前工作目錄的 `.env`，與 LightRAG 的讀法一致），出現名單內的變數就拋 `ConfigError`，訊息只列名稱。呼叫點有兩處：`get_settings`（所有 CLI 子命令與 Python API 的連線檢查之前），以及 `pipeline`、`models` 在 import lightrag 之前（值不合法時，LightRAG 的 import 自己就會拋 `ValueError` 並帶出值）。名單的收錄標準、產生步驟與版本見 `rag_lab/config.py` 模組說明和 README 第 1 節；升級 lightrag-hku、raganything 或 mineru 時要重新產生。
+LightRAG 與 RAG-Anything 在 import 時會從環境變數和目前工作目錄的 `.env` 讀幾十個設定當預設值；RAG-Anything 以子行程執行的 `mineru` 繼承行程環境，也讀一批 `MINERU_*` 變數。這些都會悄悄改變匯入與查詢結果。`config.reject_unmanaged_library_env` 檢查環境（先載入目前工作目錄的 `.env`，與 LightRAG 的讀法一致），出現名單內的變數就拋 `ConfigError`，訊息只列名稱。呼叫點有兩處：`get_settings`（所有 CLI 子命令與 Python API 的連線檢查之前），以及 `pipeline`、`models` 在 import lightrag 之前（值不合法時，LightRAG 的 import 自己就會拋 `ValueError` 並帶出值）。名單的收錄標準、產生步驟與版本見 `rag_lab/config.py` 模組說明和 README 第 3 節；升級 lightrag-hku、raganything 或 mineru 時要重新產生。
 
 查詢 context 的 token 分配由三個欄位決定：`QUERY_MAX_TOTAL_TOKENS`（總上限）、`QUERY_MAX_ENTITY_TOKENS` 與 `QUERY_MAX_RELATION_TOKENS`（圖譜 context 裡 entity 與 relation 描述各自的上限），其餘留給文字 chunk。`config.get_settings` 檢查兩個上限是 0 以上的整數、相加小於總上限；`pipeline.query_kwargs` 把三個值原樣交給 LightRAG 的 `QueryParam`（CLI 的 `query` 與 `eval`、`Session.query`、`pipeline.query`、`pipeline.evaluate`、VLM 增強查詢都走同一個函式），不依 LightRAG 預設比例縮放。

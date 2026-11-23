@@ -63,6 +63,19 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   RAG-Anything 先依原始 content list 算好文件 ID、存好解析快取，LabRAGAnything 只改回傳給呼叫端的那一份，
   所以文件 ID、快取 key 與快取內容都不變，已匯入的文件照常被略過；process_document_complete 與 _ingest_one 都經由
   它取得 content list，每張小表因此是一個獨立的 table 項目，各自描述、各自成為一個 chunk。
+- chunk 標頭與依標題切塊（只在有設 DOCUMENT_HEADERS_FILE 時啟用，演算法見 rag_lab.chunking）：台新知識庫的卡片名稱分散在
+  幾百份文件，預設的 chunker 只依 token 切，chunk 不知道自己屬於哪張卡，檢索常撈到別張卡的文件。啟用時 build_rag 把
+  chunking.chunk_by_headings 當 chunking_func 傳給 LightRAG，LabRAGAnything.parse_document 另把回傳的 content list 改寫
+  （chunking.rewrite_content_list）：最前面放標頭標記區塊（文件沒有文字項目時不放；LightRAG 呼叫 chunking_func 時不傳檔名，chunker 只能從內容讀標頭）、
+  有 text_level 的文字項目改成 `#` 標題、表格與圖片的 caption 加卡片標籤（它們另外成 chunk，不經過 chunking_func）。掛勾點與表格縮小
+  相同，只改回傳的那一份，解析快取 key 與內容都不變；文件 ID 則納入這份文件的標頭文字（標頭或卡片標籤變了，chunk 內容就變，要被
+  當成新版本重新切塊；沒設標頭檔時文件 ID 與以前完全相同，既有知識庫的增量更新靠它）。標頭檔存在但 MinerU 沒解析出內容時，
+  不加標頭，空的 content list 照常觸發 _ingest_one 的「沒有解析出內容」錯誤。匯入的文件檔名（不含資料夾）不在標頭檔裡時，parse_document 拋
+  PipelineError，該文件記成失敗、不寫入知識庫，其餘文件照常；沒有標頭就不匯入。沒設 DOCUMENT_HEADERS_FILE 時以上全部不做，
+  chunk 內容與數量和以前相同。自訂 chunking_func 之後 RAG-Anything 不再替文字 chunk 標頁碼（processor 只在 chunker 是
+  LightRAG 預設的才標），所以文字 chunk 沒有 page_idx；rag_lab 目前沒有用到頁碼。
+- build_rag 會把 rag_lab.extraction_repair 掛到 LightRAG 解析抽取輸出的函式前面：格式寫壞但看得出原意的實體／關係紀錄
+  先修好再交給 LightRAG，不整筆丟掉（匯入、讀快取重放、刪文件後重建都經過它；快取存的仍是模型原始輸出）。
 - 查詢走 LightRAG 的 aquery_llm（回 status 與 message），不用 aquery：後者在 LLM 失敗
   時回 None、非法模式也回 None。status 不是 success 或沒有答案內容一律當失敗。
 - 查詢預設 vlm_enhanced=False（只走 LLM、不讓 VLM 改寫答案；與 spec 一致，五種模式的答案才由
@@ -93,6 +106,10 @@ CLI 只負責參數與輸出格式，這裡負責行為。
 - embedding 並行數由 EMBED_MAX_ASYNC 經 lightrag_kwargs 明確傳入，不依賴 LightRAG 自己讀的
   EMBEDDING_FUNC_MAX_ASYNC 環境變數：那個預設值在 import lightrag 時就決定，晚於 import 才載入的
   .env 不會生效。
+- 知識庫的語言與實體類型由 KB_LANGUAGE、KB_ENTITY_TYPES 經 lightrag_kwargs 的 addon_params 明確傳入：
+  語言決定實體抽取、描述合併與查詢時關鍵字抽取的輸出語言，實體類型決定抽取時可用的類型。LightRAG 自己
+  讀的 SUMMARY_LANGUAGE、ENTITY_TYPES 環境變數預設是英文與通用類型、且被 rag_lab 拒絕，所以改由 rag_lab 管理，
+  值會留在匯入結果裡，不能只靠行程環境。addon_params 會整個取代 LightRAG 的預設值，所以兩個鍵都要給。
 - 收尾（_close）除了 finalize_storages，還要呼叫 LightRAG 兩個限流器（LLM、embedding）的
   shutdown()：限流 worker 在執行呼叫時被取消會把 CancelledError 吞掉、回到等待迴圈，
   只有 shutdown 設定的旗標能讓它結束。不呼叫的話，端點在請求進行中失敗（例如 mlx_lm.server
@@ -169,10 +186,11 @@ reject_unmanaged_library_env()
 from lightrag import QueryParam  # noqa: E402
 from lightrag.base import DocStatus  # noqa: E402
 from lightrag.kg.shared_storage import finalize_share_data  # noqa: E402
+from lightrag.utils import compute_mdhash_id  # noqa: E402
 from raganything import RAGAnything, RAGAnythingConfig  # noqa: E402
 from raganything.callbacks import ProcessingCallback  # noqa: E402
 
-from rag_lab import models, registry, tables  # noqa: E402
+from rag_lab import chunking, extraction_repair, models, registry, tables  # noqa: E402
 
 # ==============================
 # 常數與例外
@@ -229,27 +247,54 @@ def ensure_mineru_on_path() -> None:
 
 
 class LabRAGAnything(RAGAnything):
-    """parse_document 之後把太大的表格縮短、切成小表的 RAGAnything（見 rag_lab.tables）。"""
+    """parse_document 之後把太大的表格縮短、切成小表，並（有設標頭檔時）加上 chunk 標頭的 RAGAnything。
 
-    async def parse_document(self, *args, **kwargs):
-        """解析文件（走解析快取），回傳的 content list 裡太大的表格已縮短或切成小表。
+    Attributes:
+        document_headers: 檔名 → chunk 標頭文字（Settings.document_headers）；None 表示不做標頭改寫。由 build_rag 設定。
+    """
+
+    document_headers = None
+
+    async def parse_document(self, file_path, *args, **kwargs):
+        """解析文件（走解析快取），回傳的 content list 裡太大的表格已縮短或切成小表，有標頭檔時另加標頭。
 
         文件 ID 與解析快取都是 RAG-Anything 依原始 content list 算好、存好的：這裡只改回傳給呼叫端的那一份，
         所以 ID、快取 key 與快取內容不變。
 
         Args:
+            file_path: 文件路徑；標頭檔用它的檔名（不含資料夾）查標頭。
             *args: 轉給 RAGAnything.parse_document。
             **kwargs: 轉給 RAGAnything.parse_document。
 
         Returns:
-            (content_list, doc_id)；doc_id 是原始 content list 的內容雜湊。
+            (content_list, doc_id)；沒設標頭檔時，doc_id 是原始 content list 的內容雜湊；設了標頭檔時，是原始雜湊加上
+            這份文件標頭文字的雜湊（content list 是空的時候不加，仍是原始雜湊）。
+
+        Raises:
+            PipelineError: 有設標頭檔，但這份文件的檔名不在裡面。
         """
-        content_list, doc_id = await super().parse_document(*args, **kwargs)
+        header = None
+        if self.document_headers is not None:
+            # 先查標頭再解析：沒有標頭的文件不匯入，不必先花時間跑 MinerU
+            name = Path(str(file_path)).name
+            header = self.document_headers.get(name)
+            if header is None:
+                raise PipelineError(
+                    f"{name} 不在 DOCUMENT_HEADERS_FILE 指向的標頭檔裡；沒有標頭就不匯入，請把這份文件的標頭補進標頭檔再重新匯入"
+                )
+        content_list, doc_id = await super().parse_document(file_path, *args, **kwargs)
 
         def count_tokens(text: str) -> int:
             return len(self.lightrag.tokenizer.encode(text))
 
-        return tables.limit_table_sizes(content_list, count_tokens), doc_id
+        content_list = tables.limit_table_sizes(content_list, count_tokens)
+        if header is None or not content_list:
+            # 沒解析出內容時不加標頭：_ingest_one 靠 content_list 是空的判斷「MinerU 沒有解析出內容」
+            return content_list, doc_id
+        # 文件 ID 納入標頭文字：標頭（卡片標籤）變了，chunk 內容就變了，要被視為新版本重新切塊；
+        # 內容相同、標頭相同的文件 ID 不變，增量更新照常略過
+        doc_id = compute_mdhash_id(f"{doc_id}\n{header}", prefix="doc-")
+        return chunking.rewrite_content_list(content_list, header, count_tokens), doc_id
 
     async def _process_multimodal_content_batch_type_aware(self, *args, **kwargs):
         """多模態內容的批次處理（描述完的 chunk 寫入索引）；失敗時先計數再照常重拋。
@@ -277,31 +322,42 @@ def build_rag(settings: Settings) -> RAGAnything:
         settings: 已驗證的設定。
 
     Returns:
-        接好 LLM、VLM、embedding 三個模型函式與 rerank 函式的 RAGAnything。
+        接好 LLM、VLM、embedding 三個模型函式與 rerank 函式的 RAGAnything；有設標頭檔時另接好依標題切塊的 chunker。
+        LightRAG 解析抽取輸出前會先經過 extraction_repair 的修補。
     """
+    extraction_repair.install()
     config = RAGAnythingConfig(
         working_dir=settings.working_dir,
         parser_output_dir=settings.parser_output_dir,
         parser="mineru",
         parse_method="auto",
     )
-    return LabRAGAnything(
+    lightrag_kwargs = {
+        "llm_model_max_async": settings.llm_max_async,
+        # ASSUMPTION：圖片／表格／公式描述的並行度（max_parallel_insert）不受 llm_model_max_async
+        # 限制，沿用同一個設定值，避免本地 server 被打爆。
+        "max_parallel_insert": settings.llm_max_async,
+        "embedding_func_max_async": settings.embed_max_async,
+        # rerank 函式必須在建立 LightRAG 時傳入：mix 等圖譜模式處理 chunk 時讀的是儲存層初始化時拿到的
+        # 設定副本，初始化之後才設不會生效（LightRAG 1.4.16）。匯入不會用到它。
+        "rerank_model_func": models.rerank_model_func,
+        "min_rerank_score": MIN_RERANK_SCORE,
+        # 語言與實體類型由設定決定（KB_LANGUAGE、KB_ENTITY_TYPES），不靠 LightRAG 讀 SUMMARY_LANGUAGE、
+        # ENTITY_TYPES 環境變數的預設值。LightRAG 整個取代預設的 addon_params，所以兩個鍵都要給。
+        "addon_params": {"language": settings.kb_language, "entity_types": list(settings.kb_entity_types)},
+    }
+    if settings.document_headers is not None:
+        # 有設標頭檔才換掉 LightRAG 預設的 chunker；沒設時 chunk 內容與數量和以前相同
+        lightrag_kwargs["chunking_func"] = chunking.chunk_by_headings
+    rag = LabRAGAnything(
         config=config,
         llm_model_func=models.llm_model_func,
         vision_model_func=models.vision_model_func,
         embedding_func=models.build_embedding_func(),
-        lightrag_kwargs={
-            "llm_model_max_async": settings.llm_max_async,
-            # ASSUMPTION：圖片／表格／公式描述的並行度（max_parallel_insert）不受 llm_model_max_async
-            # 限制，沿用同一個設定值，避免本地 server 被打爆。
-            "max_parallel_insert": settings.llm_max_async,
-            "embedding_func_max_async": settings.embed_max_async,
-            # rerank 函式必須在建立 LightRAG 時傳入：mix 等圖譜模式處理 chunk 時讀的是儲存層初始化時拿到的
-            # 設定副本，初始化之後才設不會生效（LightRAG 1.4.16）。匯入不會用到它。
-            "rerank_model_func": models.rerank_model_func,
-            "min_rerank_score": MIN_RERANK_SCORE,
-        },
+        lightrag_kwargs=lightrag_kwargs,
     )
+    rag.document_headers = settings.document_headers
+    return rag
 
 
 async def _close(rag: RAGAnything) -> None:

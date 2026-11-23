@@ -4,7 +4,7 @@
 這些內容不進版本控管，所以用這支腳本讓任何機器都能用一個指令重建同一批內容。
 
 用法：
-    python3 scripts/fetch_taishin.py [--out DIR] [--update]
+    python3 scripts/fetch_taishin.py [--out DIR] [--update] [--keep-names]
     預設輸出到 repo 根目錄下的 data/taishin_credit_card。
     不加 --update 時，本地已有的文件一律略過；加上 --update 是更新模式（見下面「更新模式」）。
 
@@ -32,6 +32,17 @@
   Richart 卡（信用卡）與 Richart 簽帳金融卡最容易被客戶搞混，所以兩種都要有；richart_ 前綴不寫 debit_，因為其中有信用卡的頁面。
 - Richart 優惠細則：上面兩頁連到的 /TSDIB_RichartWeb/discount/discount-details?discount=<id>，處理方式同卡片，
   放在 DIR/richart_discounts/，本地名稱 richart_discount_<id>。
+
+檔名帶卡片標籤（rag-optimization ticket 02）：
+- 文件的最終檔名是 <卡別>_<簡短卡名｜多卡｜全部>_<原檔名>，例如 信用卡_台新Richart卡_card_cg047_card001.pdf；本檔下面各處的「本地名稱」「檔名」
+  講的是原檔名（由網址決定）。標籤規則在 label_cards.py（含人工標籤檔 label_cards_manual.json）。
+- 標籤要比對全部類別的頁面（卡名清單來自所有卡片頁，附件與活動圖片沿用連到它的頁面），所以新文件這次執行裡先叫原檔名，
+  所有類別處理完、清單寫好之後，由 rename_documents.migrate（一次性遷移用的同一段程式）改名，並更新標籤檔與標頭檔
+  （_meta/document_labels.json、_meta/document_headers.json），清單與 stdout 的檔名都是改名後的。
+  沒有可用標籤的文件保留原檔名並在 stdout 列出，下次執行會再試；改名中止（檔名不安全、重複或被佔用）算失敗，結束碼 1。
+- 已經改過名的文件：document_filename 從資料夾現有檔名找出它現在叫什麼，所以「已存在略過」、「未變」、下架與主視覺名額照常運作。
+  已經有新檔名的文件不重新評估標籤（檔名穩定比跟著標籤變動重要）。
+- _meta/html、_meta/print 的快照檔名仍然用原檔名（由網址決定，不依賴標籤），下架時搬走的快照也是原檔名。
 
 輸出結構：
 - DIR/<類別資料夾>/：匯入知識庫的文件，每個類別一個資料夾（ingest 不遞迴，一次匯入一個資料夾）。
@@ -262,6 +273,7 @@
   （Chrome 的 JavaScript 已封鎖，LibreOffice 不執行腳本）。
 
 Dependencies: 標準函式庫；rag_lab.formats（專案內，只用標準函式庫，取圖片副檔名清單與「不是文件」的檔名開頭）；
+label_cards.py、rename_documents.py（同資料夾；它們用 tiktoken，LightRAG 已依賴，所以要用專案 venv 執行）；
 列印需要 Google Chrome，轉 .docx 需要 LibreOffice。
 """
 
@@ -291,6 +303,11 @@ from urllib.parse import ParseResult, parse_qs, quote, unquote, urljoin, urlpars
 # 要先把 repo 根目錄放進 sys.path 才找得到 rag_lab
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from rag_lab.formats import FORMATS, NOT_A_DOCUMENT_PREFIXES  # noqa: E402
+
+# 卡片標籤與改檔名用同資料夾的 label_cards.py、rename_documents.py（Python 執行腳本時，腳本所在資料夾已在 sys.path，這行是讓被 import 時也找得到）
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import label_cards  # noqa: E402
+import rename_documents  # noqa: E402
 
 # ==============================
 # 設定
@@ -1143,6 +1160,9 @@ class Run:
 
     collect_failures 是類別名稱對「找文件的過程中，單一項目失敗」的清單紀錄（金融卡卡片頁：某個群組落地頁找不到轉址目標或請求失敗）：
     collect 不拋出 FetchError（列表頁本身沒問題），其餘項目照常回傳；main 把這些紀錄加進清單，而且該類別這次不判斷下架。
+
+    current_names 是類別資料夾名稱對（原檔名對現在檔名），執行開始時掃描資料夾得到（index_current_names）：
+    之前改過名的文件，原檔名對到帶卡片標籤的檔名（document_filename 用它找出文件現在叫什麼）。
     """
 
     out: Path
@@ -1157,6 +1177,7 @@ class Run:
     found: dict[str, list[str]] = field(default_factory=dict)
     previous_banners: dict[str, str | None] = field(default_factory=dict)
     collect_failures: dict[str, list["Record"]] = field(default_factory=dict)
+    current_names: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def base(self, site: str) -> str:
         """網域代號對應的網址前綴。
@@ -1898,7 +1919,7 @@ def download_area_duplicate(run: Run, url: str) -> SkipDocument | None:
     downloads = run.found.get(DOWNLOADS.name, [])
     if url not in downloads:
         return None
-    in_downloads = f"{DOWNLOADS.local_names(downloads)[url]}.{DOWNLOADS.extension_of(url)}"
+    in_downloads = document_filename(run, DOWNLOADS, url, DOWNLOADS.local_names(downloads)[url])
     return SkipDocument(RESULT_DUPLICATE, f"同一個網址已在文件下載區，檔名 {in_downloads}")
 
 
@@ -2030,7 +2051,7 @@ def live_banners(run: Run) -> dict[str, str | None]:
     names = ACTIVITIES.local_names(activity_urls)
     live: dict[str, str | None] = {}
     for url in activity_urls:
-        pdf_path = run.out / ACTIVITIES.folder / f"{names[url]}.{ACTIVITIES.extension_of(url)}"
+        pdf_path = run.out / ACTIVITIES.folder / document_filename(run, ACTIVITIES, url, names[url])
         raw_path = run.out / "_meta" / "html" / f"{names[url]}.html"
         if not (pdf_path.is_file() and raw_path.is_file()):
             continue
@@ -2089,8 +2110,8 @@ def replaced_banners(run: Run, live: dict[str, str | None]) -> set[str]:
         previous = run.previous_banners.get(activity)
         if banner is None or previous is None or previous == banner:
             continue
-        if document_filename(IMAGES, banner, names[banner]) == document_filename(
-            IMAGES, previous, IMAGES.local_name(previous)
+        if document_filename(run, IMAGES, banner, names[banner]) == document_filename(
+            run, IMAGES, previous, IMAGES.local_name(previous)
         ):
             replaced.add(banner)
     return replaced
@@ -2110,7 +2131,7 @@ def remove_replaced_images(run: Run, urls: list[str]) -> list[Record]:
     """
     replaced = replaced_banners(run, live_banners(run))
     names = IMAGES.local_names(banner_universe(run))
-    filenames = [document_filename(IMAGES, url, names[url]) for url in urls if url in replaced]
+    filenames = [document_filename(run, IMAGES, url, names[url]) for url in urls if url in replaced]
     return [
         move_removed(run, IMAGES, filename, reason="活動換了主視覺網址，舊圖搬走")
         for filename in filenames
@@ -2141,7 +2162,7 @@ def collect_banners_to_fill(run: Run) -> list[str]:
         banner
         for banner in banners
         if (
-            (run.out / IMAGES.folder / document_filename(IMAGES, banner, names[banner])).is_file()
+            (run.out / IMAGES.folder / document_filename(run, IMAGES, banner, names[banner])).is_file()
             and banner not in replaced
         )
         or f".{IMAGES.extension_of(banner)}" not in SUPPORTED_IMAGE_EXTENSIONS
@@ -2510,19 +2531,47 @@ CATEGORIES = (
 REMOVAL_CATEGORIES = (CARDS, RIGHTS, DOWNLOADS, ACTIVITIES, DEBIT_CARDS, DEBIT_TERMS, RICHART_DISCOUNTS)
 
 
-def document_filename(category: Category, url: str, name: str) -> str:
-    """文件在類別資料夾裡的檔名。
+def document_filename(run: Run, category: Category, url: str, name: str) -> str:
+    """文件在類別資料夾裡現在的檔名。
+
+    新抓的文件這一次執行裡叫原檔名（name 加副檔名）：卡片標籤要等所有類別都下載完（比對卡名要用全部卡片頁，
+    附件與活動圖片沿用連到它的頁面）才算得出來，所以改名放在執行的最後一步（rename_documents.migrate）。
+    之前的執行已經改過名的文件，資料夾裡的檔名是 <卡別>_<簡短卡名>_<原檔名>，回傳那個檔名，
+    判斷「已存在略過」、「未變」、下架與主視覺名額都因此照常運作。
 
     Args:
+        run: 一次執行共用的設定（current_names 是開始時資料夾裡現有檔名的對照）。
         category: 文件所屬的類別。
         url: 文件完整網址。
         name: 本地名稱（不含副檔名）。
 
     Returns:
-        name 加上副檔名；沒有副檔名時就是 name。
+        資料夾裡已有帶標籤檔名時是那個檔名；否則是 name 加上副檔名（沒有副檔名時就是 name）。
     """
     extension = category.extension_of(url)
-    return f"{name}.{extension}" if extension else name
+    original = f"{name}.{extension}" if extension else name
+    return run.current_names.get(category.folder, {}).get(original, original)
+
+
+def index_current_names(out: Path) -> dict[str, dict[str, str]]:
+    """各類別資料夾裡現有檔案的「原檔名對現在檔名」對照。
+
+    Args:
+        out: 資料根目錄。
+
+    Returns:
+        類別資料夾名稱對（原檔名對現在檔名）；沒有改過名的檔案原檔名就是現在檔名；資料夾不存在時為空字典。
+    """
+    index: dict[str, dict[str, str]] = {}
+    for category in CATEGORIES:
+        folder = out / category.folder
+        if folder.is_dir():
+            index[category.folder] = {
+                label_cards.original_filename(p.name): p.name
+                for p in folder.iterdir()
+                if p.is_file() and not p.name.startswith(NOT_A_DOCUMENT_PREFIXES)
+            }
+    return index
 
 
 def fetch_document(run: Run, category: Category, url: str, name: str) -> Record:
@@ -2537,7 +2586,7 @@ def fetch_document(run: Run, category: Category, url: str, name: str) -> Record:
     Returns:
         下載清單的一筆紀錄；失敗時 result 是「失敗」，detail 是原因。
     """
-    filename = document_filename(category, url, name)
+    filename = document_filename(run, category, url, name)
     record = Record(url, category.name, filename, category.fmt, run.today.isoformat(), "", "", RESULT_FAILED, "")
     target = run.out / category.folder / filename
     raw_path = run.out / "_meta" / "html" / f"{name}.html"
@@ -2647,7 +2696,7 @@ def move_removed(
     Returns:
         結果是 result 的清單紀錄；搬移時發生檔案系統錯誤則是「失敗」，detail 寫出原因。
     """
-    name = Path(filename).stem
+    name = Path(label_cards.original_filename(filename)).stem
     meta = run.out / "_meta"
     destination_root = meta / "removed" / run.today.isoformat()
     document = run.out / category.folder / filename
@@ -2703,7 +2752,7 @@ def remove_unreferenced_images(run: Run) -> list[Record]:
         return []
     referenced = banner_universe(run)
     names = IMAGES.local_names(referenced)
-    kept = {document_filename(IMAGES, url, names[url]) for url in referenced}
+    kept = {document_filename(run, IMAGES, url, names[url]) for url in referenced}
     return [
         move_removed(run, IMAGES, filename, reason="沒有任何仍在的活動使用這張圖片")
         for filename in local_documents(run, IMAGES)
@@ -2785,7 +2834,7 @@ def remove_unlinked_attachments(
         failed_lists.append(category.list_name)
         return []
     names = category.local_names(urls)
-    return remove_missing(run, category, {document_filename(category, url, names[url]) for url in urls})
+    return remove_missing(run, category, {document_filename(run, category, url, names[url]) for url in urls})
 
 
 # ==============================
@@ -2805,6 +2854,36 @@ def write_manifest(out: Path, records: list[Record]) -> None:
     manifest.write_text(
         "".join(json.dumps(asdict(r), ensure_ascii=False) + "\n" for r in records), encoding="utf-8"
     )
+
+
+def apply_label_names(out: Path, records: list[Record]) -> bool:
+    """所有類別都處理完、清單寫好之後，把有卡片標籤的新文件改成帶標籤的檔名，並更新標籤檔與標頭檔。
+
+    用 rename_documents.migrate（遷移現有資料用的同一段程式，標籤規則是 label_cards.py，含人工標籤檔）。
+    已經是新檔名的文件不再改。改名之後 records 的檔名也換成新檔名（清單檔已由 migrate 同步改過）。
+    沒有標籤的文件保留原檔名並印出清單，這不算失敗；新檔名不安全、重複或被佔用時整批不改名，印出原因，算失敗。
+
+    Args:
+        out: 資料根目錄。
+        records: 這次執行的紀錄，改名後檔名就地更新。
+
+    Returns:
+        True 表示改名中止（結束碼要是 1）；其餘為 False。
+    """
+    manual = json.loads(label_cards.MANUAL_LABELS_PATH.read_text(encoding="utf-8"))
+    try:
+        report = rename_documents.migrate(out, manual)
+    except ValueError as exc:
+        print(f"ERROR 依卡片標籤改檔名中止，所有文件保留原檔名：{exc}", file=sys.stderr)
+        return True
+    folders = {category.name: category.folder for category in CATEGORIES}
+    for r in records:
+        r.filename = report.renamed.get(f"{folders[r.category]}/{r.filename}", r.filename)
+    kept = [(path, reason) for path, reason in report.kept if (out / path).is_file()]
+    print(f"依卡片標籤改檔名：改名 {len(report.renamed)} 份，保留原檔名 {len(kept)} 份（沒有可用的標籤）")
+    for path, reason in kept:
+        print(f"  {path}：{reason}")
+    return False
 
 
 def print_summary(records: list[Record]) -> None:
@@ -2828,7 +2907,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         argv: 不含程式名稱的參數清單。
 
     Returns:
-        含 out（Path）與 update（bool）的 Namespace。
+        含 out（Path）、update（bool）與 keep_names（bool）的 Namespace。
     """
     parser = argparse.ArgumentParser(description="下載台新銀行信用卡官網的內容，作為知識庫的來源文件。")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help=f"輸出資料夾（預設 {DEFAULT_OUT}）")
@@ -2836,6 +2915,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--update",
         action="store_true",
         help="更新模式：已存在的下載區 PDF、權益附件與網頁類重新取得並比對內容，不同才換掉；官網列表已沒有的文件、已過期的活動、所有權益子頁都不再連到的附件搬到 _meta/removed/<日期>/，活動圖片跟著活動走；結束時印出各類別、各結果的數量",
+    )
+    parser.add_argument(
+        "--keep-names",
+        action="store_true",
+        help="不依卡片標籤改檔名，新文件保留原檔名（只下載；之前已經改過名的文件仍然認得，不會重抓）",
     )
     return parser.parse_args(argv)
 
@@ -2867,7 +2951,16 @@ def main(argv: list[str]) -> int:
         print(f"ERROR --out {args.out} 已存在但不是資料夾", file=sys.stderr)
         return 2
     run = Run(
-        args.out, www, mkpcard, mkp, richart, Fetcher(interval), Tools(chrome, find_office()), date.today(), args.update
+        args.out,
+        www,
+        mkpcard,
+        mkp,
+        richart,
+        Fetcher(interval),
+        Tools(chrome, find_office()),
+        date.today(),
+        args.update,
+        current_names=index_current_names(args.out),
     )
 
     records: list[Record] = []
@@ -2910,7 +3003,7 @@ def main(argv: list[str]) -> int:
         records.extend(fetch_document(run, category, url, names[url]) for url in urls)
         records.extend(collect_failures)
         if removable:
-            listed = {document_filename(category, url, names[url]) for url in urls}
+            listed = {document_filename(run, category, url, names[url]) for url in urls}
             records.extend(remove_missing(run, category, listed))
         elif run.update and category is ATTACHMENTS:
             records.extend(remove_unlinked_attachments(run, category, urls, records, failed_lists))
@@ -2918,6 +3011,7 @@ def main(argv: list[str]) -> int:
         records.extend(remove_unreferenced_images(run))
 
     write_manifest(args.out, records)
+    rename_failed = False if args.keep_names else apply_label_names(args.out, records)
     for r in records:
         print(f"{r.result} {r.category} {r.filename}")
     failed = [r for r in records if r.result == RESULT_FAILED]
@@ -2925,7 +3019,7 @@ def main(argv: list[str]) -> int:
         print(f"FAILED {r.url}（{r.filename}）：{r.detail}", file=sys.stderr)
     if args.update:
         print_summary(records)
-    return 1 if failed or failed_lists else 0
+    return 1 if failed or failed_lists or rename_failed else 0
 
 
 if __name__ == "__main__":

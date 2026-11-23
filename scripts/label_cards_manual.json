@@ -1,0 +1,868 @@
+{
+  "debit_info/debit_info_TSBankGridPage-000001.pdf": {
+    "kind": "金融卡",
+    "cards": [
+      "全部金融卡"
+    ],
+    "decision": "r031 照建議"
+  },
+  "debit_info/debit_info_TSBankGridPage-000004.pdf": {
+    "kind": "金融卡",
+    "cards": [
+      "全部金融卡"
+    ],
+    "decision": "r030 照建議"
+  },
+  "debit_info/debit_info_TSBankGridPage-000340.pdf": {
+    "kind": "金融卡",
+    "cards": [
+      "全部金融卡"
+    ],
+    "decision": "r032 照建議"
+  },
+  "debit_info/debit_info_card-list.pdf": {
+    "kind": "金融卡",
+    "cards": [
+      "全部金融卡"
+    ],
+    "decision": "r033 照建議"
+  },
+  "debit_terms/debit_term_DM23_11110.pdf": {
+    "kind": "金融卡",
+    "cards": [
+      "VISA金融卡"
+    ],
+    "decision": "Q47"
+  },
+  "debit_terms/debit_term_Debit-11312.pdf": {
+    "kind": "金融卡",
+    "cards": [
+      "全部金融卡"
+    ],
+    "decision": "r068 自訂"
+  },
+  "debit_terms/debit_term__11504.pdf": {
+    "kind": "金融卡",
+    "cards": [
+      "VISA金融卡"
+    ],
+    "decision": "r065 自訂"
+  },
+  "debit_terms/debit_term_laborcard_11110.pdf": {
+    "kind": "金融卡",
+    "cards": [
+      "勞動保障卡"
+    ],
+    "decision": "r067 自訂"
+  },
+  "downloads/download_-_11407.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "雙幣信用卡"
+    ],
+    "decision": "r045 自訂"
+  },
+  "downloads/download_01BENZ_Assignment_Company.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "Mercedes-Benz卡"
+    ],
+    "decision": "r054 照建議"
+  },
+  "downloads/download_01_11502.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r050 照建議"
+  },
+  "downloads/download_02BENZ_Assignment_individual.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "Mercedes-Benz卡"
+    ],
+    "decision": "r052 照建議"
+  },
+  "downloads/download_02_11502.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r051 照建議"
+  },
+  "downloads/download_03BENZ_Assignment_lease.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "Mercedes-Benz卡"
+    ],
+    "decision": "r053 照建議"
+  },
+  "downloads/download_11210.pdf": {
+    "kind": "金融卡",
+    "cards": [
+      "VISA金融卡"
+    ],
+    "decision": "r057 自訂"
+  },
+  "downloads/download_115001.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r044 照建議"
+  },
+  "downloads/download_121_1150A.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r042 照建議"
+  },
+  "downloads/download_12_1150A.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r041 照建議"
+  },
+  "downloads/download_2.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r048 照建議"
+  },
+  "downloads/download_CreditCard_113001changev1.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r049 照建議"
+  },
+  "downloads/download_DDAccount_11408.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r046 照建議"
+  },
+  "downloads/download_TSBmember20250801.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r047 照建議"
+  },
+  "downloads/download__115_001final.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r043 自訂"
+  },
+  "downloads/download___11507.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r040 自訂"
+  },
+  "downloads/download_eTag-form_20251217.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r056 照建議"
+  },
+  "downloads/download_eTag-smartParking_20251217.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r055 照建議"
+  },
+  "downloads/download_word_CR04131_1150B.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r039 自訂"
+  },
+  "offers/offer_WM_20211227190506574.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r026 自訂"
+  },
+  "offers/offer_WM_20241101134658243.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r019 照建議"
+  },
+  "offers/offer_WM_20241218145133730.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r028 照建議"
+  },
+  "offers/offer_WM_20250205134529535.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "雙幣信用卡",
+      "卓富無限卡",
+      "新光三越無限・世界卡",
+      "環球無限卡",
+      "財富無限卡",
+      "昇恆昌無限卡",
+      "國泰航空世界卡",
+      "尊爵世界卡",
+      "台新商務卡",
+      "Mercedes-Benz無限卡"
+    ],
+    "decision": "n096"
+  },
+  "offers/offer_WM_20250214185854842.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "卓富無限卡",
+      "環球無限卡",
+      "財富無限卡",
+      "昇恆昌無限卡",
+      "國泰航空世界卡",
+      "尊爵世界卡",
+      "台新商務卡",
+      "Mercedes-Benz無限卡"
+    ],
+    "decision": "n097"
+  },
+  "offers/offer_WM_20250214192114227.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "Q45"
+  },
+  "offers/offer_WM_20250422161906960.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "Mercedes-Benz無限卡",
+      "Mercedes-Benz御璽卡",
+      "Mercedes-Benz卡"
+    ],
+    "decision": "n106"
+  },
+  "offers/offer_WM_20250616161533342.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡"
+    ],
+    "decision": "n094"
+  },
+  "offers/offer_WM_20250926110926585.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡"
+    ],
+    "decision": "n091"
+  },
+  "offers/offer_WM_20251126124921069.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r027 照建議"
+  },
+  "offers/offer_WM_20251201151211372.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡"
+    ],
+    "decision": "n108"
+  },
+  "offers/offer_WM_20251217103616886.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡"
+    ],
+    "decision": "n088"
+  },
+  "offers/offer_WM_20251217114201914.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡"
+    ],
+    "decision": "n090"
+  },
+  "offers/offer_WM_20251217171924259.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡"
+    ],
+    "decision": "n086"
+  },
+  "offers/offer_WM_20251217172014146.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡"
+    ],
+    "decision": "n087"
+  },
+  "offers/offer_WM_20251222172022316.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "Q46"
+  },
+  "offers/offer_WM_20251223163451011.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡"
+    ],
+    "decision": "n114"
+  },
+  "offers/offer_WM_20260127174827192.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡",
+      "Mercedes-Benz無限卡",
+      "Mercedes-Benz御璽卡"
+    ],
+    "decision": "n092"
+  },
+  "offers/offer_WM_20260223113511810.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡"
+    ],
+    "decision": "n085"
+  },
+  "offers/offer_WM_20260223135657837.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡"
+    ],
+    "decision": "n113"
+  },
+  "offers/offer_WM_20260409202553914.pdf": {
+    "kind": "信用卡及金融卡",
+    "cards": [
+      "全部信用卡",
+      "全部金融卡"
+    ],
+    "decision": "Q51"
+  },
+  "offers/offer_WM_20260504094851174.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡"
+    ],
+    "decision": "n089"
+  },
+  "offers/offer_WM_20260617154220478.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡"
+    ],
+    "decision": "n082"
+  },
+  "offers/offer_WM_20260618145136833.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡"
+    ],
+    "decision": "n083"
+  },
+  "offers/offer_WM_20260618154039349.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡"
+    ],
+    "decision": "n084"
+  },
+  "offers/offer_WM_20260814142513557.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡",
+      "新光三越御璽・鈦金・白金卡"
+    ],
+    "decision": "n104/n105 備註排除無限、世界卡"
+  },
+  "offers/offer_WM_20260814165339540.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "n103"
+  },
+  "offers/offer_WM_20260825153618620.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r020 照建議"
+  },
+  "offers/offer_WM_20260827085916289.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡"
+    ],
+    "decision": "n111"
+  },
+  "offers/offer_WM_20260904135821958.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r022 照建議"
+  },
+  "offers/offer_WM_20260907090737422.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r023 照建議"
+  },
+  "offers/offer_WM_20260907171825366.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡"
+    ],
+    "decision": "n110"
+  },
+  "offers/offer_WM_20260907173036187.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r024 照建議"
+  },
+  "offers/offer_WM_20260908095400961.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡"
+    ],
+    "decision": "n095"
+  },
+  "offers/offer_WM_20260914193622109.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "新光三越御璽・鈦金・白金卡",
+      "新光三越無限・世界卡"
+    ],
+    "decision": "r021 自訂（新光三越聯名卡＝兩張子卡）"
+  },
+  "offers/offer_WM_20260916152419066.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r029 照建議"
+  },
+  "offers/offer_WM_20260923083738683.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡"
+    ],
+    "decision": "n109"
+  },
+  "offers/offer_WM_20261019143429997.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡"
+    ],
+    "decision": "n107"
+  },
+  "offers/offer_WM_20261021081848727.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r025 照建議"
+  },
+  "offers/offer_WM_20261028185348920.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r018 自訂"
+  },
+  "richart_discounts/richart_discount_278.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡",
+      "玫瑰卡",
+      "太陽卡"
+    ],
+    "decision": "n118"
+  },
+  "richart_discounts/richart_discount_350.pdf": {
+    "kind": "金融卡",
+    "cards": [
+      "Richart簽帳金融卡"
+    ],
+    "decision": "n116"
+  },
+  "richart_discounts/richart_discount_353.pdf": {
+    "kind": "金融卡",
+    "cards": [
+      "Richart簽帳金融卡"
+    ],
+    "decision": "n117"
+  },
+  "richart_discounts/richart_discount_355.pdf": {
+    "kind": "金融卡",
+    "cards": [
+      "Richart簽帳金融卡"
+    ],
+    "decision": "Q44"
+  },
+  "richart_discounts/richart_discount_357.pdf": {
+    "kind": "金融卡",
+    "cards": [
+      "Richart簽帳金融卡"
+    ],
+    "decision": "Q44"
+  },
+  "richart_discounts/richart_discount_358.pdf": {
+    "kind": "金融卡",
+    "cards": [
+      "Richart簽帳金融卡"
+    ],
+    "decision": "Q44"
+  },
+  "richart_discounts/richart_discount_386.pdf": {
+    "kind": "金融卡",
+    "cards": [
+      "Richart簽帳金融卡"
+    ],
+    "decision": "Q44"
+  },
+  "richart_discounts/richart_discount_387.pdf": {
+    "kind": "金融卡",
+    "cards": [
+      "Richart簽帳金融卡"
+    ],
+    "decision": "Q44"
+  },
+  "richart_discounts/richart_discount_399.pdf": {
+    "kind": "金融卡",
+    "cards": [
+      "Richart簽帳金融卡"
+    ],
+    "decision": "n115"
+  },
+  "rights/rights_favorable_right0501.docx": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡",
+      "雙幣信用卡",
+      "卓富無限卡",
+      "新光三越無限・世界卡",
+      "環球無限卡",
+      "財富無限卡",
+      "昇恆昌無限卡",
+      "國泰航空世界卡",
+      "尊爵世界卡",
+      "台新商務卡",
+      "Mercedes-Benz無限卡"
+    ],
+    "decision": "Q50 沿用 offer_WM_20221229194111856"
+  },
+  "rights/rights_favorable_right0504.docx": {
+    "kind": "信用卡",
+    "cards": [
+      "雙幣信用卡",
+      "卓富無限卡",
+      "環球無限卡",
+      "昇恆昌無限卡",
+      "國泰航空世界卡",
+      "尊爵世界卡",
+      "台新商務卡",
+      "Mercedes-Benz無限卡",
+      "Mercedes-Benz御璽卡"
+    ],
+    "decision": "n081"
+  },
+  "rights/rights_insurance_right0204.docx": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r002 自訂"
+  },
+  "rights/rights_international_secretary.docx": {
+    "kind": "信用卡",
+    "cards": [
+      "台新VISA、MASTERCARD、JCB白金以上等級信用卡"
+    ],
+    "decision": "Q49"
+  },
+  "rights/rights_notice_-00001.docx": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r017 照建議"
+  },
+  "rights/rights_notice_right0901.docx": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r013 自訂"
+  },
+  "rights/rights_notice_right0903.docx": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r014 自訂"
+  },
+  "rights/rights_notice_right0906.docx": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r015 照建議"
+  },
+  "rights/rights_notice_right0907.docx": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r016 照建議"
+  },
+  "rights/rights_oversea_right0101.docx": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡",
+      "昇恆昌御璽・白金・普卡",
+      "國泰航空翱翔鈦金卡・鈦金卡",
+      "遠傳friDay聯名卡",
+      "雙幣信用卡",
+      "玫瑰卡",
+      "太陽卡",
+      "卓富無限卡",
+      "新光三越無限・世界卡",
+      "環球無限卡",
+      "財富無限卡",
+      "昇恆昌無限卡",
+      "國泰航空世界卡",
+      "尊爵世界卡",
+      "台新商務卡",
+      "Mercedes-Benz無限卡",
+      "Mercedes-Benz御璽卡",
+      "Mercedes-Benz白金卡"
+    ],
+    "decision": "n069"
+  },
+  "rights/rights_oversea_right0106.docx": {
+    "kind": "信用卡",
+    "cards": [
+      "國泰航空翱翔鈦金卡・鈦金卡",
+      "玫瑰卡",
+      "太陽卡",
+      "卓富無限卡",
+      "環球無限卡",
+      "財富無限卡",
+      "昇恆昌無限卡",
+      "國泰航空世界卡",
+      "Mercedes-Benz無限卡"
+    ],
+    "decision": "n070,n071,n072,n073"
+  },
+  "rights/rights_oversea_right0107.docx": {
+    "kind": "信用卡",
+    "cards": [
+      "台新VISA、JCB信用卡"
+    ],
+    "decision": "Q49"
+  },
+  "rights/rights_oversea_right0108.docx": {
+    "kind": "信用卡及金融卡",
+    "cards": [
+      "全部信用卡",
+      "全部金融卡"
+    ],
+    "decision": "Q51"
+  },
+  "rights/rights_parking_right0301.docx": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡",
+      "大全聯信用卡",
+      "昇恆昌御璽・白金・普卡",
+      "玫瑰卡",
+      "太陽卡",
+      "卓富無限卡",
+      "新光三越無限・世界卡",
+      "美麗華聯名卡",
+      "環球無限卡",
+      "財富無限卡",
+      "昇恆昌無限卡",
+      "國泰航空世界卡",
+      "尊爵世界卡",
+      "台新商務卡",
+      "Mercedes-Benz無限卡",
+      "Mercedes-Benz御璽卡",
+      "Mercedes-Benz白金卡",
+      "比漾聯名卡",
+      "棉花田聯名卡"
+    ],
+    "decision": "n074"
+  },
+  "rights/rights_parking_right0302.docx": {
+    "kind": "信用卡",
+    "cards": [
+      "雙幣信用卡",
+      "環球無限卡",
+      "尊爵世界卡",
+      "台新商務卡"
+    ],
+    "decision": "n075,n076,n077"
+  },
+  "rights/rights_parking_right0305.docx": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡",
+      "玫瑰卡",
+      "太陽卡"
+    ],
+    "decision": "n078,n079,n080"
+  },
+  "rights/rights_payment_apple-pay.docx": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r007 自訂"
+  },
+  "rights/rights_payment_garmin-pay.docx": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r010 自訂"
+  },
+  "rights/rights_payment_google-pay.docx": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r009 自訂"
+  },
+  "rights/rights_payment_mobile-device.docx": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r011 自訂"
+  },
+  "rights/rights_payment_samsung-pay.docx": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r008 自訂"
+  },
+  "rights/rights_payment_twmp.docx": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r012 自訂"
+  },
+  "rights/rights_right_right0702.docx": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r005 自訂"
+  },
+  "rights/rights_right_right0705.docx": {
+    "kind": "信用卡",
+    "cards": [
+      "企業卡"
+    ],
+    "decision": "r006 自訂"
+  },
+  "rights_attachments/attachment_IS_APPLY1_20260626.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r059 照建議"
+  },
+  "rights_attachments/attachment_IS_APPLY_NC_20260626.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "全部信用卡"
+    ],
+    "decision": "r058 照建議"
+  },
+  "rights_attachments/attachment_TSCC-11312.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "環球無限卡",
+      "國泰航空世界卡",
+      "國泰航空翱翔鈦金卡・鈦金卡",
+      "台新商務卡",
+      "雙幣信用卡",
+      "新光三越御璽・鈦金・白金卡",
+      "昇恆昌御璽・白金・普卡",
+      "大全聯信用卡",
+      "棉花田聯名卡",
+      "比漾聯名卡",
+      "台新Richart卡"
+    ],
+    "decision": "r060 自訂（全家Richart聯名卡＝台新Richart卡；smart聯名卡、輔仁大學認同卡不列）"
+  },
+  "rights_attachments/attachment_corporate-Member-Agreement-Terms-202405.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "企業卡"
+    ],
+    "decision": "r064 自訂"
+  },
+  "rights_attachments/attachment_easrcard.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "環球無限卡",
+      "國泰航空世界卡",
+      "國泰航空翱翔鈦金卡・鈦金卡",
+      "台新商務卡",
+      "雙幣信用卡",
+      "新光三越御璽・鈦金・白金卡",
+      "昇恆昌御璽・白金・普卡",
+      "大全聯信用卡",
+      "棉花田聯名卡",
+      "比漾聯名卡",
+      "台新Richart卡"
+    ],
+    "decision": "r061 自訂（全家Richart聯名卡＝台新Richart卡；smart聯名卡、輔仁大學認同卡不列）"
+  },
+  "rights_attachments/attachment_icash-11312.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡"
+    ],
+    "decision": "Q48"
+  },
+  "rights_attachments/attachment_ipass-11312.pdf": {
+    "kind": "信用卡",
+    "cards": [
+      "台新Richart卡",
+      "遠傳friDay聯名卡",
+      "新光三越御璽・鈦金・白金卡",
+      "新光三越無限・世界卡",
+      "燦坤聯名卡",
+      "SKM Park Outlets聯名卡"
+    ],
+    "decision": "r063 自訂"
+  }
+}

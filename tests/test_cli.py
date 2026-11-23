@@ -4,7 +4,7 @@
 註冊都只透過 CLI 的外部行為觀察，不 import rag_lab 內部模組。
 
 關鍵設計決策：
-- 測試直接設定環境變數，不依賴 .env 檔。「缺漏」以空字串模擬：config 的
+- 測試直接設定環境變數，不依賴 .env 檔（tests/__init__.py 關掉 .env 載入；測 .env 行為的測試用 DOTENV_ENABLED 打開）。「缺漏」以空字串模擬：config 的
   load_dotenv 不覆蓋既有變數，所以空字串能擋住任何殘留的 .env 補值。
 - 子行程環境先清掉所有設定欄位，再放入有效的基準設定，避免開發機環境汙染結果。
 
@@ -21,6 +21,9 @@ from pathlib import Path
 from tests.fake_openai_server import FakeOpenAIServer
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# 測 .env 行為的測試用：蓋掉 tests/__init__.py 的 PYTHON_DOTENV_DISABLED=1
+DOTENV_ENABLED = {"PYTHON_DOTENV_DISABLED": "0"}
 
 # ==============================
 # 設定欄位（獨立於 rag_lab.config 的字面清單，來源為 spec／.env.example）
@@ -49,11 +52,15 @@ TEXT_FIELDS = (
     "RERANK_API_KEY",
     "WORKING_DIR",
     "PARSER_OUTPUT_DIR",
+    "KB_LANGUAGE",
+    "KB_ENTITY_TYPES",
 )
 REQUIRED_FIELDS = URL_FIELDS + INT_FIELDS + NON_NEGATIVE_INT_FIELDS + TEXT_FIELDS
-OPTIONAL_FIELDS = ("EMBED_QUERY_PREFIX",)
+OPTIONAL_FIELDS = ("EMBED_QUERY_PREFIX", "DOCUMENT_HEADERS_FILE")
 
 SECRET = "sk-TOP-SECRET-0123"
+# spec「語言與實體類型」指定的實體類型（逗號分隔）
+KB_ENTITY_TYPES = "卡片,權益,回饋方案,回饋規則,費用,約定條款,活動,商店或通路,支付工具,機構"
 
 
 # ==============================
@@ -92,6 +99,8 @@ def valid_env(base_url: str = "http://127.0.0.1:9/v1") -> dict[str, str]:
             "RERANK_API_KEY": SECRET,
             "WORKING_DIR": "./rag_storage",
             "PARSER_OUTPUT_DIR": "./output",
+            "KB_LANGUAGE": "Traditional Chinese",
+            "KB_ENTITY_TYPES": KB_ENTITY_TYPES,
         }
     )
     return env
@@ -206,6 +215,37 @@ class ConfigValidationTest(unittest.TestCase):
                     self.assertIn(field, result.stderr)
         result = run_cli(["eval", "q.jsonl"], {**overrides, "QUERY_MAX_RELATION_TOKENS": "6999"})
         self.assertNotIn("設定錯誤", result.stderr)
+
+    def test_document_headers_file_must_exist_and_be_a_json_object_of_non_empty_strings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad_files = {
+                "missing": Path(tmp) / "no-such.json",
+                "not json": Path(tmp) / "broken.json",
+                "array": Path(tmp) / "array.json",
+                "non-string value": Path(tmp) / "number.json",
+                "empty value": Path(tmp) / "empty.json",
+                "malformed header": Path(tmp) / "format.json",
+            }
+            bad_files["not json"].write_text("{" + SECRET, encoding="utf-8")
+            bad_files["array"].write_text('["a.pdf"]', encoding="utf-8")
+            bad_files["non-string value"].write_text('{"a.pdf": 3}', encoding="utf-8")
+            bad_files["empty value"].write_text('{"a.pdf": "  "}', encoding="utf-8")
+            bad_files["malformed header"].write_text('{"a.pdf": "信用卡：甲卡、乙卡"}', encoding="utf-8")
+            for case, path in bad_files.items():
+                with self.subTest(case=case):
+                    result = run_cli(["eval", "q.jsonl"], {"DOCUMENT_HEADERS_FILE": str(path)})
+                    self.assert_config_rejected(result, "DOCUMENT_HEADERS_FILE")
+                    self.assertNotIn(SECRET, result.stdout + result.stderr)
+
+    def test_valid_document_headers_file_is_accepted_and_unset_is_allowed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "headers.json"
+            path.write_text('{"a.pdf": "卡別：信用卡｜適用卡片：甲卡"}', encoding="utf-8")
+            for overrides in ({"DOCUMENT_HEADERS_FILE": str(path)}, {}):
+                with self.subTest(overrides=bool(overrides)):
+                    result = run_cli(["eval", "q.jsonl"], overrides)
+                    self.assertIn("輸入錯誤", result.stderr)
+                    self.assertNotIn("設定錯誤", result.stderr)
 
     def test_error_output_never_contains_field_values(self):
         leaky = {
@@ -336,7 +376,7 @@ class UnmanagedLightragEnvTest(unittest.TestCase):
         # MinerU 子行程繼承 rag_lab 行程的環境，.env 的內容經 load_dotenv 進入行程環境
         with tempfile.TemporaryDirectory() as cwd:
             Path(cwd, ".env").write_text("MINERU_TABLE_ENABLE=false\n", encoding="utf-8")
-            result = run_cli(["eval", "q.jsonl"], {"PYTHONPATH": str(REPO_ROOT)}, cwd=Path(cwd))
+            result = run_cli(["eval", "q.jsonl"], DOTENV_ENABLED | {"PYTHONPATH": str(REPO_ROOT)}, cwd=Path(cwd))
         self.assert_rejected_naming(result, ("MINERU_TABLE_ENABLE",))
         self.assertNotIn("false", result.stderr)
 
@@ -366,7 +406,7 @@ class UnmanagedLightragEnvTest(unittest.TestCase):
         # LightRAG 在 import 時讀的是目前工作目錄的 .env，不是 repo 根目錄的
         with tempfile.TemporaryDirectory() as cwd:
             Path(cwd, ".env").write_text("CHUNK_SIZE=300\n", encoding="utf-8")
-            result = run_cli(["eval", "q.jsonl"], {"PYTHONPATH": str(REPO_ROOT)}, cwd=Path(cwd))
+            result = run_cli(["eval", "q.jsonl"], DOTENV_ENABLED | {"PYTHONPATH": str(REPO_ROOT)}, cwd=Path(cwd))
         self.assert_rejected_naming(result, ("CHUNK_SIZE",))
         self.assertNotIn("300", result.stderr)
 

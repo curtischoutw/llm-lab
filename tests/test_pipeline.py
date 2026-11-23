@@ -18,6 +18,7 @@
 Dependencies: 標準函式庫；Pillow（RAG-Anything 的依賴，只用來產生測試用的小圖）。
 """
 
+import asyncio
 import hashlib
 import json
 import os
@@ -31,6 +32,7 @@ import tempfile
 import unittest
 from html.parser import HTMLParser
 from pathlib import Path
+from unittest import mock
 
 import tiktoken
 from PIL import Image
@@ -308,6 +310,43 @@ class PipelineCase(unittest.TestCase):
     def query(self, question: str = "What is Fake Entity Alpha?", *extra: str, **overrides: str):
         """執行 `query`。"""
         return run_cli(["query", question, *extra], self.env(**overrides), timeout=INGEST_TIMEOUT)
+
+
+# ==============================
+# 語言與實體類型（build_rag 傳給 LightRAG 的 addon_params）
+# ==============================
+
+
+class BuildRagAddonParamsTest(unittest.TestCase):
+    """build_rag 建出的 LightRAG 實例用設定裡的語言與實體類型，不是 LightRAG 的預設值。"""
+
+    def test_lightrag_instance_gets_language_and_entity_types_from_settings(self):
+        from rag_lab import config, pipeline
+
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        env = valid_env() | {
+            "WORKING_DIR": str(tmp / "rag_storage"),
+            "PARSER_OUTPUT_DIR": str(tmp / "output"),
+            "KB_LANGUAGE": "Traditional Chinese",
+            "KB_ENTITY_TYPES": " 卡片 ,權益,回饋方案",
+        }
+        config.get_settings.cache_clear()
+        self.addCleanup(config.get_settings.cache_clear)
+        # 保留 PATH：初始化時 RAG-Anything 會執行 mineru --version
+        with mock.patch.dict(os.environ, env | {"PATH": os.environ["PATH"]}, clear=True):
+            rag = pipeline.build_rag(config.get_settings())
+
+            async def addon_params() -> dict:
+                await pipeline._initialize(rag)
+                try:
+                    return dict(rag.lightrag.addon_params)
+                finally:
+                    await pipeline._close(rag)
+
+            params = asyncio.run(addon_params())
+        self.assertEqual(params["language"], "Traditional Chinese")
+        self.assertEqual(params["entity_types"], ["卡片", "權益", "回饋方案"])
 
 
 # ==============================
@@ -1631,6 +1670,162 @@ class UnreachableEndpointTest(PipelineCase):
         result = self.ingest(LLM_BASE_URL=closed_port_url())
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn(SECRET, result.stdout + result.stderr)
+
+
+# ==============================
+# chunk 標頭與依標題切塊（DOCUMENT_HEADERS_FILE）
+# ==============================
+
+# 假 mineru 輸出的文字（tests/fake_mineru.py）：一個標題與一段內文，兩者合起來不到 100 token，所以是一個 chunk
+FAKE_HEADING = "A Study of Fake Entities in paper"
+FAKE_BODY = "Fake Entity Alpha works together with Fake Entity Beta."
+HEADER = "卡別：信用卡｜適用卡片：甲卡／乙卡"
+
+
+class DocumentHeadersTest(PipelineCase):
+    def setUp(self):
+        super().setUp()
+        self.headers_file = self.tmp / "document_headers.json"
+        self.headers_file.write_text(json.dumps({"paper.pdf": HEADER, "other.pdf": "卡別：金融卡｜適用卡片：丙卡"}), encoding="utf-8")
+
+    def stored_chunks(self) -> list[str]:
+        """知識庫裡所有 chunk 的內容，含圖片、表格、公式描述的 chunk（依 chunk_order_index 排序）。"""
+        stored = json.loads((self.working_dir / "kv_store_text_chunks.json").read_text(encoding="utf-8"))
+        return [c["content"] for c in sorted(stored.values(), key=lambda c: c["chunk_order_index"])]
+
+    def text_chunks(self) -> list[str]:
+        """文字 chunk：stored_chunks 去掉圖片、表格、公式描述的 chunk（它們以固定的分析標題開頭，內容由 RAG-Anything 決定）。"""
+        analysis = ("Image Content Analysis", "Table Analysis", "Equation Analysis")
+        return [c for c in self.stored_chunks() if not any(marker in c for marker in analysis)]
+
+    def test_without_the_setting_chunks_are_the_default_ones_and_captions_are_untouched(self):
+        result = self.ingest()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.text_chunks(), [f"{FAKE_HEADING}\n\n{FAKE_BODY}"])
+        for body in self.server.requests:
+            self.assertNotIn("卡片標籤", json.dumps(body["payload"], ensure_ascii=False))
+
+    def test_with_the_setting_each_chunk_starts_with_the_header_and_the_section_name(self):
+        result = self.ingest(DOCUMENT_HEADERS_FILE=str(self.headers_file))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.text_chunks(), [f"{HEADER}\n章節：{FAKE_HEADING}\n\n{FAKE_BODY}"])
+
+    def test_table_and_image_descriptions_are_asked_with_the_card_label(self):
+        result = self.ingest(DOCUMENT_HEADERS_FILE=str(self.headers_file))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        label = f"卡片標籤：{HEADER}"
+        describing = [
+            r for r in self.server.requests if r["path"] == "/v1/chat/completions" and "Body: <table>" in json.dumps(r["payload"])
+        ]
+        self.assertEqual(len(describing), 1)
+        self.assertIn(label, json.dumps(describing[0]["payload"], ensure_ascii=False))
+        vision = [r for r in self.server.requests if "image_url" in json.dumps(r["payload"])]
+        self.assertTrue(vision)
+        self.assertIn(label, json.dumps(vision[0]["payload"], ensure_ascii=False))
+
+    def test_document_id_and_parse_cache_still_come_from_the_original_content_list(self):
+        self.assertEqual(self.ingest(DOCUMENT_HEADERS_FILE=str(self.headers_file)).returncode, 0)
+        original = json.loads(next(self.output_dir.rglob("paper_content_list.json")).read_text(encoding="utf-8"))
+        cache = json.loads((self.working_dir / "kv_store_parse_cache.json").read_text(encoding="utf-8"))
+        (entry,) = cache.values()
+        self.assertEqual([b["type"] for b in entry["content_list"]], [b["type"] for b in original])
+        self.assertNotIn("RAG_LAB_HEADER", json.dumps(entry["content_list"]))
+        self.assertEqual(entry["content_list"][0].get("text"), FAKE_HEADING)
+        reingest = self.ingest(DOCUMENT_HEADERS_FILE=str(self.headers_file))
+        self.assertIn("略過", reingest.stdout)
+
+    def test_changing_the_header_re_chunks_the_document_and_replaces_the_old_version(self):
+        self.assertEqual(self.ingest(DOCUMENT_HEADERS_FILE=str(self.headers_file)).returncode, 0)
+        new_header = "卡別：信用卡｜適用卡片：甲卡／乙卡／丙卡"
+        self.headers_file.write_text(json.dumps({"paper.pdf": new_header}), encoding="utf-8")
+
+        result = self.ingest(DOCUMENT_HEADERS_FILE=str(self.headers_file))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("略過", result.stdout)
+        self.assertEqual(self.text_chunks(), [f"{new_header}\n章節：{FAKE_HEADING}\n\n{FAKE_BODY}"])
+        statuses = json.loads((self.working_dir / "kv_store_doc_status.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(statuses), 1)
+
+    def test_a_document_missing_from_the_headers_file_fails_and_nothing_is_written(self):
+        stranger = self.tmp / "stranger.pdf"
+        stranger.write_bytes(b"%PDF-1.4 stranger")
+        result = self.ingest(stranger, DOCUMENT_HEADERS_FILE=str(self.headers_file))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertRegex(result.stderr, r"匯入失敗：stranger\.pdf：.*DOCUMENT_HEADERS_FILE")
+        # 沒有寫入任何東西：儲存檔不存在或是空的
+        for name in ("kv_store_doc_status.json", "kv_store_text_chunks.json", "kv_store_full_docs.json"):
+            written = self.working_dir / name
+            self.assertEqual(json.loads(written.read_text(encoding="utf-8")) if written.exists() else {}, {}, name)
+
+    def test_other_documents_in_the_batch_are_still_ingested_when_one_is_missing_from_the_headers_file(self):
+        folder = self.tmp / "papers"
+        folder.mkdir()
+        (folder / "paper.pdf").write_bytes(b"%PDF-1.4 a")
+        (folder / "stranger.pdf").write_bytes(b"%PDF-1.4 b")
+        result = self.ingest(folder, DOCUMENT_HEADERS_FILE=str(self.headers_file))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertRegex(result.stderr, r"匯入失敗：stranger\.pdf")
+        self.assertNotRegex(result.stderr, r"匯入失敗：paper\.pdf")
+        self.assertEqual(self.text_chunks(), [f"{HEADER}\n章節：{FAKE_HEADING}\n\n{FAKE_BODY}"])
+
+
+# ==============================
+# parse_document 的標頭改寫（文件 ID、空內容）
+# ==============================
+
+
+class ParseDocumentWithHeadersTest(unittest.TestCase):
+    """LabRAGAnything.parse_document：RAG-Anything 的解析以假值取代，只看標頭改寫對回傳值的影響。"""
+
+    ORIGINAL_ID = "doc-0123456789abcdef0123456789abcdef"
+    TEXT = [{"type": "text", "text": "內文", "page_idx": 0}]
+
+    def parse(self, headers: dict[str, str] | None, content_list: list[dict]) -> tuple[list[dict], str]:
+        """以固定的原始 content list 與文件 ID 執行 parse_document。
+
+        Args:
+            headers: 檔名 → 標頭；None 表示沒設 DOCUMENT_HEADERS_FILE。
+            content_list: 假的 RAG-Anything 解析結果。
+
+        Returns:
+            parse_document 的回傳值 (content_list, doc_id)。
+        """
+        from types import SimpleNamespace
+
+        from raganything import RAGAnything
+
+        from rag_lab import pipeline
+
+        async def fake_parse(self, file_path, *args, **kwargs):
+            return list(content_list), self.ORIGINAL_ID
+
+        rag = object.__new__(pipeline.LabRAGAnything)
+        rag.lightrag = SimpleNamespace(tokenizer=tiktoken.get_encoding("o200k_base"))
+        rag.document_headers = headers
+        with mock.patch.object(RAGAnything, "parse_document", lambda *a, **k: fake_parse(self, *a, **k)):
+            return asyncio.run(rag.parse_document("/tmp/paper.pdf"))
+
+    def test_without_a_headers_file_the_document_id_is_the_one_rag_anything_computed(self):
+        content, doc_id = self.parse(None, self.TEXT)
+
+        self.assertEqual(doc_id, self.ORIGINAL_ID)
+        self.assertEqual(content, self.TEXT)
+
+    def test_with_a_headers_file_the_document_id_depends_on_the_header_text(self):
+        _, first = self.parse({"paper.pdf": "卡別：信用卡｜適用卡片：甲卡"}, self.TEXT)
+        _, again = self.parse({"paper.pdf": "卡別：信用卡｜適用卡片：甲卡"}, self.TEXT)
+        _, other = self.parse({"paper.pdf": "卡別：信用卡｜適用卡片：乙卡"}, self.TEXT)
+
+        self.assertEqual(first, again)
+        self.assertNotEqual(first, other)
+        self.assertNotEqual(first, self.ORIGINAL_ID)
+        self.assertRegex(first, r"^doc-[0-9a-f]{32}$")
+
+    def test_empty_parse_result_stays_empty_so_the_ingest_guard_can_fire(self):
+        content, _ = self.parse({"paper.pdf": "卡別：信用卡｜適用卡片：甲卡"}, [])
+
+        self.assertEqual(content, [])
 
 
 if __name__ == "__main__":

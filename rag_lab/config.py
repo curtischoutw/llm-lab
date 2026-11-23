@@ -11,8 +11,17 @@
   後兩者可以是 0（LightRAG 照常執行，只是不放該類描述），但兩者相加必須小於總上限，否則 chunk 分不到 token。
 - RERANK_BASE_URL／RERANK_MODEL／RERANK_API_KEY 三個欄位必填、規則與其他端點相同：查詢一律用 rerank，
   沒有開關；chunk_top_k 與分數門檻不在這裡設定，由 pipeline 固定為 20 與 0.0，不受行程環境的 CHUNK_TOP_K、MIN_RERANK_SCORE 影響。
+- DOCUMENT_HEADERS_FILE 選填：指向 JSON 檔（key 是文件檔名，值是 chunk 標頭文字），沒設時依標題切塊與標頭改寫都不啟用，
+  匯入行為與沒有這個設定時完全相同。有設時在啟動就讀檔驗證（檔案不存在、不是 JSON、不是物件、值不是非空字串都是 ConfigError；
+  訊息不含檔案內容）。標頭值必須符合 `卡別：<卡別>｜適用卡片：<卡名>／<卡名>…`（rag_lab.chunking.parse_header），
+  也不可含 rag_lab.chunking 的標記字串；錯誤訊息指出是哪個檔名，不含標頭內容。
 - EMBED_QUERY_PREFIX 只套用在查詢端（LightRAG 會以 context="query" 呼叫），
   文件端不加前綴；Qwen3-Embedding 的官方用法即為此非對稱形式。
+- KB_LANGUAGE 與 KB_ENTITY_TYPES 必填：知識庫的語言與實體類型是匯入結果的一部分，由 rag_lab 經 pipeline.build_rag 的
+  addon_params 傳給 LightRAG，不靠 LightRAG 自己讀的 SUMMARY_LANGUAGE、ENTITY_TYPES（那兩個仍在拒絕名單，
+  預設是英文與人物、組織等通用類型，不適合繁體中文的信用卡文件）。語言也影響查詢時的關鍵字抽取。
+  KB_ENTITY_TYPES 是逗號分隔，去掉每項前後空白；空項目（含整個空字串）以 ConfigError 中止，不默默略過。
+  Settings 以 tuple 保存（frozen dataclass）。
 - 拒絕 rag_lab 沒有管理的 LightRAG／RAG-Anything／MinerU 環境變數（UNMANAGED_LIBRARY_ENV）：LightRAG 與
   RAG-Anything 在 import 時會從環境變數與目前工作目錄的 .env（load_dotenv(".env", override=False)）讀幾十個設定
   當預設值；MinerU 是 RAG-Anything 以子行程執行的 `mineru` 指令，繼承 rag_lab 行程的環境（.env 經 load_dotenv
@@ -64,12 +73,15 @@
 Dependencies: python-dotenv（由 raganything 帶入）。
 """
 
+import json
 import os
 from dataclasses import dataclass
 from functools import lru_cache
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
+
+from rag_lab.chunking import HEADER_END, HEADER_START, parse_header
 
 # ==============================
 # rag_lab 沒有管理的 LightRAG／RAG-Anything／MinerU 環境變數
@@ -202,6 +214,60 @@ def _non_negative_int(name: str) -> int:
     return value
 
 
+def _document_headers(name: str) -> dict[str, str] | None:
+    """讀取選填的標頭檔（JSON 物件：檔名 → 標頭文字）。
+
+    Args:
+        name: 環境變數名稱，值是標頭檔路徑。
+
+    Returns:
+        檔名到標頭文字的 dict；環境變數沒設或是空字串時回傳 None。
+
+    Raises:
+        ConfigError: 檔案讀不到、不是 JSON、不是物件，或有值不是非空字串、含標頭標記字串、格式不符（訊息指出檔名，不含標頭內容）。
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        with open(raw, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except OSError as exc:
+        raise ConfigError(name, f"指向的檔案讀不到（{type(exc).__name__}）") from exc
+    except ValueError as exc:
+        raise ConfigError(name, "指向的檔案不是合法的 JSON") from exc
+    if not isinstance(data, dict):
+        raise ConfigError(name, "指向的檔案必須是 JSON 物件（檔名 → 標頭文字）")
+    for file_name, header in data.items():
+        if not isinstance(header, str) or not header.strip():
+            raise ConfigError(name, "的每個標頭文字必須是非空字串")
+        if HEADER_START in header or HEADER_END in header:
+            raise ConfigError(name, f"裡 {file_name} 的標頭文字不可含有 rag_lab 的標頭標記字串")
+        try:
+            parse_header(header)
+        except ValueError as exc:
+            raise ConfigError(name, f"裡 {file_name} 的標頭格式不符：{exc}") from exc
+    return data
+
+
+def _comma_list(name: str) -> tuple[str, ...]:
+    """讀逗號分隔的清單，去掉每項前後空白。
+
+    Args:
+        name: 環境變數名稱。
+
+    Returns:
+        各項目（至少一項）。
+
+    Raises:
+        ConfigError: 缺少、為空字串，或有空項目。
+    """
+    items = tuple(item.strip() for item in _required(name).split(","))
+    if not all(items):
+        raise ConfigError(name, "有空的項目（逗號分隔的每一項都要有內容）")
+    return items
+
+
 # ==============================
 # 設定物件
 # ==============================
@@ -235,6 +301,10 @@ class Settings:
     query_max_total_tokens: int
     query_max_entity_tokens: int
     query_max_relation_tokens: int
+    kb_language: str
+    kb_entity_types: tuple[str, ...]
+    # 檔名 → chunk 標頭文字；None 表示沒設 DOCUMENT_HEADERS_FILE，不做標頭改寫與依標題切塊
+    document_headers: dict[str, str] | None = None
 
 
 @lru_cache(maxsize=1)
@@ -283,4 +353,7 @@ def get_settings() -> Settings:
         query_max_total_tokens=query_max_total_tokens,
         query_max_entity_tokens=query_max_entity_tokens,
         query_max_relation_tokens=query_max_relation_tokens,
+        kb_language=_required("KB_LANGUAGE"),
+        kb_entity_types=_comma_list("KB_ENTITY_TYPES"),
+        document_headers=_document_headers("DOCUMENT_HEADERS_FILE"),
     )
