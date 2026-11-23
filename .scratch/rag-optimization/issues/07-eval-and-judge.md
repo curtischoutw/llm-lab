@@ -38,3 +38,11 @@ eval：`output/rag_opt/eval_runs/t07/eval_20261123-121716.md`，28 格全成功�
 probe（`output/rag_opt/probe07/`）：28 題 a 9／b_rank 0／b_trunc 0／c 19（重匯前 a 9／b_trunc 1／c 18）。內容非 ✓ 的 10 題：c 6（switch-01、switch-03、switch-04、benefit-01、offer-03、cross-01）、a 4（rule-01、rule-02、terms-02、cross-02）；基準 c 6、a 5、b_trunc 1。
 
 **Status:** ready-for-human（部分驗收沒達標；照本票規定不回滾，由使用者決定下一步）
+
+## 後續實驗（2026-11-23，使用者同意）
+
+**查詢上限 16k／20k**（`output/rag_opt/run_ctx_limits.sh`，判讀 `judging/ctx{16000,20000}_judge_{A,B}.md`）：內容 ✓ 15／17、最終 ✓ 11／11（12k 是 18／12）；耗時 24.7／25.8 分鐘；wired 峰值都是 24 GB。變差的題目是生成錯誤（benefit-02 保額寫錯、rule-03 日期推算錯），不是撈不到。維持 12k。
+
+**回答附加指示第二版**（`rag_lab/pipeline.py` ANSWER_INSTRUCTIONS：第 3 點改成段首「【卡別｜卡名】」、新增第 5 點子問題逐一回答、第 6 點數字照原文；`output/rag_opt/run_prompt2.sh`，判讀 `judging/prompt2_judge_{A,B}.md`）：內容 ✓ 18（持平）、**最終 ✓ 16**（12k 是 12）。分歧 3 題：benefit-03 兩人最終都 △；rule-01、cross-02 主對話裁定 ✗（rule-01 把 LINE Pay 說成可拿 3.8%、實體卡說有 0.3%，兩種付款方式答錯）。兩人一致的變化：最終 △→✓ 5 題（switch-03、benefit-02、fee-03、offer-01、offer-02），✓→△ 1 題（rule-03 日期又推算錯）；加上裁決 rule-01 △→✗。第 5、6 點看不出效果。採用。
+
+成效網頁：`docs/rag-optimization-eval.html`（產生程式 `output/rag_opt/report/make_report.py`）。

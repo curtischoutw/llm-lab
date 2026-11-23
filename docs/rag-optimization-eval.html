@@ -1,0 +1,751 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>台新 RAG 優化成效</title>
+<style>
+:root{--fg:#1f2328;--bg:#fff;--muted:#656d76;--line:#d0d7de;--soft:#f6f8fa;--ok:#1a7f37;--okbg:#dafbe1;--part:#9a6700;--partbg:#fff8c5;--bad:#cf222e;--badbg:#ffebe9;--c1:#8c959f;--f1:#0969da;--why:#fff8e1}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--fg:#e6edf3;--bg:#0d1117;--muted:#8d96a0;--line:#30363d;--soft:#161b22;--ok:#3fb950;--okbg:#12361f;--part:#d29922;--partbg:#3b2e0a;--bad:#f85149;--badbg:#4a1416;--c1:#6e7681;--f1:#4493f8;--why:#2d2610}}
+:root[data-theme="dark"]{--fg:#e6edf3;--bg:#0d1117;--muted:#8d96a0;--line:#30363d;--soft:#161b22;--ok:#3fb950;--okbg:#12361f;--part:#d29922;--partbg:#3b2e0a;--bad:#f85149;--badbg:#4a1416;--c1:#6e7681;--f1:#4493f8;--why:#2d2610}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.7 -apple-system,"PingFang TC","Microsoft JhengHei",sans-serif}
+main{max-width:960px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:1.6em;margin:0 0 4px}h2{font-size:1.25em;margin:40px 0 12px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+.sub{color:var(--muted);margin:0 0 20px}
+.lead{font-size:1.15em;background:var(--soft);border-left:4px solid var(--f1);padding:14px 16px;border-radius:6px}
+.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:16px 0}
+.kpi{border:1px solid var(--line);border-radius:10px;padding:12px 14px}.kpi .n{font-size:1.9em;font-weight:700}.kpi .n small{font-size:.5em;color:var(--muted);font-weight:400}.kpi .t{color:var(--muted);font-size:.9em}
+.kpi .d{color:var(--ok);font-weight:600}
+@media(max-width:640px){.kpis{grid-template-columns:1fr}}
+.legend{display:flex;gap:16px;flex-wrap:wrap;color:var(--muted);font-size:.9em;margin:6px 0 10px}.legend i{display:inline-block;width:12px;height:12px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+.bar{display:grid;grid-template-columns:120px 1fr;gap:10px;align-items:center;margin:8px 0}.bar.dim{opacity:.55}.bar.hi .bl{font-weight:700}
+.bl{font-size:.92em}.bt{display:flex;flex-direction:column;gap:3px}
+.b{height:18px;border-radius:3px;position:relative;min-width:24px}.b span{position:absolute;right:6px;top:-1px;font-size:.8em;color:#fff;font-weight:600}
+.c1{background:var(--c1)}.f1{background:var(--f1)}
+.explain{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media(max-width:640px){.explain{grid-template-columns:1fr}}
+.explain div{border:1px solid var(--line);border-radius:8px;padding:10px 14px}
+.wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:.93em}
+td,th{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:middle}
+th.h{white-space:nowrap;text-align:center;font-weight:600;font-size:.9em}tr.g th{background:var(--soft);font-size:.9em;padding:6px 8px}
+td.id a{color:var(--muted);font-size:.85em;white-space:nowrap}td.q{min-width:220px}
+td.s{text-align:center;white-space:nowrap}td.s.up{background:var(--okbg)}td.s.down{background:var(--badbg)}
+.sl{color:var(--muted);margin:0 3px}
+.c{font-weight:700}.c.ok{color:var(--ok)}.c.part{color:var(--part)}.c.bad{color:var(--bad)}
+details{border:1px solid var(--line);border-radius:8px;margin:8px 0;padding:8px 14px}summary{cursor:pointer;line-height:1.6}summary .id{color:var(--muted);font-size:.85em;margin-right:4px}summary .c{margin-right:4px}
+.why{background:var(--why);border-radius:6px;padding:8px 12px;margin:10px 0;font-size:.93em}.why.old{background:var(--soft)}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media(max-width:760px){.cols{grid-template-columns:1fr}}
+h4{margin:6px 0;font-size:.95em;color:var(--muted)}.box{white-space:pre-wrap;word-break:break-word;background:var(--soft);border-radius:6px;padding:10px 12px;font-size:.9em;max-height:420px;overflow:auto}
+ul.tight li{margin:4px 0}.note{color:var(--muted);font-size:.9em}
+</style></head><body><main>
+<h1>台新 RAG 優化成效</h1>
+<p class="sub">28 題測驗（信用卡 20、金融卡 8）｜2026-11-23</p>
+
+<p class="lead">這一輪優化後，<b>完全答對的題目從 8 題增加到 16 題</b>。主要的進步來自兩件事：重新匯入知識庫讓資料找得更準，以及改了回答指示，讓答案每段都標出是哪種卡。</p>
+
+<div class="kpis">
+<div class="kpi"><div class="t">完全答對（內容對＋卡別清楚）</div><div class="n">16<small> / 28</small></div><div class="d">優化前 8 題 → +8</div></div>
+<div class="kpi"><div class="t">內容答對</div><div class="n">18<small> / 28</small></div><div class="d">優化前 16 題 → +2</div></div>
+<div class="kpi"><div class="t">金融卡題目</div><div class="n">8<small> / 8</small></div><div class="d">全部答對</div></div>
+</div>
+
+<h2>每個階段的分數</h2>
+<div class="legend"><span><i style="background:var(--c1)"></i>內容答對</span><span><i style="background:var(--f1)"></i>完全答對</span><span>淡色＝試過但沒採用</span></div>
+<div class="bar "><div class="bl">優化前</div><div class="bt"><div class="b c1" style="width:57.1%"><span>16</span></div><div class="b f1" style="width:28.6%"><span>8</span></div></div></div><div class="bar "><div class="bl">重新匯入後</div><div class="bt"><div class="b c1" style="width:64.3%"><span>18</span></div><div class="b f1" style="width:42.9%"><span>12</span></div></div></div><div class="bar dim"><div class="bl">查詢上限 16k</div><div class="bt"><div class="b c1" style="width:53.6%"><span>15</span></div><div class="b f1" style="width:39.3%"><span>11</span></div></div></div><div class="bar dim"><div class="bl">查詢上限 20k</div><div class="bt"><div class="b c1" style="width:60.7%"><span>17</span></div><div class="b f1" style="width:39.3%"><span>11</span></div></div></div><div class="bar hi"><div class="bl">改回答指示後</div><div class="bt"><div class="b c1" style="width:64.3%"><span>18</span></div><div class="b f1" style="width:57.1%"><span>16</span></div></div></div>
+
+<h2>兩種分數是什麼意思</h2>
+<div class="explain">
+<div><b>內容答對</b><br>只看事實：標準答案的重點有沒有都答到、有沒有講錯。</div>
+<div><b>完全答對</b><br>內容答對，而且每段講到回饋、費用的地方都寫清楚是信用卡還是金融卡。沒寫清楚就降一級。</div>
+</div>
+<p class="note">✓ 答對　△ 部分對（有漏或有小錯）　✗ 答錯</p>
+
+<h2>這一輪做了什麼</h2>
+<ul class="tight">
+<li><b>重新匯入知識庫</b>（約 60 小時）：文件改成依標題切段、每段標上卡片名稱、用中文抽取重點，並換成較大的搜尋模型。→ 內容答對 16→18、完全答對 8→12。</li>
+<li><b>修補抽取格式錯誤</b>：模型抽重點時有約 1,900 筆格式寫壞，以前會直接丟掉，現在能救回約 1,400 筆。</li>
+<li><b>試過放寬查詢上限</b>（12k → 16k、20k）：沒有變好，反而略差且變慢，<b>沒有採用</b>。</li>
+<li><b>改回答指示</b>：要求每段開頭標出【卡別｜卡名】、子問題逐一回答、數字照原文寫。→ 完全答對 12→16。</li>
+</ul>
+
+<h2>還沒解決的問題</h2>
+<ul class="tight">
+<li><b>找不到資料（4 題）</b>：rule-01、rule-02、terms-02、cross-02。該用的文件段落沒被搜尋到，改回答指示幫不上忙，要從搜尋這一段下手。</li>
+<li><b>資料有找到但答錯或漏答（約 6 題）</b>：例如方案少列一個、日期推算錯（rule-03）、把「部分適用」答成「全部適用」（switch-04）。</li>
+<li><b>答案變長、比較囉嗦</b>：每段開頭都有【信用卡｜台新Richart卡】標記，卡別清楚了，但讀起來比較重複。</li>
+</ul>
+
+<h2>28 題逐題結果</h2>
+<p class="note">每格是「內容／完全」。<span style="background:var(--okbg);padding:0 4px">綠底</span>＝比上一階段好，<span style="background:var(--badbg);padding:0 4px">紅底</span>＝比上一階段差。點題號看詳細內容。</p>
+<div class="wrap"><table>
+<tr><th>題號</th><th>題目</th><th class="h">優化前</th><th class="h">重新匯入後</th><th class="h">改回答指示後</th></tr>
+<tr class="g"><th colspan="5">信用卡｜切換刷</th></tr><tr><td class="id"><a href="#switch-01">switch-01</a></td><td class="q">台新 Richart 卡的「切換刷」有哪些回饋方案？各方案的指定消…</td><td class="s"><span class="c part">△</span><span class="sl">/</span><span class="c part">△</span></td><td class="s"><span class="c part">△</span><span class="sl">/</span><span class="c part">△</span></td><td class="s"><span class="c part">△</span><span class="sl">/</span><span class="c part">△</span></td></tr><tr><td class="id"><a href="#switch-02">switch-02</a></td><td class="q">Richart 卡什麼時候可以切換回饋方案？切換有哪些限制，包括誰…</td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c part">△</span></td><td class="s up"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td></tr><tr><td class="id"><a href="#switch-03">switch-03</a></td><td class="q">Richart 卡正卡人切換方案後，當天的消費（包含附卡）怎麼計算…</td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c part">△</span></td><td class="s down"><span class="c part">△</span><span class="sl">/</span><span class="c part">△</span></td><td class="s up"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td></tr><tr><td class="id"><a href="#switch-04">switch-04</a></td><td class="q">哪些舊卡可以用 Richart 卡的切換刷？全家Richart聯名…</td><td class="s"><span class="c part">△</span><span class="sl">/</span><span class="c part">△</span></td><td class="s"><span class="c part">△</span><span class="sl">/</span><span class="c part">△</span></td><td class="s"><span class="c part">△</span><span class="sl">/</span><span class="c part">△</span></td></tr><tr class="g"><th colspan="5">信用卡｜卡友權益</th></tr><tr><td class="id"><a href="#benefit-01">benefit-01</a></td><td class="q">環球無限卡或昇恆昌無限卡持卡人要使用 2026 年的 24 小時道…</td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c part">△</span></td><td class="s down"><span class="c part">△</span><span class="sl">/</span><span class="c part">△</span></td><td class="s"><span class="c part">△</span><span class="sl">/</span><span class="c part">△</span></td></tr><tr><td class="id"><a href="#benefit-02">benefit-02</a></td><td class="q">卓富無限卡和 Richart 鈦金商務卡的旅遊平安險，2026 年…</td><td class="s"><span class="c bad">✗</span><span class="sl">/</span><span class="c bad">✗</span></td><td class="s up"><span class="c ok">✓</span><span class="sl">/</span><span class="c part">△</span></td><td class="s up"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td></tr><tr><td class="id"><a href="#benefit-03">benefit-03</a></td><td class="q">卓富無限卡 2026 年的免費機場接送要符合什麼消費門檻？一年可以…</td><td class="s"><span class="c part">△</span><span class="sl">/</span><span class="c part">△</span></td><td class="s up"><span class="c ok">✓</span><span class="sl">/</span><span class="c part">△</span></td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c part">△</span></td></tr><tr class="g"><th colspan="5">信用卡｜回饋規則</th></tr><tr><td class="id"><a href="#rule-01">rule-01</a></td><td class="q">用 Richart 卡在 7-11 消費有回饋嗎？用台新Pay 綁…</td><td class="s"><span class="c part">△</span><span class="sl">/</span><span class="c part">△</span></td><td class="s"><span class="c part">△</span><span class="sl">/</span><span class="c part">△</span></td><td class="s down"><span class="c bad">✗</span><span class="sl">/</span><span class="c bad">✗</span></td></tr><tr><td class="id"><a href="#rule-02">rule-02</a></td><td class="q">Richart 卡要拿到最高 3.8% 回饋需要什麼條件？新申辦的…</td><td class="s"><span class="c part">△</span><span class="sl">/</span><span class="c part">△</span></td><td class="s"><span class="c part">△</span><span class="sl">/</span><span class="c part">△</span></td><td class="s"><span class="c part">△</span><span class="sl">/</span><span class="c part">△</span></td></tr><tr><td class="id"><a href="#rule-03">rule-03</a></td><td class="q">Richart 卡每期帳單可拿加碼回饋的消費金額有上限嗎？台新Po…</td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td><td class="s down"><span class="c part">△</span><span class="sl">/</span><span class="c part">△</span></td></tr><tr class="g"><th colspan="5">信用卡｜費用</th></tr><tr><td class="id"><a href="#fee-01">fee-01</a></td><td class="q">台新信用卡遲繳或只繳最低應繳金額，會有哪些費用？循環利率範圍是多少…</td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c part">△</span></td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c part">△</span></td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c part">△</span></td></tr><tr><td class="id"><a href="#fee-02">fee-02</a></td><td class="q">用台新信用卡預借現金要付多少費用？刷國外消費時，除了匯率之外還會被…</td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td></tr><tr><td class="id"><a href="#fee-03">fee-03</a></td><td class="q">新光三越無限卡／世界卡的年費是多少？首年和之後怎麼免年費？</td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c part">△</span></td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c part">△</span></td><td class="s up"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td></tr><tr class="g"><th colspan="5">信用卡｜約定條款</th></tr><tr><td class="id"><a href="#terms-01">terms-01</a></td><td class="q">依信用卡會員約定條款，卡片遺失時要怎麼處理？掛失前和掛失後被冒用的…</td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td></tr><tr><td class="id"><a href="#terms-02">terms-02</a></td><td class="q">2026 年 4 月 10 日生效的信用卡會員約定條款修訂，第二十…</td><td class="s"><span class="c bad">✗</span><span class="sl">/</span><span class="c bad">✗</span></td><td class="s"><span class="c bad">✗</span><span class="sl">/</span><span class="c bad">✗</span></td><td class="s"><span class="c bad">✗</span><span class="sl">/</span><span class="c bad">✗</span></td></tr><tr class="g"><th colspan="5">信用卡｜優惠活動</th></tr><tr><td class="id"><a href="#offer-01">offer-01</a></td><td class="q">全聯週年慶的刷卡活動一，哪幾天、在哪些門市、用什麼支付工具、刷滿多…</td><td class="s"><span class="c part">△</span><span class="sl">/</span><span class="c part">△</span></td><td class="s up"><span class="c ok">✓</span><span class="sl">/</span><span class="c part">△</span></td><td class="s up"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td></tr><tr><td class="id"><a href="#offer-02">offer-02</a></td><td class="q">新光三越週年慶的「新新券」要怎麼領？領了之後單筆消費要滿多少、可以…</td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c part">△</span></td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c part">△</span></td><td class="s up"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td></tr><tr><td class="id"><a href="#offer-03">offer-03</a></td><td class="q">Richart 卡的「保險新戶最高 8%」活動，8% 是怎麼組成的…</td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td><td class="s down"><span class="c part">△</span><span class="sl">/</span><span class="c part">△</span></td><td class="s"><span class="c part">△</span><span class="sl">/</span><span class="c part">△</span></td></tr><tr class="g"><th colspan="5">信用卡｜跨卡比較</th></tr><tr><td class="id"><a href="#cross-01">cross-01</a></td><td class="q">Richart 卡、街口聯名卡、Gogoro Rewards 聯名…</td><td class="s"><span class="c part">△</span><span class="sl">/</span><span class="c part">△</span></td><td class="s"><span class="c part">△</span><span class="sl">/</span><span class="c part">△</span></td><td class="s"><span class="c part">△</span><span class="sl">/</span><span class="c part">△</span></td></tr><tr><td class="id"><a href="#cross-02">cross-02</a></td><td class="q">在海外刷卡，Richart 卡、台新雙幣卡、昇恆昌御璽卡的回饋率與…</td><td class="s"><span class="c bad">✗</span><span class="sl">/</span><span class="c bad">✗</span></td><td class="s"><span class="c bad">✗</span><span class="sl">/</span><span class="c bad">✗</span></td><td class="s"><span class="c bad">✗</span><span class="sl">/</span><span class="c bad">✗</span></td></tr><tr class="g"><th colspan="5">金融卡</th></tr><tr><td class="id"><a href="#debit-confuse-01">debit-confuse-01</a></td><td class="q">台新的卡片遺失要掛失，手續費多少？信用卡跟簽帳金融卡一樣嗎？</td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td></tr><tr><td class="id"><a href="#debit-confuse-02">debit-confuse-02</a></td><td class="q">我在國外想用台新的卡領當地現金，用信用卡預借現金跟用簽帳金融卡跨國…</td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td></tr><tr><td class="id"><a href="#debit-fact-01">debit-fact-01</a></td><td class="q">台新 Visa金融卡刷卡有什麼回饋？回饋什麼時候、用什麼方式入帳？</td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td></tr><tr><td class="id"><a href="#debit-fact-02">debit-fact-02</a></td><td class="q">台新蝴蝶悠遊Debit卡有哪些功能？一個人可以申請幾張？</td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td></tr><tr><td class="id"><a href="#debit-negate-01">debit-negate-01</a></td><td class="q">台新財富管理Visa金融卡有沒有免費機場接送？</td><td class="s"><span class="c bad">✗</span><span class="sl">/</span><span class="c bad">✗</span></td><td class="s up"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td></tr><tr><td class="id"><a href="#debit-negate-02">debit-negate-02</a></td><td class="q">用台新 Visa金融卡刷機票，有送旅遊平安險嗎？</td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c part">△</span></td><td class="s up"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td></tr><tr><td class="id"><a href="#debit-wrongcard-01">debit-wrongcard-01</a></td><td class="q">我的 Richart 卡一般消費回饋是 0.5% 無上限，對嗎？</td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c part">△</span></td><td class="s up"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td></tr><tr><td class="id"><a href="#debit-wrongcard-02">debit-wrongcard-02</a></td><td class="q">台新 Visa金融卡的切換刷，要怎麼切到 Pay著刷？</td><td class="s"><span class="c part">△</span><span class="sl">/</span><span class="c part">△</span></td><td class="s up"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td><td class="s"><span class="c ok">✓</span><span class="sl">/</span><span class="c ok">✓</span></td></tr>
+</table></div>
+
+<h2>逐題詳細（點開看）</h2>
+<details id="switch-01"><summary><span class="id">switch-01</span> <span class="c part">△</span><span class="c part">△</span> 台新 Richart 卡的「切換刷」有哪些回饋方案？各方案的指定消費回饋率是多少？新核卡預設是哪一個方案？</summary><div class="why"><b>判讀理由：</b>列出天天刷、大筆刷、好饗刷、數趣刷、玩旅刷 3.3%、Pay著刷 3.8%、假日刷 2%，新核卡預設天天刷也對；但漏了 Chill刷（最高 10%／5%／3.3%），reference 8 個方案只答 7 個，也沒分 Pay著刷內 LINE Pay 2.3%。</div><div class="cols"><div><h4>標準答案</h4><div class="box">官網稱「7+1大回饋方案」，頁面列出 8 個方案：Chill刷（指定消費最高 10%，依品牌類別分 10%、5%、3.3%）、Pay著刷（台新Pay 及台新Pay+ 綁定支付 3.8%；LINE Pay 及全盈+Pay 綁定支付 2.3%）、天天刷 3.3%、大筆刷 3.3%、好饗刷 3.3%、數趣刷 3.3%、玩旅刷 3.3%、假日刷 2%。新核卡預設「天天刷」。這些指定消費回饋需符合「卡友身分升級」，也就是設定以台新帳戶自動扣繳台新信用卡帳款；未完成設定者，切換刷加碼通路最高 1.3%。選擇其他方案時，非該方案指定的消費依一般消費 0.3% 計算；保費一次付清免切換 1.3%。加註：頁面只寫「7+1」，沒有指出哪一個是「+1」；Chill刷的開放切換日是 2026/7/8，推測是「+1」，原文未明說。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據您提供的資料，台新 Richart 卡的「切換刷」相關回饋方案與資訊如下：
+
+<b>台新 Richart 卡「切換刷」方案說明</b>
+
+【信用卡｜台新Richart卡】
+台新 Richart 卡提供 7+1 大回饋方案。正卡人可於每日 23:59 前在 Richart Life App 切換方案，每日限一次，當日正附卡消費依所選方案計算回饋。
+
+<b>各方案指定消費回饋率如下：</b>
+
+*   【信用卡｜台新Richart卡】<b>「天天刷」方案</b>：最高享 <b>3.3%</b> 台新Point(信用卡)回饋。
+*   【信用卡｜台新Richart卡】<b>「大筆刷」方案</b>：最高享 <b>3.3%</b> 台新Point(信用卡)回饋。
+*   【信用卡｜台新Richart卡】<b>「好饗刷」方案</b>：最高享 <b>3.3%</b> 台新Point(信用卡)回饋。
+*   【信用卡｜台新Richart卡】<b>「數趣刷」方案</b>：最高享 <b>3.3%</b> 台新Point(信用卡)回饋。
+*   【信用卡｜台新Richart卡】<b>「玩旅刷」方案</b>：最高享 <b>3.3%</b> 台新Point(信用卡)回饋。
+*   【信用卡｜台新Richart卡】<b>「Pay著刷」方案</b>：最高享 <b>3.8%</b> 台新Point(信用卡)回饋。
+*   【信用卡｜台新Richart卡】<b>「假日刷」方案</b>：最高享 <b>2%</b> 台新Point(信用卡)回饋。
+
+<b>新核卡預設方案：</b>
+*   【信用卡｜台新Richart卡】新核卡預設為<b>「天天刷」</b>方案。
+
+<b>References</b>
+
+- [1] 信用卡_台新Richart卡_card_cg047_card001.pdf
+- [3] 信用卡_台新Richart卡_richart_credit-card.pdf
+- [5] 信用卡_台新Richart卡_offer_WM_20250108154316089.pdf
+- [7] 信用卡_台新Richart卡_offer_WM_20251230213526683.pdf
+- [10] 信用卡_台新Richart卡_offer_WM_20251231102359184.pdf</div></div></div></details><details id="switch-02"><summary><span class="id">switch-02</span> <span class="c ok">✓</span><span class="c ok">✓</span> Richart 卡什麼時候可以切換回饋方案？切換有哪些限制，包括誰能切、一天幾次、哪些支付方式算指定消費？</summary><div class="why"><b>判讀理由：</b>23:59 前、正卡人、每日一次、可用與不可用的支付方式（含 LINE Pay 限 Chill刷／Pay著刷／假日刷、全盈+Pay 限 Pay著刷／假日刷）都與 reference 一致。沒提 Chill刷的開放期間、需先開卡、依正卡人歸戶，這些是補充細節，題目問的四項（時間、誰、幾次、支付方式）都答對，故給 ✓（邊界案例）。</div><div class="cols"><div><h4>標準答案</h4><div class="box">由正卡人在 Richart Life App 於每日 23:59 前切換，每日限一次。Chill刷 另有開放期間：2026/7/8 11:00 起至 12/31 在 Richart Life App 開放切換（原文 12/31 沒寫年份）。需先完成開卡（含卡號速取開卡）才能切換。方案依正卡人歸戶，同一正卡人不論名下有幾張卡，當日只能適用擇一方案。因持卡人的裝置、網路連線等不可歸責於台新銀行的原因，造成切換失敗、遺失或錯誤，以台新銀行系統留存的方案為準。指定消費限使用實體卡（含線上輸入卡號），或以台新Pay、Apple Pay、Google 錢包、Samsung Pay 綁定的消費；LINE Pay 綁定的消費限 Chill刷、Pay著刷、假日刷；全盈+Pay 綁定的消費限 Pay著刷、假日刷；街口支付、台灣pay、My FamiPay、全支付、OPEN錢包、中油Pay 等不適用。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據您的問題，針對台新 Richart 卡的回饋方案切換相關規定整理如下：
+
+<b>Richart 卡回饋方案切換說明</b>
+
+【信用卡｜台新Richart卡】
+* <b>切換時間</b>
+  * 正卡人可於每日 23:59 前在 Richart Life APP 進行方案切換。
+  * 方案轉換後的紀錄與回饋方案，將以台新銀行系統留存記錄為準。
+
+【信用卡｜台新Richart卡】
+* <b>切換限制</b>
+  * <b>誰能切換</b>：須由正卡人進行方案切換。
+  * <b>次數限制</b>：每位正卡人每日限轉換一次。
+  * <b>方案適用範圍</b>：當日之正附卡消費將依據當日所設定的回饋方案計算回饋。
+
+【信用卡｜台신Richart卡】
+* <b>指定支付方式</b>
+  * <b>符合加碼資格的支付方式</b>：
+    * 實體信用卡（含線上輸入卡號）
+    * 台新Pay
+    * Apple Pay
+    * Google 錢包
+    * Samsung Pay
+    * LINE Pay（限 Chill 刷、Pay著刷及假日刷方案綁定消費）
+    * 全盈+Pay（限 Pay著刷及假日刷方案綁定消費）
+  * <b>不符合加碼方案的支付方式</b>：
+    * 街口支付、台灣pay、My FamiPay、全支付、OPEN錢包、中油Pay等其他型態的支付工具。
+
+<b>References</b>
+
+- [1] 信用卡_台新Richart卡_card_cg047_card001.pdf
+- [3] 信用卡_台新Richart卡_richart_credit-card.pdf</div></div></div></details><details id="switch-03"><summary><span class="id">switch-03</span> <span class="c ok">✓</span><span class="c ok">✓</span> Richart 卡正卡人切換方案後，當天的消費（包含附卡）怎麼計算回饋？例如 1/15 晚上 23:00 從天天刷切換到大筆刷，當天的高鐵消費和遠東SOGO消費各拿多少回饋？</summary><div class="why"><b>判讀理由：</b>以當日 23:59 記錄為準、23:00 切換則全日按大筆刷、高鐵 0.3%、遠東SOGO／遠東百貨 3.3% 都對；額外補的 30 萬上限不矛盾。</div><div class="why old"><b>上一輪（重新匯入後）的理由：</b>23:59 方案為準、遠東SOGO 3.3%、高鐵 0.3% 的結果對，但同一段說高鐵「屬於該方案下的指定交易」，與 reference「高鐵不屬於大筆刷指定通路、適用一般消費」矛盾，且沒有卡友身分升級前提。「注意事項」段有 NT$30 萬與 0.3% 但沒有卡別字樣。</div><div class="cols"><div><h4>標準答案</h4><div class="box">以當日 23:59（GMT+8）記錄在台新銀行的方案為準，計算當日零時起的逐筆交易回饋，正卡與附卡的交易都適用；所以 23:00 才切換，當天全部消費都以大筆刷計算。原文例子（持卡人符合卡友身分升級）：高鐵不屬於大筆刷的指定通路，適用一般消費回饋 0.3%；遠東SOGO 與（附卡的）遠東百貨屬於大筆刷，享 3.3%。臺鐵／高鐵以交易「消費日」當日留存於台新銀行的最終回饋方案計算，不是乘車日。消費日是商家提供給銀行的日期，可能因商家作業或時區差異與實際刷卡日不同。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">【信用卡｜台新Richart卡】
+
+關於 Richart 卡正卡人切換方案後的消費回饋計算方式，說明如下：
+
+<b>方案切換與回饋計算方式</b>
+* 【信用卡｜台新Rich卡】正附卡之交易將以當日 23:59 (GMT+8) 記錄於台新銀行之回饋方案，計算當日零時起之逐筆交易回饋。正卡人切換方案後，當日之正附卡消費將依據該方案進行回饋計算。 [1]
+* 【信用卡｜台新Richart卡】正卡人可在 Richart Life APP 進行方案轉換，每位正卡人每日限轉換一次。 [1]
+
+<b>案例分析</b>
+針對您提出的舉例：若 1/15 晚上 23:00 正卡人將回饋方案從「天天刷」切換至「大筆刷」，則當日之回饋計算如下：
+
+* 【信用卡｜台新Richart卡】由於方案轉換是在 23:00 進行，系統會以當日 23:59 的記錄為準。因此，當日之正附卡交易將皆以「大筆刷」方案進行回饋計算。 [1]
+* 【信用卡｜台新Richart卡】在該案例中：
+    * 高鐵交易：由於適用於一般消費回饋方案，將享有 0.3% 的台新Point(信用卡)回饋。 [1]
+    * 遠東SOGO 及 遠東百貨交易：由於屬於大筆刷方案之指定交易，將享有 3.3% 的台新Point(信用卡)回饋。 [1]
+
+<b>補充注意事項</b>
+* 【信用卡｜台新Richart卡】各權益方案每期帳單適用加碼回饋之消費金額，是以持卡人之永久信用額度加計 NT$30 萬為限，超出此限額之指定消費僅適用一般消費 0.3% 台新Point(信用卡)回饋。 [1]
+
+<b>References</b>
+
+- [1] 信用卡_台新Richart卡_card_cg047_card001.pdf</div></div></div></details><details id="switch-04"><summary><span class="id">switch-04</span> <span class="c part">△</span><span class="c part">△</span> 哪些舊卡可以用 Richart 卡的切換刷？全家Richart聯名卡呢？太陽卡、玫瑰卡是不是全部都適用？</summary><div class="why"><b>判讀理由：</b>舊卡名單、Woojii 9/1、三商美邦 10/1、全家Richart聯名卡 9/15 都對；但第三問答「原太陽卡與玫瑰卡……是適用的」，把 reference 的限定（只有「切換刷」版本已更名）省掉，等於答成全部都適用，與 reference「不是全部都適用」不符。觸發段：「因此，原太陽卡與玫瑰卡屬於上述更名後的卡片範圍，是適用的。」講適用範圍但整段沒有卡別詞。</div><div class="cols"><div><h4>標準答案</h4><div class="box">Richart 卡頁面的「舊卡名對照」：台新Richart卡為多張卡整併更名後的統一卡名，原太陽卡／玫瑰卡（切換刷）、@GoGo卡、FlyGo卡、玫瑰Giving卡、大買家聯名卡、Woojii卡、三商美邦聯名卡皆已更名為台新Richart卡（共 7 個名稱，太陽卡／玫瑰卡（切換刷）算一項）。7+1 方案的適用期間是 2026/7/1–2027/12/31 的消費；Woojii卡 2026/9/1 起適用，三商美邦聯名卡 2026/10/1 起適用；全家Richart聯名卡不在更名名單內，另列為適用對象，2026/9/15 起適用。不是所有太陽卡、玫瑰卡都適用：已更名的只有「切換刷」版本；太陽卡頁面註明該頁適用太陽卡的指定套餐、自由選權益，原文寫「如欲查看/申辦太陽卡切換刷權益，請參閱此處」，沒有寫出連到哪一頁；Richart 卡頁面寫明太陽卡／玫瑰卡（切換刷）已更名為台新Richart卡，所以切換刷權益看 Richart 卡頁面。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據您的問題，針對舊卡適用範圍以及全家Richart聯名卡的適用性說明如下：
+
+<b>舊卡適用範圍與全家Richart聯名卡適用性</b>
+
+【信用卡｜台新Richart卡】
+針對您詢問的舊卡，原有的以下卡片皆已更名為「台新Richart卡」，且適用於相關的切換刷方案：
+*   原太陽卡／玫瑰卡（切換刷）
+*   @GoGo卡
+*   FlyGo卡
+*   玫瑰Giving卡
+*   大買家聯名卡
+*   Woojii卡（於 2026/9/1 起適用）
+*   三商美邦聯名卡（於 2026/10/1 起適用）
+
+因此，原太陽卡與玫瑰卡屬於上述更名後的卡片範圍，是適用的。
+
+【信用卡｜全家Richart聯名卡】
+全家Richart聯名卡亦屬於適用於相關方案的卡別，其適用範圍與相關細節如下：
+*   <b>適用對象</b>：包含台新Richart卡及全家Richart聯名卡（全家Richart聯名卡自 2026/9/15 起適用）。
+*   <b>方案內容</b>：在特定活動期間（2026/7/1 – 2027/12/31），可於 Richart Life App 進行方案切換，指定消費最高享 10% 台新Point(信用卡)回饋。
+
+<b>References</b>
+
+- [1] 信用卡_台新Richart卡_card_cg047_card001.pdf
+- [1] 信用卡_台新Richart卡_card_cg047_card001.pdf
+- [1] 信用卡_台新Richart卡_card_cg047_card001.pdf</div></div></div></details><details id="benefit-01"><summary><span class="id">benefit-01</span> <span class="c part">△</span><span class="c part">△</span> 環球無限卡或昇恆昌無限卡持卡人要使用 2026 年的 24 小時道路救援，需要符合哪些條件？免費拖吊幾公里、一年最多幾次？</summary><div class="why"><b>判讀理由：</b>前一個月消費滿 NT$12,000、50 公里、每年 6 次、國道 NT$1,500／10 公里都對；但條件只模糊寫「事先的登錄要求」，沒有說登錄車號的生效規則，也完全沒提要向行遍天下專線申請；「用卡貼心」「車型規範」在 reference 沒有，無法對照。</div><div class="cols"><div><h4>標準答案</h4><div class="box">條件有三項：事先登錄車號（登錄日不計，從登錄後第三個工作日零時起生效）；使用前一個月（1 日至月底，消費金額以入帳日計）一般消費滿 NT$12,000；向行遍天下 0800-066-885 專線或線上申請服務。2026 年權益：免費拖吊 50 公里內，每卡每年最多使用 6 次（正附卡消費記錄分開計算）。國道、高架橋、快速道路只提供基本起拖費用 NT$1,500／10 公里內免費，超過的差額由持卡人負擔。經專線請求服務後超過 15 分鐘才取消，仍計入已使用次數。未事先登錄車號者，現場須自行支付救援費用。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據您提供的資料，針對環球無限卡或昇恆昌無限卡持卡人使用 2026 年 24 小時道路救援服務的相關條件與權益回答如下：
+
+<b>2026 年 24 小時道路救援服務條件與權益</b>
+
+【信用卡｜環球無限卡 / 昇恆昌無限卡】
+* <b>使用條件</b>：
+    * 需於使用前一個月（1 日至月底）消費滿 NT$12,000（消費金額以入帳日計算）。
+    * 服務透過「用卡貼心」功能提供。
+    * 使用者必須符合特定的車型規範與事先的登錄要求。
+* <b>免費拖吊里程</b>：
+    * 提供自起吊點起 50 公里內免費拖吊服務。
+* <b>每年使用次數</b>：
+    * 每卡每年最多使用 6 次。
+
+【信用卡｜環球無限卡 / 昇恆昌無限卡】
+* <b>服務說明</b>：
+    * 服務內容涵蓋了車輛故障拖救（拖吊）及一次急修服務等相關救援權益。
+    * 針對國道/高架橋/快速道路，僅提供基本起拖費用 NT$1,500 元/10 公里內免費服務。若基本起拖費用超過 NT$1,500/10 公里者，差額由持卡人負擔。
+
+<b>References</b>
+
+- [1] 信用卡_多卡_rights_road-rescue_right0401.docx
+- [2] 信用卡_多卡_attachment_2026normal_charge_20260102_2.pdf</div></div></div></details><details id="benefit-02"><summary><span class="id">benefit-02</span> <span class="c ok">✓</span><span class="c ok">✓</span> 卓富無限卡和 Richart 鈦金商務卡的旅遊平安險，2026 年身故及失能最高保額各是多少？2027 年 Richart 鈦金商務卡的保額有沒有變？要怎麼付款才有保障？</summary><div class="why"><b>判讀理由：</b>卓富 5,000 萬、Richart鈦金商務 3,000 萬、2027 年降為 2,000 萬、付款條件（全部票款或八成以上團費）都與 reference 一致；額外的 30% 不保障條款不矛盾。</div><div class="why old"><b>上一輪（重新匯入後）的理由：</b>卓富 5,000 萬、Richart鈦金商務 3,000 萬、2027 年降為 2,000 萬、付款條件（全部票款或八成以上團費）都對。「2026 年…保額」「2027 年…保額變化」兩段談金額，只有卡名沒有卡別字樣，降為 △。</div><div class="cols"><div><h4>標準答案</h4><div class="box">2026 年：卓富無限卡身故及失能 5,000 萬（傷害醫療給付 10 萬、移靈費用 5 萬）；Richart鈦金商務卡 3,000 萬（傷害醫療 5 萬、移靈費用 3 萬）。2027 年：卓富無限卡維持 5,000 萬；Richart鈦金商務卡降為 2,000 萬（傷害醫療 5 萬、移靈費用 3 萬），尊爵世界卡與台新商務卡仍是 3,000 萬。保障條件：被保險人以有效的承保信用卡支付公共運輸交通工具的全部票款，或百分之八十以上的團費。保險期間分別是 2026/1/1–12/31 與 2027/1/1–12/31。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據您的問題，針對卓富無限卡與 Richart 鈦金商務卡在 2026 年及 2027 年的相關保額資訊回答如下：
+
+<b>2026 年身故及失能最高保額</b>
+
+【信用卡｜卓富無限卡】
+*   <b>身故保險金額</b>：最高新臺幣 5,000 萬元。
+*   <b>失能保險金額</b>：依失能等級比例計算。
+*   <b>備註</b>：此保額適用於同一事故投保公共運輸工具傷害保險及海外旅遊全程及國內公共運輸工具傷害保險。
+
+【信用卡｜Richart 鈦金商務卡】
+*   <b>身故保險金額</b>：最高新臺幣 3,000 萬元。
+*   <b>失能保險金額</b>：依失能等級比例計算。
+*   <b>備註</b>：此保額適用於同一事故投保公共運輸工具傷害保險及海外旅遊全程及國內公共運輸工具傷害保險。
+
+<b>2027 年 Richart 鈦金商務卡保額變化</b>
+
+【信用卡｜Richart 鈦金商務卡】
+2027 年 Richart 鈦金商務卡的保額與 2026 年相比<b>有變動</b>：
+*   <b>2026 年</b>：身故保險金額為最高新臺幣 3,000 萬元。
+*   <b>2027 年</b>：身故保險金額為最高新臺幣 2,000 萬元。
+*   <b>失能保險金額</b>：2027 年仍為依失能等級比例計算。
+
+<b>付款方式與保障條件</b>
+
+【信用卡｜卓富無限卡】
+*   <b>付款方式</b>：須以有效之承保信用卡支付各被保險人之公共運輸工具全部票款或百分之八十以上之團費。
+*   <b>不享有保障之情況</b>：若支付之金額未達該票證票面價額之百分之三十（如：哩程兌換、贈送票、免費票、或僅支付機場稅/兵險附加費等）則不享有保障。
+
+【信用卡｜Richart 鈦金商務卡】
+*   <b>付款方式</b>：須以有效之承保信用卡支付各被保險人之公共運輸工具全部票款或百分之八十以上之團費。
+*   <b>不享有保障之情況</b>：若支付之金額未達該票證票面價額之百分之三十（如：哩程兌換、贈送票、免費票、或僅支付機場稅/兵險附加費等）則不享有保障。
+
+<b>References</b>
+
+- [2] 信用卡_多卡_attachment_SKinsurance_20260626.pdf
+- [1] 信用卡_多卡_rights_insurance_right0202.docx
+- [5] 信用卡_多卡_attachment_2027SKinsurance_20260930.pdf</div></div></div></details><details id="benefit-03"><summary><span class="id">benefit-03</span> <span class="c ok">✓</span><span class="c part">△</span> 卓富無限卡 2026 年的免費機場接送要符合什麼消費門檻？一年可以用幾次？怎麼預約？</summary><div class="why"><b>判讀理由：</b>NT$16,000／6 個月／2 次、全年 12 次、正附卡合併、全鋒電話、三個工作日前（春節或連假七個工作日前）都對。觸發段：「* **全年度使用上限**：全年度可使用 12 次。」是權益使用次數上限，整段沒有卡別詞（屬邊界案例；「預約方式」段只講預約流程，不算）。</div><div class="cols"><div><h4>標準答案</h4><div class="box">使用日前 6 個月內（含當月）刷卡支付當次旅遊的機票或團費金額合計達 NT$16,000 以上，享 2 次國內機場單程接或送服務；全年度使用上限 12 次；消費金額與使用次數皆為正附卡合併計算；提供免費進口車／七人座車服務，連續假日及國內夜間服務不加價；可依所需扣抵次數兌換「全球指定機場接或送」。預約業者：全鋒 (02)2775-9771，須於出發日三個工作日前（不含使用當日；農曆春節期間或連續假期為七個工作日前）致電預約。僅適用松山、桃園、臺中清泉崗、高雄小港機場。機票、團費若以行動支付（如街口支付、LINE Pay、全支付）付款，不列入消費門檻。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據您的問題，針對「卓富無限卡」在 2026 年的免費機場接送服務相關資訊整理如下：
+
+<b>卓富無限卡 2026 年機場接送權益說明</b>
+
+【信用卡｜卓富無限卡】
+* <b>消費門檻</b>：
+    使用日前 6 個月內（含當月）刷卡支付當次旅遊之機票或團費金額，合計達 NT$16,000 以上，即可享 2 次國內機場單程接或送服務。
+    *註：消費金額及權益使用次數皆為正附卡合併計算。*
+
+* <b>全年度使用上限</b>：
+    全年度可使用 12 次。
+
+* <b>預約方式</b>：
+    需依照權益規則完成機票/旅遊團費消費後，於出發日三個工作日前（不含使用當日）事先致電各卡指定機接廠商預約。
+    *   <b>預約廠商</b>：全鋒（電話：02-2775-9771）。
+    *   <b>注意事項</b>：若遇農曆春節期間或連續假期，須於七個工作日前預約。
+
+<b>References</b>
+
+* [1] 信用卡_多卡_rights_oversea_right0106.docx
+* [4] 信用卡_卓富無限卡_card_cg045_card001.pdf</div></div></div></details><details id="rule-01"><summary><span class="id">rule-01</span> <span class="c bad">✗</span><span class="c bad">✗</span> 用 Richart 卡在 7-11 消費有回饋嗎？用台新Pay 綁定、用 LINE Pay 綁定、直接刷實體卡，結果有什麼不同？</summary><div class="why"><b>判讀理由：</b>兩位判讀者一位給 △、一位給 ✗。三種付款方式有兩種答錯（LINE Pay 說能拿到 3.8%、實體卡說有 0.3%，實際上兩者都沒有回饋），主要結論錯，裁定 ✗。 判讀者原話：台新Pay 綁定切換 Pay著刷最高 3.8% 與超商限額 NT$3,000、代收不回饋是對的；但 reference 說 LINE Pay 綁定在 7-11 完全沒有回饋，答案卻說可領券加碼到最高 3.8%；reference 說直接刷實體卡在 7-11 不回饋，答案卻說「一般消費 0.3%」；也沒說 7-11 屬於不回饋項目。三種付款方式中兩種與 reference 矛盾。觸發段：「* **直接刷實體卡**　若不使用台新 Pay 介面……將依一般消費 0.3% 回饋計算」整段沒有卡別詞。</div><div class="why old"><b>上一輪（重新匯入後）的理由：</b>台新Pay 綁定 Pay著刷 3.8% 正確。但答「實體卡依一般消費 0.3%」與 reference「超商不回饋」矛盾；LINE Pay 只說「視條件而定、可能僅一般消費回饋」，reference 是完全沒有回饋。也沒有說明超商屬排除回饋項目。各清單與表格均含「信用卡」。</div><div class="cols"><div><h4>標準答案</h4><div class="box">官方「不回饋消費項目」列出「指定量販店、超商消費」：大全聯、全聯福利中心與便利商店（7-11、全家、萊爾富、OK超商等），包含線上購物和各種支付方式，不回饋。例外：於 7-11 及全家以台新Pay 綁定台新Richart卡消費，並切換「Pay著刷」或「天天刷」方案，仍享台新Point(信用卡)回饋，其他方式不回饋。Richart 卡頁面的例子：台新Pay 綁定在 7-11 消費符合 Pay著刷指定交易，享最高 3.8%；LINE Pay 綁定在 7-11 消費不符合指定交易，且 7-11 是一般消費排除回饋項目，這筆完全沒有回饋。天天刷的 7-11／全家限用台新Pay 綁定支付，使用實體卡、OPEN錢包、全盈支付、Famipay 不予回饋；超商使用台新Pay 單筆限額最高 NT$3,000；超商代收／代售（水電瓦斯、綜所稅、地方稅等）、禮物卡、儲值交易、菸品不回饋。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據您提供的資料，針對使用 Richart 卡在 7-11 消費的回饋機制與不同支付方式的差異，回答如下：
+
+<b>【信用卡｜台新Richart卡】</b>
+【信用卡｜台新Richart卡】使用台新 Richart 卡於 7-11 消費，在特定活動條件下可享有回饋。
+
+* <b>使用台新 Pay 綁定支付</b>
+  * 若切換至「Pay 著刷」方案，於 7-11 消費可享最高 3.8% 的台新 Point (信用卡) 回饋 【[1], [5], [9]】。
+  * 需注意，此回饋僅限透過台新 Pay 付款介面完成之交易，支付工具需下拉選擇【台新 Pay】，且帳單顯示明細包含【TS＊】才符合資格。此外，超商綁定台新 Pay 支付之單筆限額最高為 NT3,000 元；超商代收/售（如水/電/瓦斯、綜所稅、地方稅等）、禮物卡、儲值交易不予回饋 【[9]】。
+
+* <b>使用 LINE Pay 綁定</b>
+  * 根據文件內容，針對「台新 Richart 卡」的 LINE Pay 相關優惠主要是針對「領券加碼」或「青年專屬」等特定任務設定。若符合領券任務且設定台新帳戶自動扣繳等條件，在 LINE Pay 綁定支付可享最高 3.8% 的回饋（其中包含 1.5% 加碼） 【[2]】。
+  * 若是在特定的「青年專屬」活動期間（如 2026/11/01 - 2027/01/15），使用 Richart Mastercard 簽帳金融卡綁定 LINE Pay 具有不同的回饋規則，但針對「台新 Richart 卡（信用卡）」的行為，其回饋主要與「Pay 著刷」方案的台新 Pay 介面相關 【[3], [4], [6]】。
+
+* <b>直接刷實體卡</b>
+  * 若不使用台新 Pay 介面（例如直接刷實體卡或使用其他支付工具），則不屬於「Pay 著刷」方案的範圍。若選擇其他權益方案，將依一般消費 0.3% 回饋計算 【[1], [9]】。
+
+<b>【金融卡｜Richart 簽帳金融卡】</b>
+【金融卡｜Richart 簽帳金融卡】針對使用 LINE Pay 綁定的特定回饋，如下：
+
+* <b>使用 LINE Pay 綁定</b>
+  * 在特定的「青年專屬」活動期間（例如 2026/11/01 - 2027/01/15），符合資格的用戶使用 Richart Mastercard 簽帳金融卡綁定 LINE Pay 消費，可享加碼回饋（如最高 5%） 【[3], [6]】。
+  * 需注意，若綁定其他型態的支付工具而非 LINE Pay，則不符合該活動的回饋資格 【[3], [4], [6]】。
+
+<b>總結不同支付方式的結果差異</b>
+\| 支付方式 \| 信用卡 (台新 Richart 卡) 結果 \| 金融卡 (Richart 簽帳金融卡) 結果 \|
+\| :--- \| :--- \| :--- \|
+\| <b>台新 Pay 綁定</b> \| 切換「Pay 著刷」可享最高 3.8% 回饋 (需透過台新 Pay 介面且含 TS* 明細) 【[5], [9]】 \| 資料未提供金融卡使用台新 Pay 在 7-11 的特定回饋比例。 \|
+\| <b>LINE Pay 綁定</b> \| 可透過特定領券任務與綁定任務獲得加碼回饋 【[2]】 \| 於特定青年專屬活動下，綁定 LINE Pay 消費可享最高 5% 回饋 【[3], [6]】 \|
+\| <b>直接刷實體卡</b> \| 若不屬於特定方案，則僅享一般消費 0.3% 回饋 【[1], [9]】 \| 資料未提及直接刷實體卡在 7-11 的特定加碼回饋。 \|
+
+<b>References</b>
+
+- [1] 信用卡_台新Richart卡_richart_credit-card.pdf
+- [2] 信用卡_台新Richart卡_offer_WM_20260615104836373.pdf
+- [3] 金融卡_Richart簽帳金融卡_richart_discount_399.pdf
+- [4] 金融卡_Richart簽帳金融卡_richart_discount_350.pdf
+- [5] 信用卡_台新Richart卡_offer_WM_20261015142442326.pdf
+- [6] 金融卡_Richart簽帳金融卡_richart_discount_353.pdf
+- [9] 信用卡_台新Richart卡_offer_WM_20251230213526683.pdf</div></div></div></details><details id="rule-02"><summary><span class="id">rule-02</span> <span class="c part">△</span><span class="c part">△</span> Richart 卡要拿到最高 3.8% 回饋需要什麼條件？新申辦的卡友有沒有試用期？結帳日為每月 12 日的卡友，2026/7/7 完成設定，從哪一天起適用？</summary><div class="why"><b>判讀理由：</b>新申辦 60 天試用（2026/7/1–2027/12/31，LEVEL 2）與設定台新帳戶自動扣繳是對的；但 3.8% 的組成寫成「LINE Pay 綁定 2.3% + 領券加碼 1.5%」，沒有答出 reference 的「Pay著刷＋台新Pay／台新Pay+ 綁定」；結帳日 12 日、2026/7/7 設定的適用日答「2026/7/7」，reference 是 2026/7/13，錯。</div><div class="cols"><div><h4>標準答案</h4><div class="box">最高 3.8% 只有「Pay著刷」：要切換到 Pay著刷，並以台新Pay 或台新Pay+ 綁定支付（LINE Pay、全盈+Pay 綁定為 2.3%；其他方案最高 3.3%）。另外要完成卡友身分升級：成功設定「以台新帳戶自動扣繳台新信用卡帳款」並持續使用未取消（卡友身分升級，LEVEL 2）；台新帳戶包含台新新臺幣活期(儲)存款帳戶或 Richart 數位存款帳戶。需於帳單結帳日 3 個工作天前完成設定，升級資格在次期信用卡帳單結帳後次營業日生效。範例：結帳日每月 12 日，2026/7/7 完成申請，自 2026/7/13 起的消費適用 LEVEL 2 權益（指定通路最高 3.8%）。未完成設定者，享切換刷加碼通路最高 1.3%（LEVEL 1）。新申辦試用：2026/7/1–2027/12/31 新申辦 Richart卡或全家Richart卡，自核卡日起算 60 天內，無論是否完成扣繳設定，都可享 LEVEL 2 權益最高 3.8%；例：2026/7/10 核卡，至 2026/9/8 前的消費享 LEVEL 2，2026/9/9 後依實際任務達檻狀態判斷。保費 1.3% 與一般消費 0.3% 不受卡友身分限制。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據您的問題，回答如下：
+
+<b>1. 獲得最高 3.8% 回饋的條件</b>
+【信用卡｜台新Richart卡】
+要享有最高 3.8% 的回饋，需要滿足以下條件：
+* <b>領券與設定</b>：需於指定時間完成領券，並成功設定「台新帳戶自動扣繳台新信用卡帳款」。
+* <b>回饋組成</b>：最高 3.8% 是由「Pay著刷」方案的 LINE Pay 綁定支付最高 2.3% 回饋，加上 2026/7/1 至 2026/12/31 期間領取 LINE Pay 券加碼的最高 1.5% 回饋所組成。
+
+<b>2. 新申辦卡友的試用期</b>
+【信用卡｜台新Richart卡】
+新申辦卡友享有試用期。
+* <b>試用內容</b>：2026/7/1 至 2027/12/31 期間，新申辦台新Richart卡或全家Richart卡，自核卡日起算 60 天內，無論是否完成台新帳戶扣繳台新信用卡帳款，皆可享 LEVEL2 權益，最高 3.8% 回饋！
+
+<b>3. 2026/7/7 完成設定後的適用日期推算</b>
+【信用卡｜台新Richart卡】
+若持卡人的結帳日為每月 12 日，於 2026/7/7 完成設定，其適用日期與計算方式如下：
+* <b>設定狀態</b>：由於 2026/7/7 已在結帳日前完成設定，符合相關條件。
+* <b>適用日期</b>：根據領券與設定相關規則，2026 年 7 月活動的設定完成期限為 2026/7/31 前。由於該持卡人的結帳日為每月 12 日，其 2026/7/7 的設定動作會反映在 2026 年 7 月的消費週期中。
+* <b>回饋適用點</b>：由於 2026/7/7 屬於 2026 年 7 月活動的範圍內，且符合在 2026/7/31 前完成設定的要求，因此從 <b>2026/7/7</b> 當天發生的符合條件之消費起即可適用該回饋權益。
+
+<b>References</b>
+
+- [1] 信用卡_台新Richart卡_card_cg047_card001.pdf
+- [2] 信用卡_台新Richart卡_richart_credit-card.pdf
+- [4] 信用卡_台新Richart卡_offer_WM_20260623175648347.pdf
+- [7] 信用卡_台新Richart卡_offer_WM_20260615104836373.pdf
+- [8] 信用卡_台新Richart卡_offer_WM_20251231102359184.pdf</div></div></div></details><details id="rule-03"><summary><span class="id">rule-03</span> <span class="c part">△</span><span class="c part">△</span> Richart 卡每期帳單可拿加碼回饋的消費金額有上限嗎？台新Point 什麼時候入帳、效期多久？生日在 12 月的正卡人 2026/7/24 拿到 100 點，原文說什麼時候清除？</summary><div class="why"><b>判讀理由：</b>加碼上限（永久信用額度加 NT$30 萬）、入帳日後次二營業日、效期兩年、清除規則都對；但生日 12 月、2026/7/24 的 100 點，答案寫 2028/1/31，reference 原文範例是 2030/1/31，錯；答案中間還寫過「2027 年 1 月」，前後不一致。</div><div class="why old"><b>上一輪（重新匯入後）的理由：</b>上限（永久信用額度加 NT$30 萬、超出 0.3%）、入帳（入帳日後次二營業日）、效期兩年、生日月次月最後一天清除、範例 2030/1/31 都對。上限被寫成「針對國內節假日」，範圍描述偏窄，但數字正確、未與 reference 矛盾。各段都含「台新Point(信用卡)」。</div><div class="cols"><div><h4>標準答案</h4><div class="box">上限：各權益方案每期帳單適用加碼回饋的消費金額，以持卡人永久信用額度加計 NT$30 萬為限，超出的指定消費只適用一般消費 0.3%（保費免切換 1.3% 的額度與切換刷合併計算）。計算：正附卡交易逐筆計算，小數點後無條件捨去；特約商店分期付款及單筆消費分期 0 利率不回饋，單筆消費有利率分期以總金額一次計算。入帳：「入帳日」後次二營業日統一回饋至正卡人信用卡帳戶。效期兩年，台新銀行於正卡人每年生日月份次月的最後一天，自動清除兩年前累積且尚未兌換的點數。原文範例：生日 12 月，2026/7/24 獲得 100 點，若未於 2 年內兌換，將於 2030/1/31 清除。加註：從 2026/7/24 起算兩年是 2028/7/24，範例的 2030/1/31 與這個算法不同，原文沒有說明換算規則；此處照原文範例寫。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據您的問題，針對台新 Richart 卡的相關回饋與點數規定回答如下：
+
+<b>關於 Richart 卡回饋上限、台新Point 入帳與效期</b>
+
+【信用卡｜台新Richart卡】
+* <b>加碼回饋消費金額上限</b>：
+  在特定加碼活動中（例如國內節假日刷卡加碼），每期帳單適用加碼回饋之消費金額計算上限，以持卡人之永久信用額度加計 NT$30 萬為限；超出此限額之指定消費僅適用一般消費 0.3% 台新Point(信用卡)回饋。
+
+* <b>台新Point 入帳時間</b>：
+  正附卡之交易將於「入帳日」後次二營業日，統一回饋至正卡人信用卡帳戶。實際回饋時間依台新銀行作業時間為準。
+
+* <b>台新Point 效期</b>：
+  有效期限為兩年。期限屆滿後尚未兌換之點數即失效。台新銀行將於正卡人每年生日月份次月之最後一天，自動清除正附卡人兩年前累積且尚未兌換之台新Point (信用卡)。
+
+【信用卡｜台新Richart卡】
+* <b>生日在 12 月的正卡人點數清除時間推算</b>：
+  根據規則，台新銀行將於正卡人每年生日月份次月之最後一天，自動清除兩年前累積且尚未兌換之點數。
+  若正卡人生日在 12 月，則其生日月份次月為 1 月。
+  若於 2026/7/24 獲得 100 點，該筆點數的兩年效期屆滿時，將於其生日月份次月（即 2027 年 1 月）的最後一天進行清除。然而，依據規則中「兩年前累積且尚未兌換」之邏輯，若以 2026 年獲得的點數來看，其清除週期會依據該規則規定的年份與月份進行計算。
+  根據文件中的範例：若正卡人生日在 12 月，2026/7/24 獲得 100 點，其兩年效期內若未兌換，將於 <b>2028/1/31</b> 清除該筆點數（計算方式：2026 年獲得，兩年後為 2028 年，生日月份 12 月之次月為 1 月，故於 2028/1/31 清除）。
+
+<b>References</b>
+
+- [1] 信用卡_台新Richart卡_card_cg047_card001.pdf
+- [2] 信用卡_台新Richart卡_offer_WM_20260615104836373.pdf
+- [3] 信用卡_台新Richart卡_richart_discount_359.pdf
+- [4] 信用卡_台新Richart卡_richart_discount_391.pdf
+- [5] 信用卡_台新Richart卡_offer_WM_20251231102359184.pdf</div></div></div></details><details id="fee-01"><summary><span class="id">fee-01</span> <span class="c ok">✓</span><span class="c part">△</span> 台新信用卡遲繳或只繳最低應繳金額，會有哪些費用？循環利率範圍是多少？違約金怎麼算？</summary><div class="why"><b>判讀理由：</b>循環利率 2.88%–15%、違約金 300／400／500 元、三期為上限、當期應繳總金額不足 1,000 元免收都對；費用部分答了循環利息與違約金。沒答最低應繳金額的組成（10%、5% 等）與利息公式，題目問的是費用、利率範圍、違約金，故給 ✓（邊界案例）。觸發段：「* **遲繳或只繳最低應繳金額之費用**……循環信用利息……違約金」與「* **違約金計算方式**……新臺幣 300／400／500 元……」兩段都講費用金額，整段沒有「信用卡」「金融卡」（只有「循環信用」「持卡人」）。</div><div class="cols"><div><h4>標準答案</h4><div class="box">最低應繳金額包含當期新增一般消費的 10%、預借現金及前期未清償帳款的 5%、分期的每期本金與利息、超過信用額度的金額、逾期未付的最低應繳，以及循環利息、年費、違約金、各項手續費等；總和低於 NT$1,000 以 NT$1,000 計。循環信用利息 = 剩餘未付款項 × 天數 × 年利率 ÷ 365；約定條款第十五條範例註明年利率上限 15%，依電腦評分結果調整，實際利率按當期帳單利率收取。權益頁面（循環信用利息及違約金）列出一般利率 13 等級（2.88%、3.88%、5%、6% 到 15%）與專案利率 4 等級（0.00%–7.99% 等）。繳款截止日前結清全部應付帳款，或繳款後剩餘未付款項不足 NT$1,000，結帳日後的循環利息不收。違約金：當期繳款延滯 NT$300；連續 2 期，第 2 期 NT$400；連續 3 期（含）以上，第 3 期 NT$500，以 3 期為上限；當期帳單應繳總金額不足 NT$1,000（含）者免收。加註：權益頁面同一頁還有第二段循環利息文字，寫「年利率6.75%~45%」、一般利率 10 等級，並說未付清最低應繳金額時得調整為 15%，與第一段（2.88%~15%、13 等級）及約定條款（上限 15%）不一致，原文沒有標示哪一段是舊版。兩段的違約金免收條件也不同：一段寫「應繳總金額不足 1,000（含）」，另一段寫「未繳清金額不足 1,000」。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據您的問題，針對台新銀行的信用卡遲繳或僅繳最低應繳金額之費用、循環利率範圍及違約金計算方式，整理如下：
+
+<b>信用卡費用與利率說明</b>
+
+【信用卡｜全部信用卡】
+* <b>循環信用利率範圍</b>
+  循環信用年利率範圍為 2.88% 至 15%，實際利率會依據個人的信用評分進行定期評估，並按當期月結帳單利率收取。若符合符合本行信用卡會員約定條款第22條之情形，本行得調整循環利率至年利率上限 15%。
+
+* <b>遲繳或只繳最低應繳金額之費用</b>
+  若持卡人未於每月繳款截止日前付清當期最低應繳金額，會產生以下費用：
+  1. <b>循環信用利息</b>：將「得計入循環信用本金之帳款」依各筆帳款於起息日應適用之循環信用利率，自各筆帳款入帳日起計算至該筆帳款結清之日止。
+  2. <b>違約金</b>：若未能於繳款截止日前付清當期最低應繳金額，台新銀行除計算循環信用利息外，亦會加收違約金。
+
+* <b>違約金計算方式</b>
+  違約金的收取標準依據繳款延滯的期數而有所不同：
+  1. <b>當期繳款發生延滯時</b>：計付違約金新臺幣 300 元。
+  2. <b>連續 2 期發生繳款延滯時</b>：第 2 期計付違約金新臺幣 400 元。
+  3. <b>連續 3 期（含）以上發生繳款延滯時</b>：第 3 期計付違約金新臺幣 500 元。
+  
+  <b>注意事項</b>：
+  * 若持卡人至當期繳款截止日止，「當期帳單應繳總金額」不足新臺幣 1,000 元（含）者，免收違約金。
+  * 惟持卡人違反前開付清當期最低應繳金額之約定連續三期以上（含）者，其應付之違約金以三期為上限。
+
+<b>References</b>
+
+- [2] 信用卡_全部_download_word_CR04131_1150B.pdf
+- [1] 信用卡_全部_download__115_001final.pdf</div></div></div></details><details id="fee-02"><summary><span class="id">fee-02</span> <span class="c ok">✓</span><span class="c ok">✓</span> 用台新信用卡預借現金要付多少費用？刷國外消費時，除了匯率之外還會被加收什麼費用？</summary><div class="why"><b>判讀理由：</b>預借現金 3.5% 加 NT$150、匯款作業處理費 NT$100、國外交易 1% 加 0.5% 都對；沒提退款不退還國外交易手續費與未清償計循環利息，屬補充。</div><div class="cols"><div><h4>標準答案</h4><div class="box">預借現金：每筆預借金額的 3.5% 加新臺幣 150 元手續費；若以電話語音或網路預借現金，並要求匯入台新銀行以外的金融機構，另付匯款作業處理費新臺幣 100 元；預借現金於當期繳款截止日前未全部清償，未清償部分計收循環信用利息。國外交易：依國際組織匯率結匯後，加計台新銀行應給付國際組織的手續費，以及台新銀行以交易金額「百分之○．五」計算的國外交易服務費（這兩項費率是新臺幣結付的情形；外幣結付另依約定）；國際組織向台新銀行收取的服務費率為交易額百分之一，可能隨時變更；退款時不退還原刷卡交易的國外交易手續費。Richart 卡頁面提到台新Pay+ 日韓交易「免1.5%國外交易手續費」。加註：1.5% 等於條款的 1%（國際組織）加 0.5%（國外交易服務費），但原文沒有寫出這個加總。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據您的問題，針對台新信用卡的預借現金費用與國外消費加收之費用，回答如下：
+
+<b>信用卡預借現金與國外交易費用說明</b>
+
+【信用卡｜全部信用卡】
+<b>預借現金費用</b>
+*   <b>手續費</b>：每筆預借現金金額之 $3.5\% + \text{NT\$150}$。
+*   <b>匯款作業處理費</b>：若持卡人辦理電話語音預借現金或網路預借現金，並要求台新銀行將該筆預借現金金額匯入台新銀行以外之金融機構者，除上述手續費外，另需支付台新銀行匯款作業處理費 $\text{NT\$100}$。
+*   <b>注意事項</b>：持卡人於海外實體通路進行一般消費時，若輸入預借現金密碼（PIN Code）作為海外交易識別碼，仍視同一般交易，不會收取預借現金手續費。
+
+【信用卡｜全部信用卡】
+<b>國外交易加收費用</b>
+當持卡人在國外進行交易（含辦理退款），若交易貨幣非為新臺幣，或在國外以新臺幣進行交易（包括網路交易或交易對象所在國為國外者）時，除了依國際組織匯率換算外，還會加收以下費用：
+*   <b>國際組織服務費</b>：依各信用卡國際組織約定，金額為交易金額之 $1\%$。
+*   <b>台新銀行服務費</b>：交易金額之 $0.5\%$。
+*   <b>注意事項</b>：因市場匯率波動，折算匯率與簽帳當日之匯率可能會有不同，持卡人須自行負擔匯差風險。
+
+<b>References</b>
+
+- [1] 信用卡_全部_download__115_001final.pdf
+- [4] 信用卡_全部_download_word_CR04131_1150B.pdf
+- [7] 信用卡_全部_rights_notice_-00001.docx
+- [10] 信用卡_全部_offer_WM_20241101134658243.pdf</div></div></div></details><details id="fee-03"><summary><span class="id">fee-03</span> <span class="c ok">✓</span><span class="c ok">✓</span> 新光三越無限卡／世界卡的年費是多少？首年和之後怎麼免年費？</summary><div class="why"><b>判讀理由：</b>年費正附卡各 NT$4,500、2026/12/31 前首次申辦首年免、持卡年度消費 30 萬／60 萬／90 萬減免規則都與 reference 一致。</div><div class="why old"><b>上一輪（重新匯入後）的理由：</b>正附卡各 NT$4,500、2026/12/31 前首次申辦首年免、次年消費 30 萬減免與 60／90 萬累進、不計入項目都對。「年費優惠與免收辦法」段談費用，只有卡名沒有卡別字樣，降為 △。</div><div class="cols"><div><h4>標準答案</h4><div class="box">年費正卡 NT$4,500、附卡 NT$4,500，需收取時列帳於信用卡帳單。2026/12/31 前首次申辦新光三越無限卡／世界卡，首年免年費。次年：持卡年度刷新光三越無限／世界卡消費達 NT$30 萬，可減免次年度年費（正附卡合併，30 萬減免一張正卡年費 NT$4,500；累積 60 萬減免一張正卡加一張附卡；90 萬減免一張正卡加二張附卡，依此類推）。累積金額不能遞延到下一個持卡年度；預借現金及其手續費、年費、循環利息、違約金、基金交易、各項手續費等不計入。加註：免收辦法寫「正附卡合併」，注意事項第 2 點寫「正卡、附卡依卡號分開累計累消」，同一頁的兩處說法不一致，原文沒有說明如何對應。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據您的問題，以下為新光三越無限卡／世界卡的年費及免年費辦法說明：
+
+【信用卡｜新光三越無限・世界卡】
+* <b>年費收費標準</b>：正卡 NT$4,500，附卡 NT$4,500。若需收取年費，將列帳於信用卡帳單。
+
+【信用卡｜新光三屬無限・世界卡】
+* <b>首年免年費</b>：於 2026/12/31 前首次申辦新光三越無限卡/世界卡，可享有首年免年費優惠。
+* <b>次年度免年費辦法</b>：持卡年度刷新光三越無限/世界卡消費達 NT$30 萬，可減免次年度年費。（註：正附卡合併計算，正卡與附卡依卡號分開累計；例如：累積 NT$30 萬可減免一張正卡年費 NT$4,500；累積 NT$60 萬可減免一張正卡+一張附卡；累積 NT$90 萬可減免一張正卡+二張附卡，依此類推。）
+
+<b>References</b>
+
+- [1] 信用卡_新光三越無限・世界卡_card_cg014_card0001.pdf
+- [3] 信用卡_全部_download_12_1150A.pdf
+- [4] 信用卡_全部_download_word_CR04131_1150B.pdf</div></div></div></details><details id="terms-01"><summary><span class="id">terms-01</span> <span class="c ok">✓</span><span class="c ok">✓</span> 依信用卡會員約定條款，卡片遺失時要怎麼處理？掛失前和掛失後被冒用的損失各由誰負擔？掛失手續費多少？</summary><div class="why"><b>判讀理由：</b>通知掛失、10 日內通知與 3 日內報案、掛失費 NT$200、掛失前自負額上限 NT$3,000 與免自負額情形、自動化設備預借現金不適用自負額、掛失後由台新銀行負擔都對；掛失後的例外只列 2 項，漏了「虛偽不實交易或共謀詐欺」，屬小缺漏。</div><div class="cols"><div><h4>標準答案</h4><div class="box">第十七條：應儘速以電話或其他方式通知台新銀行（或其指定機構）辦理掛失，並繳交掛失手續費新臺幣 200 元；台新銀行認有必要時，應於受理掛失日起 10 日內通知持卡人，要求於受通知日起 3 日內向警察機關報案或書面補行通知。掛失後被冒用的損失由台新銀行負擔，例外（持卡人仍須負擔）：他人冒用是持卡人容許或故意將卡交其使用；持卡人因故意或重大過失使他人知悉預借現金等交易密碼或其他辨識方式；持卡人與他人或特約商店為虛偽不實交易或共謀詐欺。掛失前被冒用：自負額以新臺幣 3,000 元為上限；掛失時起前 24 小時內被冒用，或冒用者在簽單上的簽名肉眼即可辨識與持卡人不同，持卡人免負擔自負額。在自動化設備預借現金，掛失前的冒用損失由持卡人負擔，不適用自負額。以下情形且台新銀行能證明已盡善良管理人之注意義務時，自負額約定也不適用：持卡人得知遺失而怠於立即通知，或自當期繳款截止日起已逾 20 日仍未通知；未於信用卡上簽名致他人冒用；掛失後未提出台新銀行請求的文件、拒絕協助調查或有其他違反誠信原則的行為。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">依據您提供的信用卡會員約定條款，針對卡片遺失的處理方式、冒用損失擔保以及掛失手續費的相關規定回答如下：
+
+<b>1. 卡片遺失的處理方式</b>
+【信用卡｜全部信用卡】
+* <b>通知義務</b>：當持卡人之信用卡發生遺失、被竊、被搶、詐取或其他遭持卡人以外之他人占有之情形時，應儘速以電話或其他方式通知台新銀行或其他經台新銀行指定機構辦理掛失手續。
+* <b>報案規定</b>：如台新銀行認有必要時，應於受理掛失手續日起十日內通知持卡人，要求於受通知日起三日內向當地警察機關報案或以書面補行通知台新銀行。
+
+<b>2. 掛失前與掛失後的冒用損失擔保</b>
+【信用卡｜全部信用卡】
+* <b>掛失前（包含掛失前24小時）</b>：
+    * 台新銀行將承擔持卡人辦理掛失手續時起，以及掛失前24小時內的冒用損失。
+    * <b>自負額限制</b>：持卡人被冒用之自負額以新臺幣 3,000 元為限。
+    * <b>免負擔自負額之情形</b>：
+        1. 持卡人於辦理掛失手續時起前 24 小時內被冒用者。
+        價2. 冒用者在簽單上之簽名，以肉眼即可辨識與持卡人之簽名顯不相同，或以善良管理人之注意而可辨識與持卡人之簽名不相同者。
+    * <b>不適用自負額之情形（由持卡人自行負擔）</b>：
+        1. 持卡人得知信用卡遺失或被竊等情形而怠於立即通知台新銀行，或自當期繳款截止日起已逾二十日仍未通知台新銀行者。
+        2. 持卡人違反約定，未於信用卡簽名致他人冒用者。
+        3. 持卡人於辦理掛失手續後，未提出台新銀行請求之文件、拒絕協助調查或有其他違反誠信原則之行為者。
+        4. 在自動化設備辦理預借現金部分，掛失手續前之冒用損失由持卡人負擔，不適用自負額約定。
+* <b>掛失後</b>：
+    * 持卡人自辦理掛失手續時起被冒用之損失，概由台新銀行負擔。
+    * <b>例外情形</b>：若發生以下情形，持卡人仍應負擔掛失後之損失：
+        1. 他人之冒用為持卡人容許或故意將信用卡交其使用者。
+        2. 持卡人因故意或重大過失將使用自動化設備辦理預借現金或進行其他交易之密碼，或其他辨識持卡人同一性之方式使他人知悉者。
+
+<b>3. 掛失手續費</b>
+【信用卡｜全部信用卡】
+* <b>費用金額</b>：每張卡片收取的掛失手續費為新臺幣 200 元。
+* <b>繳費方式</b>：此費用將會被列入下一期的信用卡帳單中。
+* <b>取消掛失規定</b>：若持卡人在掛失當天晚上 12:00 前找回卡片，可透過來電客服申請「取消掛失」，經核准後掛失手續費（新臺幣 200 元）將不予計收。
+
+<b>References</b>
+
+- [1] 信用卡_全部_rights_notice_right0907.docx
+- [2] 信用卡_全部_download__115_001final.pdf
+- [3] 信用卡_全部_download_12_1150A.pdf
+- [4] 信用卡_企業卡_attachment_corporate-Member-Agreement-Terms-202405.pdf
+- [9] 信用卡_全部_rights_payment_mobile-device.docx</div></div></div></details><details id="terms-02"><summary><span class="id">terms-02</span> <span class="c bad">✗</span><span class="c bad">✗</span> 2026 年 4 月 10 日生效的信用卡會員約定條款修訂，第二十二條第一項新增了哪些情形？第六條的修訂內容是什麼？</summary><div class="why"><b>判讀理由：</b>答案說資料沒有第二十二條，無法得知新增情形，但 reference 有答案（第九款加「經 165 通報或聯防通報」、新增第十款疑似涉詐欺），屬答「沒有資料」；第六條也沒有講出實際修訂（「溢繳」改「異常溢繳」、改為「其他顯不合理之情形」），只描述條文現況。</div><div class="cols"><div><h4>標準答案</h4><div class="box">修訂通知（台新銀行支付金融處，2026 年 2 月）：預計條款生效日 2026 年 4 月 10 日；持卡人如有異議，依第二十一條於異議期間內通知終止契約，未於期間內通知視為同意修訂後的條款。第二十二條第一項（可不事先通知或催告即降低額度、停卡或終止契約的情形）：第九款在「所持台新銀行任一信用卡之信用卡銷帳編號經通報為警示帳戶者」之外，加上「或經 165 通報，或經其他發卡機構聯防通報者」；新增第十款：持卡人於台新銀行之存款帳戶、電子支付帳戶或信用卡，經司法機關、司法警察機關或其他主管機關認定依詐欺犯罪危害防制條例或相關法令疑似涉及詐欺犯罪者。第六條（異常交易管控）：把「溢繳信用卡款項」改為「異常溢繳信用卡款項」，並把原本要求「可疑有虛偽不實交易或共謀詐欺、偽冒交易、折換金錢、取得不當利益」的文字，改成「或經台新銀行判斷有其他顯不合理之情形」時，台新銀行得保留授權與否之權利。115_001 修訂版的條款全文已是修訂後文字。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據您提供的資料，針對 2026 年 4 月 10 日生效之「信用卡會員約定條款」修訂內容回答如下：
+
+<b>關於 2026 年 4 月 10 日生效之條款修訂</b>
+
+<b>【信用卡｜全部信用卡】新增情形與修訂內容</b>
+【信用卡｜全部信用卡】
+針對您詢問之條款修訂內容：
+
+* <b>關於第二十二條第一項新增情形：</b>
+  根據提供的文件中，並未包含「第二十二條」的修訂條文內容。因此，無法從現有資料中得知該條款新增了哪些情形。
+
+* <b>關於第六條的修訂內容：</b>
+  【信用卡｜全部信用卡】
+  第六條（契約雙方之基本義務）的修訂內容主要在於風險控管、身分驗證及權益保障的文字精煉與範疇擴充，具體修訂內容如下：
+
+  1. <b>關於風險特店與異常交易之定義（擴充與精煉）：</b>
+     【信用卡｜全部信用卡】
+     修訂條文增加了對「至財團法人聯合信用卡處理中心列管之風險特店刷卡消費，或溢繳信用卡款項」等情形的描述。其目的在於更明確地界定當發生「其他異常簽帳時間、地點、項目、金額、次數異常（含與持卡人身分、職業、財產所得等背景顯不合理、接獲國際組織或其他銀行風險通報）」等可疑情形時，台新銀行得保留授權與否之權利，或限制、婉拒交易及停用卡片的權利。
+
+  2. <b>關於身分驗證與數位安全（新增/明確化）：</b>
+     【信用卡｜全部信用卡】
+     修訂條文明確要求持卡人應親自使用信用卡（包含綁定於行動裝置之手機信用卡），且不得將信用卡或其卡片上資料交付他人。此外，針對密碼管理的部分，明確提到了「第九條第三項之一次性密碼」等身分驗證方式的妥善保管與保密義務。
+
+  3. <b>關於交易與利益取得之限制：</b>
+     【信用卡｜全部信用卡】
+     條文明確規定持卡人不得與他人或特約商店為虛偽不實交易、偽冒交易或共謀詐欺，以使用信用卡方式折換現金或取得不當利益。
+
+  4. <b>不變之條款：</b>
+     【信用卡｜全部信用卡】
+     持卡人違反第二項至第五項約定致生之應付帳款責任，以及台新銀行應確保廣告內容真實、對持卡人義務不得低於廣告內容之規定，在修訂前後保持一致。
+
+<b>References</b>
+
+- [1] 信用卡_全部_download_115001.pdf
+- [2] 信用卡_全部_download_TSBmember20250801.pdf
+- [3] 信用卡_全部_download_2.pdf</div></div></div></details><details id="offer-01"><summary><span class="id">offer-01</span> <span class="c ok">✓</span><span class="c ok">✓</span> 全聯週年慶的刷卡活動一，哪幾天、在哪些門市、用什麼支付工具、刷滿多少可以拿回饋？大全聯算不算？</summary><div class="why"><b>判讀理由：</b>2026/10/30–12/3 每週六日、全聯實體門市不含大全聯、全支付 1,300 元贈 78 點、PX Pay 1,300 元贈 780 點都對。</div><div class="why old"><b>上一輪（重新匯入後）的理由：</b>日期、全聯實體門市不含大全聯、全支付 1,300 元 78 點、PX Pay 1,300 元 780 點都對。「關於大全聯是否包含在內」段談活動適用門市（適用範圍）沒有卡別字樣，降為 △；此段是否算「適用範圍」屬邊界判斷。</div><div class="cols"><div><h4>標準答案</h4><div class="box">活動一：2026/10/30–2026/12/3 的每週六、日，於全臺「全聯」實體門市（不含大全聯），以指定支付工具綁定台新卡消費，單筆滿額享回饋：全支付綁定台新信用卡刷滿 1,300 元贈全點 78 點（限量 5,000 份）；PX Pay 綁定台新信用卡或簽帳金融卡刷滿 1,300 元贈福利點 780 點（限量 2,500 份）。活動期間每週每全支付會員回饋一次、每全聯APP會員限贈一次，不累贈。除另行公告的活動外，全聯福利中心（含線上購物）使用台新實體卡支付不享任何回饋。另有活動二：2026/9/28–2027/1/3 首次以全支付綁定台新信用卡，不限通路首筆支付滿 299 元回饋全點 50 點（每週限量 700 份，共 9,800 份）。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據您提供的資料，針對全聯週年慶「活動一」的相關資訊回覆如下：
+
+【信用卡｜全部信用卡】
+* <b>活動時間</b>：2026/10/30-2026/12/3，每週六、日。
+* <b>適用門市</b>：全臺「全聯」實體門市（<b>不含大全聯</b>）。
+* <b>支付工具與回饋條件</b>：
+    * <b>全支付綁定台新信用卡</b>：刷滿 1,300 元贈全點 78 點（限量 5,000 份）。
+    * <b>PX Pay 綁定台新信用卡或簽帳金融卡</b>：刷滿 1,300 元贈福利點 780 點（限量 2,500 份）。
+
+【信用卡｜全部信用卡】
+* <b>關於大全聯是否包含在內</b>：根據活動說明，該活動於全臺「全聯」實體門市進行，明確註明<b>不含大全聯</b>。
+
+<b>References</b>
+
+- [2] 信用卡_全部_offer_WM_20260907090737422.pdf</div></div></div></details><details id="offer-02"><summary><span class="id">offer-02</span> <span class="c ok">✓</span><span class="c ok">✓</span> 新光三越週年慶的「新新券」要怎麼領？領了之後單筆消費要滿多少、可以再拿多少點？什麼時候回饋？</summary><div class="why"><b>判讀理由：</b>Richart Life APP 領券、2026/10/1 10:00、單筆滿 5,000 贈 500 點（上限 500、不累贈）、2027/2/28 前回饋都對；沒提限正卡人與 80,000 份，屬補充。</div><div class="why old"><b>上一輪（重新匯入後）的理由：</b>Richart Life APP 領券、2026/10/1 10:00、單筆滿 NT$5,000 贈 500 點、2027/2/28 前回饋、最高 21% 都對；缺限量 80,000 份與限正卡人。「補充資訊」段有 21% 回饋率、沒有卡別字樣，降為 △。</div><div class="cols"><div><h4>標準答案</h4><div class="box">適用台新新光三越聯名卡（含正附卡）。須在 Richart Life APP 領券，2026/10/1 10:00 開放，限量 80,000 份，限正卡人領券，重複領券仍視為一次資格。消費適用期間 2026/9/17–12/13，且入帳日需在 2026/12/18（含）前：於新光三越使用該聯名卡單筆消費滿 NT$5,000，贈 500 點台新Point(信用卡)（上限 500 點，不累贈），每正卡 ID 僅回饋一次。回饋預計 2027/2/28 前入正卡人信用卡點數帳戶。限實體卡或以台新Pay、Apple Pay、Google 錢包、Samsung Pay、skm pay 綁定本卡的交易，LINE Pay、街口支付等不適用。加上週年慶的百貨滿千送千點與聯名卡權益，活動頁寫合計最高 21%。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據您詢問關於新光三越週年慶「新新券」相關問題，整理資訊如下：
+
+【信用卡｜全部信用卡】
+* <b>領取方式</b>
+  須於指定期間至 Richart Life APP 完成領券。2026/10/1 10:00 開放領券，領券過程採限量方式，領完為止。
+* <b>消費門檻與回饋內容</b>
+  於 Richart Life APP 成功領取加碼優惠券，並於新光三越使用新光三越聯名卡單筆消費滿 5,000 元，可獲得 500 點台新Point(信用卡)加碼回饋（上限 500 點，不累贈）。
+* <b>回饋時間</b>
+  由台新銀行事後回饋，預計於 2027/2/28 前完成回饋。
+
+<b>References</b>
+
+* [2] 信用卡_多卡_offer_WM_20260914193622109.pdf
+* [1] 信用卡_全部_offer_WM_20260814165339540.pdf</div></div></div></details><details id="offer-03"><summary><span class="id">offer-03</span> <span class="c part">△</span><span class="c part">△</span> Richart 卡的「保險新戶最高 8%」活動，8% 是怎麼組成的？要符合什麼資格、什麼時候領券、回饋上限和回饋時間是多少？</summary><div class="why"><b>判讀理由：</b>8% = 原權益 2% + 加碼 6%、免切換 7.3%、保險新戶定義、領券與扣繳設定、領券 2026/10/30 10:00、上限 500 點都對；但回饋時間 reference 是預計 2027/4/30 前統一回饋，答案只寫交易期間與請款入帳日 2027/1/15，沒答回饋時間；也沒提限正卡人、與保費分期 0 利率擇一。</div><div class="cols"><div><h4>標準答案</h4><div class="box">2026/11/1–12/31 保險新戶首筆保費，刷台新Richart卡一次付清，享 6% 台新Point(信用卡)加碼回饋（上限 500 點）；假日搭配切換「假日刷」，原權益最高 2%，合計最高 8%；免切換則原權益最高 1.3%，合計最高 7.3%。資格：保險新戶定義為 2025/11/1–2026/10/31 期間未曾使用任一張台新信用卡刷保費，或刷保費累積金額 1,000 元（含）以下者；須在 Richart Life APP 領券，並完成設定以台新帳戶自動扣繳信用卡帳款，兩者缺一不可；領券從 2026/10/30（五）10:00 開放，限量 200,000 份，限正卡人領券。每 ID 歸戶僅回饋一次，回饋上限 500 點，預計 2027/4/30 前統一回饋。與保費分期 0 利率只能擇一，同時領券並登錄分期時優先適用分期 0 利率。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據您的問題，針對台新 Richart 卡的「保險新戶最高 8%」活動資訊整理如下：
+
+<b>【信用卡｜台新Richart卡】保險新戶最高 8% 活動說明</b>
+
+<b>1. 8% 回饋組成方式</b>
+該 8% 回饋是由原權益與加碼回饋組合而成：
+*   <b>原權益</b>：最高 2%
+*   <b>加碼回饋</b>：透過領券及搭配「假日刷」切換，可獲得最高 6% 加碼回饋。
+*   <b>合計</b>：最高可達 8% 回饋。
+*   *註：若不進行切換（免切換），則為原權益最高 1.3%，合計最高回饋 7.3%。*
+
+<b>2. 符合資格之條件</b>
+欲符合此活動資格，必須滿足以下條件：
+*   <b>保險新戶定義</b>：在 2025/11/1~2026/10/31 期間，未曾使用任一張台新信用卡刷保費，或刷保費累積金額在 1,000 元（含）以下者。
+*   <b>領券與扣繳</b>：須於指定期間至 Richart Life APP 完成領券，且須以台新帳戶「自動扣繳」台新信用卡帳款。
+*   <b>刷卡方式</b>：須刷台新 Richart 卡進行「首筆保費一次付清」（含線上輸入卡號、綁定 Apple Pay、Google Pay、Samsung Pay 等）。
+
+<b>3. 領券時間</b>
+*   <b>開放領券期間</b>：2026/10/30(五) 10:00 起至領完為止（限量 200,000 份）。
+
+<b>4. 回饋上限與回饋時間</b>
+*   <b>回饋上限</b>：最高 500 點台新 Point(信用卡)。
+*   <b>回饋時間（交易認列時間）</b>：
+    *   須於 2026/11/1~2026/12/31 完成保險費扣繳交易。
+    *   且請款入帳日期須在 2027/1/15(含) 前之消費。
+
+<b>References</b>
+
+- [2] 信用卡_台新Richart卡_offer_WM_20260929134706445.pdf
+- [1] 信用卡_台新Richart卡_card_cg047_card001.pdf</div></div></div></details><details id="cross-01"><summary><span class="id">cross-01</span> <span class="c part">△</span><span class="c part">△</span> Richart 卡、街口聯名卡、Gogoro Rewards 聯名卡的免年費辦法各是什麼？年費金額有什麼不同？</summary><div class="why"><b>判讀理由：</b>街口聯名卡免年費辦法與金額、Gogoro 年費與首年免年費、Richart 首年免與電子帳單都對；但 Richart 年費金額答「資料中未列出」（reference 有各卡別金額），Gogoro 的三選一免年費辦法（電子帳單、扣繳設定、消費 6 萬）只答了首年免年費。</div><div class="cols"><div><h4>標準答案</h4><div class="box">Richart 卡（優惠期 2026/1/1–2027/12/31）：首年免年費，次年起使用台新電子／行動簡訊帳單且生效即免；年費標準：鈦金商務／商務御璽卡正附卡各 NT$4,500，御璽／鈦金／晶緻卡正卡 3,000、附卡 1,500，白金卡正卡 1,500、附卡 750，世界商務卡正卡 6,000、附卡免年費。街口聯名卡（2026/1/1–12/31）：使用台新電子／行動帳單且生效（需開卡）即免，同時使用實體帳單者不能參加；街口商務鈦金卡正附卡各 NT$4,500，街口晶緻卡正卡 3,000、附卡 1,500。Gogoro Rewards 聯名卡（2026/1/1–12/31）：年費正卡 NT$4,500、附卡 NT$4,500（特仕版只列正卡 NT$4,500）；2026/12/31 前申辦享首年免年費；免收辦法 3 選 1：使用台新電子／行動帳單且生效、設定台新／Richart 存款帳戶自動扣繳信用卡帳款、持卡年度累積消費滿 NT$6 萬（正附卡分開計算）。共通點是電子／行動帳單都是免年費途徑之一；Gogoro 另有扣繳設定與消費門檻兩條路；Richart 與 Gogoro 有首年免年費，街口頁面沒有寫。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據您提供的資料，針對 Richart 卡、街口聯名卡、Gogoro Rewards 聯名卡的免年費辦法與年費金額整理如下：
+
+<b>免年費辦法與年費金額比較</b>
+
+【信用卡｜台新Richart卡】
+* <b>免年費辦法</b>：首年免年費；次年起使用台新電子/行動簡訊帳單且生效，即可享免年費優惠。【參考文件 4】
+* <b>年費金額</b>：資料中未列出年費金額。
+
+【信用卡｜街口聯名卡】
+* <b>免年費辦法</b>：使用台新電子/行動帳單且生效（需開卡），即享免年費優惠（若同時使用實體帳單，則無法參加免年費活動）。【參考文件 2】
+* <b>年費金額</b>：
+    * 街口商務鈦金卡：每一正卡 NT$4,500/年，每一附卡 NT$4,500/年。【參考文件 2】
+    * 街口晶緻卡：每一正卡 NT$3,000/年，每一附卡 NT$1,500/年。【參考文件 2】
+
+【信用卡｜Gogoro Rewards 聯名卡】
+* <b>免年費辦法</b>：2026/12/31 前申辦 Gogoro Rewards 聯名卡，享首年免年費。【參考文件 1】
+* <b>年費金額</b>：正卡 NT$4,500、附卡 NT$4,500。【參考文件 1】
+
+<b>References</b>
+
+- [1] 信用卡_Gogoro Rewards聯名卡_card_cg042_card001.pdf
+- [2] 信用卡_街口聯名卡_card_cg038_card001.pdf
+- [4] 信用卡_台新Richart卡_card_cg047_card001.pdf</div></div></div></details><details id="cross-02"><summary><span class="id">cross-02</span> <span class="c bad">✗</span><span class="c bad">✗</span> 在海外刷卡，Richart 卡、台新雙幣卡、昇恆昌御璽卡的回饋率與上限各是多少？歐洲國家的實體商店消費各自有沒有回饋？</summary><div class="why"><b>判讀理由：</b>兩位判讀者一位給 △、一位給 ✗。三張卡只答對 Richart 一張，另兩張說「無資料」，歐洲實體商店也答反，裁定 ✗（和上一輪一致）。 判讀者原話：Richart 玩旅刷 3.3%、未設定扣繳 1.3%、一般消費 0.3%、30 萬上限對；但雙幣卡（2.5%）與昇恆昌御璽卡（1.5%）都答「無資料」；歐洲實體商店只列了不回饋的國家，結論等於 Richart 在歐洲實體商店不享有回饋，與 reference（Richart 在例外清單、玩旅刷含歐洲交易享 3.3%）矛盾。</div><div class="cols"><div><h4>標準答案</h4><div class="box">Richart 卡：切換「玩旅刷」，海外消費（含實體及線上、歐洲國家交易）享 3.3%，需完成台新帳戶扣繳設定，未完成則切換刷加碼通路最高 1.3%；未切換時一般消費 0.3%。每期帳單適用加碼回饋的消費金額，以持卡人的永久信用額度加計 NT$30萬為限，超出的指定消費只享一般消費 0.3%。台新雙幣卡：國外消費享 2.5% 外幣回饋無上限（2026/1/1–12/31），包含海外實體門市、國外網站、海外學費及歐洲地區實體商店。昇恆昌御璽卡（2026/2/1–12/31 結帳帳單）：海外消費 1.5%。表格的「單期帳單回饋上限(正附卡合併計算)」欄是一格「總上限2,500元」，跨指定市區店／航空公司／國內旅行社 2%、海外消費 1.5%、其他國內一般消費 0.5% 三列，所以 2,500 元是每期三類回饋合計的上限，不是海外消費專屬的上限。「不回饋消費項目」清單把「部分歐洲國家實體商店交易」列為不回饋，例外有回饋的卡別包含台新Richart卡、雙幣信用卡、昇恆昌無限卡，沒有列昇恆昌御璽卡。加註：昇恆昌御璽卡在歐洲實體商店有沒有回饋，原文沒有直接寫，只能從例外清單沒有列出來推測為沒有。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據您提供的資料，針對海外刷卡回饋率、上限及歐洲國家實體商店消費之回饋情況，回答如下：
+
+<b>海外刷卡回饋與歐洲實體商店回饋</b>
+
+【信用卡｜台新Richart卡】
+* <b>回饋率與上限</b>：
+    * 當切換至「玩旅刷」方案時，海外消費享最高 <b>3.3%</b> 回饋。
+    * 若未完成設定「台新帳戶 自動扣繳台新信用卡帳款」，則享加碼通路 <b>1.3%</b> 回饋；若選擇其他權益方案，則依一般消費 <b>0.3%</b> 回饋計算。
+    * 此外，若使用實體卡、Apple Pay、Google 錢包或 Samsung Pay 綁定台新銀行 Visa 卡以日圓 (JPY) 消費，可透過 Visa Select 優選回饋網頁登錄，享最高 <b>3.3%</b> 回饋。
+    * 回饋金額上限：每期帳單適用加碼回饋之消費金額，以持卡人之永久信用額度加計 <b>NT$30萬</b> 為限。超出此限額之指定消費僅適用一般消費 <b>0.3%</b> 回饋。
+* <b>歐洲國家的實體商店消費</b>：
+    * 根據相關規定，部分歐洲國家的實體商店交易屬於不回饋項目。這些國家包含：奧地利、比利時、保加利亞、克羅埃西亞、賽普勒斯、捷克、丹麥、愛沙尼亞、芬蘭、法國、德國、希臘、匈牙利、愛爾蘭、義大利、拉脫維亞、立陶宛、盧森堡、馬爾他、荷蘭、波蘭、葡萄牙、羅馬尼亞、斯洛伐克、斯洛維尼亞、西班牙、瑞典、英國、冰島、列支敦斯登及挪威等國家之實體商店（指營業場所、商業登記地址或營業執照於上述國家）之消費不享有回饋。
+
+【信用卡｜台新雙幣卡】
+* 根據提供的資料，並無關於台新雙幣卡海外刷卡回饋率與上限的具體數值。
+
+【信用卡｜昇恆昌御璽卡】
+* 根據提供的資料，並無關於昇恆昌御璽卡海外刷卡回饋率與上限的具體數值。
+
+<b>References</b>
+
+- [1] 信用卡_台新Richart卡_richart_credit-card.pdf
+- [2] 金融卡_Richart簽帳金融卡_richart_discount_277.pdf
+- [3] 信用卡_台新Richart卡_offer_WM_20260824114903981.pdf
+- [11] 信用卡_多卡_offer_WM_20221229194111856.pdf</div></div></div></details><details id="debit-confuse-01"><summary><span class="id">debit-confuse-01</span> <span class="c ok">✓</span><span class="c ok">✓</span> 台新的卡片遺失要掛失，手續費多少？信用卡跟簽帳金融卡一樣嗎？</summary><div class="why"><b>判讀理由：</b>信用卡 NT$200、簽帳金融卡 NT$100、兩者不一樣，與 reference 一致。</div><div class="cols"><div><h4>標準答案</h4><div class="box">不一樣。信用卡：依信用卡會員約定條款第十七條，辦理掛失須繳交掛失手續費新臺幣 200 元。簽帳金融卡：依簽帳金融卡相關費用說明，卡片遺失、被竊、毀損、斷裂或磁條消磁而申請掛失、補發新卡，每卡收取新臺幣 100 元手續費。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據您的問題，以下為台新銀行信用卡與簽帳金融卡辦理掛失手續費的相關資訊：
+
+<b>信用卡與簽帳金融卡掛失手續費比較</b>
+
+【信用卡｜全部信用卡】
+【信用卡｜全部信用卡】
+*   <b>掛失手續費</b>：每卡新臺幣 <b>200 元</b>。
+*   <b>費用說明</b>：
+    *   若持卡人在辦理掛失後，於掛失當日尋回卡片，且在掛失當日 24:00 前申請辦理「取消掛失」，經核准後可取消該筆新臺幣 200 元的掛失手續費。
+    *   此外，無論持卡人最後是否有進行補發新卡，掛失手續費均需支付。
+
+【簽帳金融卡｜全部金融卡】
+*   <b>掛失手續費</b>：每卡新臺幣 <b>100 元</b>。
+
+<b>總結：兩者手續費一樣嗎？</b>
+<b>不一樣。</b>
+*   【信用卡｜全部信用卡】的掛失手續費為 <b>NT$200</b>。
+*   【簽帳金融卡｜全部金融卡】的掛失手續費為 <b>NT$100</b>。
+
+<b>References</b>
+
+- [1] 信用卡_全部_rights_notice_right0907.docx
+- [5] 金融卡_全部_debit_info_TSBankGridPage-000004.pdf</div></div></div></details><details id="debit-confuse-02"><summary><span class="id">debit-confuse-02</span> <span class="c ok">✓</span><span class="c ok">✓</span> 我在國外想用台新的卡領當地現金，用信用卡預借現金跟用簽帳金融卡跨國提款，手續費各是多少？</summary><div class="why"><b>判讀理由：</b>信用卡預借現金 3.5% 加 NT$150、簽帳金融卡跨國提款 1.5% 加 NT$70 都對；額外的申請國外提款功能說明在 reference 沒有，不矛盾。</div><div class="cols"><div><h4>標準答案</h4><div class="box">信用卡預借現金：每筆預借金額的 3.5% 加新臺幣 150 元手續費。簽帳金融卡跨國提款：提領貨幣非新臺幣時，依信用卡國際組織所列結匯日匯率換算為新臺幣，每筆加收 1.5% 手續費，另加收新臺幣 70 元（信用卡國際組織及台新銀行處理手續費）。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據您的問題，我將分別針對「信用卡預借現金」與「簽帳金融卡跨國提款」的相關手續費進行說明。
+
+<b>信用卡預借現金手續費</b>
+
+【信用卡｜全部信用卡】
+當持卡人以信用卡辦理預借現金時，需依台新銀行及辦理預借現金之機構有關規定及程序辦理，並應繳付手續費，計算方式如下：
+* <b>手續費：</b> 每筆預借現金金額之 $3.5\% + \text{新臺幣 } 150 \text{ 元}$。
+* <b>額外費用：</b> 若持卡人辦理電話語音預借現金或網路預借現金，並要求台新銀行將該筆預借現金金額匯入台新銀行以外之金融機構者，除上述手續費外，另需支付台新銀行匯款作業處理費新臺幣 $100 \text{ 元}$。
+
+<b>簽帳金融卡跨國提款手續費</b>
+
+【金融卡｜全部金融卡】
+當您於國外使用台新銀行簽帳金融卡提領現金時，若提領貨幣非為新臺幣，手續費計算如下：
+* <b>手續費：</b> 除每筆需加收 $1.5\%$ 手續費外，另需加收新臺幣 $70 \text{ 元}$ 為信用卡國際組織及台新銀行處理手續費。
+
+【金融卡｜VISA金融卡】
+【金融卡｜Richart簽帳金融卡】
+對於使用 Visa 簽帳金融卡之提款需求，相關說明如下：
+* <b>功能啟用：</b> Visa 金融卡的國外提款功能須由持卡人主動申請始可啟用。持卡人可透過分行臨櫃或撥打客服專線（(02)2655-3355 轉 2）申請，每次申請期間以三十日為限。
+* <b>手續費：</b> 若提領貨幣非為新臺幣，台新銀行將依信用卡國際組織所列之結匯日匯率換算為新臺幣，並加收 $1.5\%$ 手續費。
+
+<b>References</b>
+
+- [3] 信用卡_全部_download__115_001final.pdf
+- [2] 金融卡_全部_debit_info_TSBankGridPage-000004.pdf
+- [13] 金融卡_VISA金融卡_download_11210.pdf
+- [5] 金融卡_VISA金融卡_debit_card_cg001_card01.pdf
+- [7] 信用卡_全部_offer_WM_20241101134658243.pdf</div></div></div></details><details id="debit-fact-01"><summary><span class="id">debit-fact-01</span> <span class="c ok">✓</span><span class="c ok">✓</span> 台新 Visa金融卡刷卡有什麼回饋？回饋什麼時候、用什麼方式入帳？</summary><div class="why"><b>判讀理由：</b>0.5% 現金回饋無上限、次月 10 日前撥入連結存款帳戶、以卡為單位與入帳日計算都對；沒提活動日期與不回饋項目，題目未問。</div><div class="cols"><div><h4>標準答案</h4><div class="box">活動日期 2026/7/1～2026/12/31，持台新銀行 Visa金融卡刷卡消費享 0.5% 現金回饋無上限。每月刷卡回饋金於次月 10 日前撥入持卡人 Visa金融卡連結的存款帳戶；回饋以「卡」為單位、以入帳日（扣款日）計算，不能兌換其他商品或轉讓。有不回饋項目，例如便利商店、全聯／大全聯、部分歐洲國家實體商店、各項代扣繳費用、政府規費等。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據您提供的資料，針對台新 Visa 金融卡的刷卡回饋說明如下：
+
+<b>刷卡回饋說明</b>
+
+【金融卡｜VISA金融卡】
+* <b>回饋內容</b>：持台新銀行 Visa 金融卡刷卡消費，可享 0.5% 現金回饋，且回饋無上限。
+* <b>回饋時間</b>：刷卡回饋金將於次月 10 日前撥入。
+* <b>入帳方式</b>：回饋金會撥入持卡人 Visa 金融卡連結之台新銀行存款帳戶。
+
+<b>相關注意事項</b>
+
+【金融卡｜VISA金融卡】
+* <b>計算基準</b>：回饋金計算係以「卡」為單位，以持卡人刷卡消費之「入帳日」（即「扣款日」）作為回饋計算基準。
+* <b>撥入時間說明</b>：刷卡回饋金額將於每月結算後，預計於每月 10 日以前（以台新銀行實際作業時間為準）將符合條件之現金回饋金額，統一撥入該簽帳金融卡所對應之台新銀行存款帳戶。
+
+<b>References</b>
+
+- [2] 金融卡_VISA金融卡_debit_card_cg001_card01.pdf
+- [6] 金融卡_VISA金融卡_download_11210.pdf</div></div></div></details><details id="debit-fact-02"><summary><span class="id">debit-fact-02</span> <span class="c ok">✓</span><span class="c ok">✓</span> 台新蝴蝶悠遊Debit卡有哪些功能？一個人可以申請幾張？</summary><div class="why"><b>判讀理由：</b>具金融卡、簽帳卡、悠遊卡功能，可刷卡提款存錢轉帳，自動加值，刷卡通知，每人限一張，都對；沒提 0.5% 現金回饋，屬補充。</div><div class="cols"><div><h4>標準答案</h4><div class="box">蝴蝶悠遊Debit卡是具備金融卡、簽帳卡（如 Visa金融卡）及悠遊卡功能的晶片金融卡，可以刷卡、提款、存錢、轉帳，最大特色是悠遊卡「自動加值（Autoload）」，不用提領現金加值；刷卡消費款項自動從帳戶扣除，刷卡享 0.5% 現金回饋，並有刷卡消費通知。每人限申請一張。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">【金融卡｜蝴蝶悠遊Debit卡】
+
+根據提供的資訊，蝴蝶悠遊Debit卡的功能與申請限制如下：
+
+<b>蝴蝶悠遊Debit卡功能</b>
+【金融卡｜蝴蝶悠遊Debit卡】
+蝴蝶悠遊Debit卡是一款結合了金融卡、簽帳卡（Debit Card）以及悠遊卡功能的晶片金融卡，其功能包括：
+* <b>全功能到位</b>：具備金融卡、簽帳卡及悠路卡功能，可進行刷卡消費、提款、存錢、轉帳。
+* <b>自動加值</b>：具備「自動加值（Autoload）」功能。當使用悠遊卡功能進行消費時，若儲值金額不足以支付當次消費或低於新臺幣100元，可透過連線式自動加值設備（如：悠遊卡加值機AVM、超商扣款等小額消費端末設備）從指定帳戶自動加值一定金額至悠遊卡內。
+* <b>刷卡消費通知</b>：
+    * <b>簡訊通知</b>：若在國內單筆成功刷卡交易金額達 NT$5,000（含）以上，將透過簡訊即時通知。
+    * <b>行動銀行推播通知</b>：透過台新行動銀行 APP，可接收不限金額及國內外刷卡消費的推播通知。
+* <b>刷卡消費與理財</b>：刷卡消費款項會直接從綁定的帳戶中扣除。此外，使用者可透過電子帳單服務查看消費明細，或透過網路銀行查詢近六個月內的交易明細。
+
+<b>申請張數限制</b>
+【金融卡｜蝴蝶悠遊Debit卡】
+* 每人限申請一張蝴蝶悠遊Debit卡。
+
+<b>References</b>
+
+- [1] 金融卡_蝴蝶悠遊Debit卡_debit_card_cg008_card001.pdf
+- [3] 金融卡_全部_debit_term_Debit-11312.pdf</div></div></div></details><details id="debit-negate-01"><summary><span class="id">debit-negate-01</span> <span class="c ok">✓</span><span class="c ok">✓</span> 台新財富管理Visa金融卡有沒有免費機場接送？</summary><div class="why"><b>判讀理由：</b>答「沒有」，與 reference 一致。</div><div class="cols"><div><h4>標準答案</h4><div class="box">沒有。財富管理Visa金融卡的卡片頁列出的特色是辦卡免年費、財富管理會員專屬卡面、刷卡享 0.5% 現金回饋、刷卡消費通知，卡片頁、約定條款與說明頁都沒有機場接送。免費機場接送是部分信用卡的權益（例如卓富無限卡），不是這張簽帳金融卡的權益。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據提供的知識庫資料，回答如下：
+
+【金融卡｜財富管理Visa金融卡】
+沒有。在提供的資料中，並未提及台新財富管理Visa金融卡具有免費機場接送的權益。</div></div></div></details><details id="debit-negate-02"><summary><span class="id">debit-negate-02</span> <span class="c ok">✓</span><span class="c ok">✓</span> 用台新 Visa金融卡刷機票，有送旅遊平安險嗎？</summary><div class="why"><b>判讀理由：</b>答「沒有」，與 reference 一致；另以「【信用卡｜雙幣信用卡】」分段補充雙幣卡的保險，卡別標示清楚，不算矛盾。</div><div class="cols"><div><h4>標準答案</h4><div class="box">沒有。Visa金融卡的卡片頁列出的特色是辦卡免年費、刷卡享 0.5% 現金回饋、刷卡消費通知，卡片頁、約定條款與說明頁都沒有旅遊平安險。刷卡支付公共運輸票款或團費送旅遊平安險是部分信用卡的權益（例如卓富無限卡、Richart 鈦金商務卡），不是這張簽帳金融卡的權益。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據您提供的資料，針對您的問題回答如下：
+
+【金融卡｜台新Visa金融卡】
+沒有。在提供的資料中，台新Visa金融卡並不包含旅遊平安險的相關權益。
+
+【信用卡｜雙幣信用卡】
+使用台新雙幣卡刷卡支付各被保險人之公共運輸全部票款或百分之八十以上之團費，即可享有以下旅遊相關保險：
+*   (1) 旅遊平安險：最高 3,000 萬。
+*   (2) 海外旅遊全程保障保險：最高 500 萬。
+*   (3) 高額旅遊不便險：最高 8 萬，包括班機延誤、行李延誤、行李遺失、劫機險等一系列保障。
+
+<b>References</b>
+
+- [1] 信用卡_雙幣信用卡_card_cg039_card001.pdf</div></div></div></details><details id="debit-wrongcard-01"><summary><span class="id">debit-wrongcard-01</span> <span class="c ok">✓</span><span class="c ok">✓</span> 我的 Richart 卡一般消費回饋是 0.5% 無上限，對嗎？</summary><div class="why"><b>判讀理由：</b>沒有直說「卡別說錯了」，但把 Richart 簽帳金融卡 0.5% 無上限與信用卡 Richart 卡 0.3% 分開列出且數字都對，與 reference 沒有矛盾。</div><div class="cols"><div><h4>標準答案</h4><div class="box">卡別說錯了。「Richart 卡」指信用卡台新 Richart 卡：沒有切換方案或未符合指定消費時，一般消費回饋 0.3%；切換刷各方案的指定消費最高 2%～10%，並須完成卡友身分升級。一般消費 0.5% 無上限是 Richart 簽帳金融卡的回饋（遛狗卡、綠狗卡、白狗卡，活動期間 2026/7/1～2026/12/31）。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據您提供的問題與相關資料，回答如下：
+
+您的理解不完全正確。由於您提到的是「Richart 卡」，需先釐清您所指的卡別：
+
+*   <b>【金融卡｜Richart 簽帳金融卡】</b>
+    若您持有的是 <b>Richart 簽帳金融卡</b>，則其一般消費回饋為 <b>0.5% 無上限</b>。
+
+*   <b>【信用卡｜台新 Richart 卡】</b>
+    若您持有的是 <b>台新 Richart 信用卡</b>，其一般消費的基本回饋率為 <b>0.3%</b>（若未完成設定台新帳戶自動扣繳台新信用卡帳款之任務，則享加碼通路 1.3% 點數，若選擇其他權益方案則依一般消費 0.3% 計算）。
+
+<b>總結對照</b>
+
+\| 卡別 \| 卡名 \| 一般消費回饋 \|
+\| :--- \| :--- \| :--- \|
+\| 【金融卡｜Richart 簽帳金融卡】 \| Richart 簽帳金融卡 \| 0.5% 無上限 \|
+\| 【信用卡｜台新 Richart 卡】 \| 台新 Richart 卡 \| 0.3% \|
+
+<b>References</b>
+
+- [2] 金融卡_Richart簽帳金融卡_richart_discount_277.pdf
+- [4] 信用卡_台新Richart卡_richart_credit-card.pdf
+- [6] 信用卡_台新Richart卡_offer_WM_20251230135727704.pdf
+- [10] 信用卡_台新Richart卡_offer_WM_20251229152758034.pdf</div></div></div></details><details id="debit-wrongcard-02"><summary><span class="id">debit-wrongcard-02</span> <span class="c ok">✓</span><span class="c ok">✓</span> 台新 Visa金融卡的切換刷，要怎麼切到 Pay著刷？</summary><div class="why"><b>判讀理由：</b>第一句就指出切換刷與 Pay著刷是信用卡台新Richart卡的功能、不是 Visa金融卡的，並說明由正卡人在 Richart Life APP 切換；沒講 Visa金融卡的 0.5% 回饋，屬補充。</div><div class="cols"><div><h4>標準答案</h4><div class="box">卡別說錯了。切換刷（7+1 回饋方案，包含 Pay著刷）是信用卡台新 Richart 卡的功能，由正卡人在 Richart Life App 切換。Visa金融卡是簽帳金融卡，沒有切換方案，刷卡消費享 0.5% 現金回饋無上限（2026/7/1～2026/12/31），回饋金次月 10 日前撥入連結的存款帳戶。</div></div><div><h4>模型的回答（改回答指示後）</h4><div class="box">根據您提供的問題與相關資料，回答如下：
+
+首先，需要更正您的問題前提。根據提供的資料，「切換刷」與「Pay著刷」方案是屬於<b>【信用卡｜台新Richart卡】</b>的權益與功能，而非「Visa金融卡」的權益。
+
+【信用卡｜台新Richart卡】
+關於如何切換至「Pay著刷」方案，說明如下：
+
+*   <b>切換方式</b>：持卡人可以透過 <b>Richart Life APP</b> 進行方案轉換。
+*   <b>轉換規則</b>：
+    *   核卡後的預設回饋方案為「天天刷」。
+    *   每位正卡人每日限轉換一次。
+    *   當日適用方案會以交易當日 23:59 (GMT+8) 記錄於台新銀行的回饋方案為準。
+
+【信用卡｜台新Richart卡】
+有關「Pay著刷」方案的相關資訊：
+
+*   <b>方案內容</b>：透過 LINE Pay 綁定台新Richart卡消費，並切換至「Pay著刷」方案，可享有指定通路最高 3.8% 的台新Point(信用卡)回饋。
+*   <b>適用期間</b>：2026/7/1 - 2027/3/31 之消費適用。
+*   <b>回饋條件</b>：需成功設定台新帳戶扣繳台新信用卡帳款。
+
+<b>References</b>
+
+- [6] 信用卡_台新Richart卡_card_cg047_card001.pdf
+- [5] 信用卡_台新Richart卡_offer_WM_20260722161535148.pdf
+- [4] 信用卡_台新Richart卡_offer_WM_20260615104836373.pdf</div></div></div></details>
+
+<h2>技術設定</h2>
+<ul class="note tight">
+<li>回答與抽取模型：Gemma 4 26B A4B（mlx-community/gemma-4-26b-a4b-it-4bit）；搜尋模型：Qwen3-Embedding-4B；重排：bge-reranker-v2-m3。</li>
+<li>檢索模式 mix，查詢上限 12,000 tokens（entity／relation 各 500），rerank 開啟，每個階段各跑一次。</li>
+<li>判讀：兩位判讀者（Claude Sonnet）各自獨立判讀，看不到彼此與前一輪分數，用程式逐題比對；意見不同的題目由主對話裁決（重新匯入後 cross-02；改回答指示後 rule-01、cross-02，都裁定 ✗）。</li>
+<li>「優化前」是 2026-11-12 加上卡別回答指示後的結果（docs/answer-prompt-eval.html）。</li>
+<li>同一設定重跑本來就會有一兩題的差異，單一題的升降不一定代表設定的效果。</li>
+</ul>
+</main></body></html>
