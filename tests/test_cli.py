@@ -4,7 +4,7 @@
 註冊都只透過 CLI 的外部行為觀察，不 import rag_lab 內部模組。
 
 關鍵設計決策：
-- 測試直接設定環境變數，不依賴 .env 檔。「缺漏」以空字串模擬：config 的
+- 測試直接設定環境變數，不依賴 .env 檔（tests/__init__.py 關掉 .env 載入；測 .env 行為的測試用 DOTENV_ENABLED 打開）。「缺漏」以空字串模擬：config 的
   load_dotenv 不覆蓋既有變數，所以空字串能擋住任何殘留的 .env 補值。
 - 子行程環境先清掉所有設定欄位，再放入有效的基準設定，避免開發機環境汙染結果。
 
@@ -21,6 +21,9 @@ from pathlib import Path
 from tests.fake_openai_server import FakeOpenAIServer
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# 測 .env 行為的測試用：蓋掉 tests/__init__.py 的 PYTHON_DOTENV_DISABLED=1
+DOTENV_ENABLED = {"PYTHON_DOTENV_DISABLED": "0"}
 
 # ==============================
 # 設定欄位（獨立於 rag_lab.config 的字面清單，來源為 spec／.env.example）
@@ -373,7 +376,7 @@ class UnmanagedLightragEnvTest(unittest.TestCase):
         # MinerU 子行程繼承 rag_lab 行程的環境，.env 的內容經 load_dotenv 進入行程環境
         with tempfile.TemporaryDirectory() as cwd:
             Path(cwd, ".env").write_text("MINERU_TABLE_ENABLE=false\n", encoding="utf-8")
-            result = run_cli(["eval", "q.jsonl"], {"PYTHONPATH": str(REPO_ROOT)}, cwd=Path(cwd))
+            result = run_cli(["eval", "q.jsonl"], DOTENV_ENABLED | {"PYTHONPATH": str(REPO_ROOT)}, cwd=Path(cwd))
         self.assert_rejected_naming(result, ("MINERU_TABLE_ENABLE",))
         self.assertNotIn("false", result.stderr)
 
@@ -403,7 +406,7 @@ class UnmanagedLightragEnvTest(unittest.TestCase):
         # LightRAG 在 import 時讀的是目前工作目錄的 .env，不是 repo 根目錄的
         with tempfile.TemporaryDirectory() as cwd:
             Path(cwd, ".env").write_text("CHUNK_SIZE=300\n", encoding="utf-8")
-            result = run_cli(["eval", "q.jsonl"], {"PYTHONPATH": str(REPO_ROOT)}, cwd=Path(cwd))
+            result = run_cli(["eval", "q.jsonl"], DOTENV_ENABLED | {"PYTHONPATH": str(REPO_ROOT)}, cwd=Path(cwd))
         self.assert_rejected_naming(result, ("CHUNK_SIZE",))
         self.assertNotIn("300", result.stderr)
 
