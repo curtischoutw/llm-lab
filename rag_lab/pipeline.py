@@ -74,6 +74,8 @@ CLI 只負責參數與輸出格式，這裡負責行為。
   PipelineError，該文件記成失敗、不寫入知識庫，其餘文件照常；沒有標頭就不匯入。沒設 DOCUMENT_HEADERS_FILE 時以上全部不做，
   chunk 內容與數量和以前相同。自訂 chunking_func 之後 RAG-Anything 不再替文字 chunk 標頁碼（processor 只在 chunker 是
   LightRAG 預設的才標），所以文字 chunk 沒有 page_idx；rag_lab 目前沒有用到頁碼。
+- build_rag 會把 rag_lab.extraction_repair 掛到 LightRAG 解析抽取輸出的函式前面：格式寫壞但看得出原意的實體／關係紀錄
+  先修好再交給 LightRAG，不整筆丟掉（匯入、讀快取重放、刪文件後重建都經過它；快取存的仍是模型原始輸出）。
 - 查詢走 LightRAG 的 aquery_llm（回 status 與 message），不用 aquery：後者在 LLM 失敗
   時回 None、非法模式也回 None。status 不是 success 或沒有答案內容一律當失敗。
 - 查詢預設 vlm_enhanced=False（只走 LLM、不讓 VLM 改寫答案；與 spec 一致，五種模式的答案才由
@@ -188,7 +190,7 @@ from lightrag.utils import compute_mdhash_id  # noqa: E402
 from raganything import RAGAnything, RAGAnythingConfig  # noqa: E402
 from raganything.callbacks import ProcessingCallback  # noqa: E402
 
-from rag_lab import chunking, models, registry, tables  # noqa: E402
+from rag_lab import chunking, extraction_repair, models, registry, tables  # noqa: E402
 
 # ==============================
 # 常數與例外
@@ -321,7 +323,9 @@ def build_rag(settings: Settings) -> RAGAnything:
 
     Returns:
         接好 LLM、VLM、embedding 三個模型函式與 rerank 函式的 RAGAnything；有設標頭檔時另接好依標題切塊的 chunker。
+        LightRAG 解析抽取輸出前會先經過 extraction_repair 的修補。
     """
+    extraction_repair.install()
     config = RAGAnythingConfig(
         working_dir=settings.working_dir,
         parser_output_dir=settings.parser_output_dir,
