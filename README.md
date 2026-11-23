@@ -55,10 +55,10 @@ flowchart LR
 | 送進 Gemma 的 context | 總上限 12,000 token；實體、關係各 500 token | 實體約 2 個、關係約 2 條、chunk 7–10 條（平均 8 條） |
 
 - 重排後依序放進 context，放到 12,000 token 為止，所以 20 條裡通常只有前 8 條左右送進 Gemma。
-- 12,000 是 2026-10-26 為了避免查詢時 GPU 記憶體不足而設的（當時 LightRAG 預設 30,000，prompt 有 29.7k token）。那時的 LLM 是 Qwen3-4B，跑在另一個 server；換成 Gemma 4 之後沒有重新量測上限。
+- 12,000 是 2026-10-26 為了避免查詢時 GPU 記憶體不足而設的（當時 LightRAG 預設 30,000，prompt 有 29.7k token）。那時的 LLM 是 Qwen3-4B，跑在另一個 server。2026-11-23 用 Gemma 4 重新量測：16,000、20,000 的 wired 記憶體最高都是 24 GB，但答對題數沒有變多（內容 ✓ 12k／16k／20k＝18／15／17），28 題 eval 從 21 分鐘變成 24.7、25.8 分鐘，所以維持 12,000。
 - 實體與關係的上限 500／500 是為 mix 調的（ticket 13，2026-11-01）：mix 答對題數 4 → 7。
 - 所有查詢都先重排（沒有開關）；重排失敗時該次查詢直接失敗，不會改用沒重排的順序。
-- 回答提示詞的第 6 點放 `rag_lab/pipeline.py` 的 `ANSWER_INSTRUCTIONS`：先分清楚問題講的是信用卡還是金融卡，兩種卡的資料分開寫。
+- 回答提示詞的第 6 點放 `rag_lab/pipeline.py` 的 `ANSWER_INSTRUCTIONS`：先分清楚問題講的是信用卡還是金融卡，兩種卡的資料分開寫；每段開頭標「【卡別｜卡名】」；子問題逐一回答；金額、日期照原文寫。段首標記讓卡別清楚，但答案會比較重複。
 
 ## 3. 建立環境
 
@@ -159,13 +159,15 @@ sudo sysctl iogpu.wired_limit_mb=26000; sysctl iogpu.wired_limit_mb
 .venv/bin/python -m rag_lab eval eval/questions.taishin.jsonl --modes mix
 ```
 
-從頭重建台新知識庫（接上電源、不要合上蓋子：`caffeinate -i` 擋不住合蓋睡眠）：
+從頭重建台新知識庫（接上電源、不要合上蓋子：`caffeinate` 擋不住合蓋睡眠）：
 
 ```sh
-for d in cards debit_cards richart rights downloads debit_info debit_terms richart_discounts offers offer_images rights_attachments; do
-  caffeinate -i .venv/bin/python -m rag_lab ingest data/taishin_credit_card/$d
-done
+caffeinate -i -s zsh -c 'for d in cards debit_cards richart rights downloads debit_info debit_terms richart_discounts offers offer_images rights_attachments; do
+  .venv/bin/python -m rag_lab ingest data/taishin_credit_card/$d
+done'
 ```
+
+- **防止睡眠要包住整個迴圈**：這台 Mac 的系統設定是閒置 1 分鐘就睡眠。`caffeinate` 只在它包住的程式執行期間擋睡眠；如果每個資料夾各包一次，兩個資料夾之間的空檔就會睡著，之後只靠系統短暫的背景喚醒斷斷續續地跑，還常因為溫度過高被強制睡回去（2026-11-22 重匯時發生過）。`-s` 讓接著電源時也不進系統睡眠。跑 eval 等長時間工作也一樣。
 
 - **支援格式**：PDF、PPT、Word、Excel（含舊格式 `.ppt` `.doc` `.xls`）、常見圖片格式。Office 文件先用 LibreOffice 轉成 PDF。以 `.` 或 `~$` 開頭的檔案不匯入。
 - **依標題切塊**（設了 `DOCUMENT_HEADERS_FILE` 時）：在 MinerU 標出的標題處切開，少於 100 token 的節併進下一節，chunk 上限 1,200 token；每個 chunk 開頭是標頭加章節名稱。規則與已知極限寫在 `rag_lab/chunking.py` 的模組說明。
@@ -209,8 +211,10 @@ done
 - 325 份全部成功（11 個資料夾 rc=0、doc status 全是 processed）；wired 記憶體最高 25 GB（門檻 27 GB），watchdog 沒觸發。
 - 結果：chunk 3,325、實體 11,552、關係 30,463；舊知識庫是 2,341／18,297／37,027。chunk 多是因為依標題切塊、多了 31 份；實體少 37% 的原因還沒查證（可能是中英名稱不再重複，也可能是格式錯誤丟棄變多）。
 - `offers` 後段（`信用卡_多卡`）每份比較慢：條款長、每個 chunk 抽出的東西多，不是機器變慢（server 解碼一直約 47 tok/s）。
+- 上表的耗時包含 Mac 睡著的時間：重匯期間資料夾之間的空檔沒有擋睡眠（當時的指令是每個資料夾各包一次 `caffeinate`），`debit_info`、`debit_terms`、`richart_discounts`、`offers` 前段與 `rights_attachments` 有幾段時間大部分在睡，實際執行時間比表上短。
 - 比前一次慢的原因：前一次抽取用 Qwen3-4B（另一個 server），這次用 Gemma 4 26B A4B；embedding 從 0.6B 換成 4B；所有文件重新解析。
-- 已知問題：Gemma 的抽取輸出有一部分格式錯誤（分隔符號寫壞、關係少了 keywords 欄位），LightRAG 整筆丟棄。`cards` 丟了實體 2.1%、關係 5.6%，前一次是 1.0%、0.3%。另有 44 次抽取輸出寫到 4096 token 上限，內容是重複迴圈或思考文字外漏。兩件事都列為待辦。
+- 抽取格式錯誤：Gemma 的抽取輸出有一部分格式錯誤（分隔符號寫壞、關係少了 keywords 欄位），LightRAG 會整筆丟棄（`cards` 丟了實體 2.1%、關係 5.6%，前一次是 1.0%、0.3%）。已加上修補（`rag_lab/extraction_repair.py`），並用快取裡的抽取輸出增量合併進知識庫：救回實體 342 筆、關係 1,085 筆。同 20 個 chunk 的小實驗：Qwen3-4B 抽取 0% 丟棄，Gemma 用英文 prompt 反而更差（關係丟 15.9%），所以先維持 Gemma＋修補。
+- 44 次抽取輸出寫到 4096 token 上限，內容是重複迴圈或思考文字外漏。LightRAG 仍會解析迴圈前的正常紀錄，損失小，決定不處理；上限也不能降（正常輸出有 69 次超過 2,048）。
 
 ### 過去的里程碑
 
@@ -223,6 +227,9 @@ done
 | 2026-11-04 | 加入金融卡 30 份 | 金融卡 8 題 ✓ 0 → 2 | `docs/debit-card-eval.html` |
 | 2026-11-11 | LLM 從 Qwen3-4B 換成 Gemma 4 | 內容 ✓ 8 → 14（28 題） | `docs/gemma4-vs-qwen-eval.html` |
 | 2026-11-12 | 加回答附加指示（分清卡別） | 內容 ✓ 14 → 16 | `docs/answer-prompt-eval.html` |
+| 2026-11-20～23 | 依標題切塊、卡片標籤、中文抽取、4B embedding，全量重匯；修補抽取格式錯誤 | 內容 ✓ 16 → 18、最終 ✓ 8 → 12 | `docs/rag-optimization-eval.html` |
+| 2026-11-23 | 試查詢上限 16k、20k | 沒變好、變慢，維持 12k | 同上 |
+| 2026-11-23 | 回答附加指示加段首卡別標記等 3 點 | 最終 ✓ 12 → 16（內容 ✓ 持平 18） | 同上 |
 
 eval 由兩個沒參與撰寫的 agent 各自判讀（✓、△、✗），分歧由主對話裁決。不同時期的判讀規則不同（2026-11-04 起加了卡別規則），跨期的分數不能直接比較。
 
