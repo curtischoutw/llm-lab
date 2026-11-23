@@ -138,7 +138,11 @@ __main__ ──► config ──► chunking
    │  │         ├───────► formats
    │  │         └───────► evaluation
    │  └────► graph_report
+
+kb_tool ──► pipeline
 ```
+
+`kb_tool` 是另一個入口（`python -m rag_lab.kb_tool`），只 import `pipeline`，見第 4.3 節。
 
 `__main__` 啟動時只 import `config`、`formats`、`evaluation`；只在執行對應子命令時才 import `pipeline`、`graph_report`，所以設定錯誤、題目檔格式錯誤能在載入 LightRAG／torch 之前就回報。
 
@@ -155,6 +159,7 @@ __main__ ──► config ──► chunking
 | `pipeline.py` | 核心流程：建立 RAGAnything 實例（`LabRAGAnything`：切大表格、計數寫入失敗）、匯入（解析、建圖、多模態描述）、查詢、批次比較；把 LightRAG 會吞掉的錯誤轉成可偵測的失敗（圖表公式描述或多模態寫入失敗的文件，整批結束後改記成 `failed`）；匯入時讀寫對照表並把每份成功的文件分類（新增、替換、沒變）；指定來源資料夾時列出來源已不在的文件，加 `prune` 才刪（`_prune_missing`，重用 `_remove_version`）；內容變了的文件先匯入新版本再刪舊版本，新版本失敗時清掉寫了一半的部分；`Session` 讓同一個 process 只初始化一次、依序呼叫 | `Session`（`ingest`、`query`、`evaluate`、`close`）、模組函式 `ingest(documents) -> IngestSummary`、`query(question, mode, vlm_enhanced=False) -> str`、`evaluate(questions, modes=None) -> list[list[Cell]]`（`modes` 指定只跑哪幾種檢索模式，`None` 為五種）、`PipelineError`、`SessionError`、`SessionClosedError` |
 | `evaluation.py` | `eval` 的題目檔讀取驗證與 Markdown 對照表排版，不需要任何模型；`resolve_modes` 把指定的檢索模式整理成依 `RETRIEVAL_MODES` 排序、不重複的 tuple，空的或不認得的名稱拋 `ValueError`（訊息列出可用的模式） | `load_questions(path)`、`render_report(...)`、`resolve_modes(modes)`、`RETRIEVAL_MODES`、`QuestionFileError` |
 | `graph_report.py` | 直接讀 `rag_storage/` 的 graphml，抽樣列出實體與關係，不需要模型 server | `load_graph(working_dir)`、`format_report(graph, sample_size, seed)` |
+| `kb_tool.py` | 知識庫工具：以 MCP（stdio，官方 `mcp` SDK）提供唯一一個工具 `query_knowledge_base`，給客服 agent 呼叫；以 mix 模式查詢、回傳 `Session.query` 的答案原文；`Session` 放在專用的 worker 執行緒（`Session` 只能在建立它的執行緒、且不能有執行中的 event loop），在 server 的 lifespan 裡開（SDK 進入 stdio 模式、把 fd 1 導到 stderr 之後，函式庫印到 stdout 的內容才不會混進協定訊息）；每次呼叫附加一行 JSONL 紀錄 | `python -m rag_lab.kb_tool [--log 路徑]`、`build_server(log_path)`、`SessionThread` |
 
 ### 3.2 `scripts/`：維運工具
 
@@ -205,6 +210,7 @@ __main__ ──► config ──► chunking
 | `test_keyword_json.py` | 抽關鍵字的輸出 JSON 有小錯：少 `]` 時 `query`、Python API、`eval` 照常完成且修好的關鍵字被拿去檢索；合法輸出的關鍵字不變；去掉 think 標籤；只保留字串項目；兩個欄位都是空陣列不算失敗；解析不出關鍵字格式時 `query` 結束碼 1、Python API 拋 `PipelineError`、`eval` 記成該格失敗，訊息含「抽關鍵字的輸出不是合法的 JSON」與輸出開頭（最多 200 字元）；請求仍帶同一份 JSON schema、不重試 |
 | `test_python_api.py` | 在同一個 process 裡依序呼叫 `rag_lab.pipeline` 的模組函式與 `Session`：連續呼叫、每次 ingest 的統計獨立、同一個 `Session` 只初始化一次並在關閉後釋放實例、誤用時的 `SessionError`、開 `Session` 失敗後不留狀態、忘了 `close()` 時的收尾、匯入圖片與 Office 文件、報告的階段時間和文件耗時用同一個時鐘（略過與失敗的文件欄位不變）、不支援的格式整批被拒絕、大表格切成小表與描述失敗後的重試、rerank 失敗讓 `query` 拋例外、rerank 端點不可達在查詢前就拋 `EndpointError`與 `evaluate` 記成失敗格、下一次呼叫不受影響 |
 | `test_examples.py` | 實際執行 `examples/` 的範例，確認在一個 `Session` 裡連續提問能跑完 |
+| `test_kb_tool.py` | 知識庫工具：以子行程啟動 MCP server、用官方 SDK 的 client 透過 stdio 呼叫；工具清單只有一個只收 `question` 的工具、回傳知識庫答案並寫 JSONL 紀錄（status、mode=mix、秒數、含時區的開始時間）、查詢走 mix（server 結束後答案快取的 key 以 `mix:query:` 開頭）、同一個 server 連續兩次呼叫都成功、端點不可達時 server 啟動失敗並在 stderr 寫出 `EndpointError` |
 
 ### 3.4 `examples/`：範例
 
@@ -304,6 +310,15 @@ with Session() as session:
 - `Session` 讀的是開啟當下的知識庫。開著的期間如果另一個 process（例如另一個終端機的 `python -m rag_lab ingest`）匯入新論文，這個 `Session` 看不到，要關掉重開。
 - 呼叫途中按 Ctrl-C 中斷後，不保證 `Session` 的狀態一致；中斷後應關閉 `Session` 再開新的。
 - 本機 Gemma 4 每題約 43 秒（2026-11-12 的 28 題 mix eval 花 20 分 10 秒）；同一個問題再問一次會命中 LLM 快取，幾秒內回答。
+
+### 4.3 給客服 agent 用的知識庫工具（MCP）
+
+`python -m rag_lab.kb_tool` 以 MCP（stdio）提供一個工具 `query_knowledge_base`：輸入 `question`，以 mix 模式查詢主知識庫，回傳答案原文。由 MCP client（例如 hermes-agent）以子行程啟動，不需要手動執行；client 的設定要指定專案 venv 的 Python、`-m rag_lab.kb_tool`，工作目錄設為 repo 根目錄（設定讀 `.env`）。
+
+- 每次呼叫附加一行 JSONL 到 `--log` 指定的檔案（預設 `output/kb_tool_calls.jsonl`）：`started_at`（ISO 8601 含時區）、`question`、`answer`、`status`、`error`、`seconds`、`mode`。
+- server 啟動時開 `Session`；LLM 或 embedding 端點不可達時 server 啟動失敗，原因（`EndpointError`）寫在 stderr。
+- 已知極限同第 4.2 節：讀到的是 server 啟動當下的知識庫，重新匯入後要重啟。
+- 用途與設計見 `.scratch/telegram-trial/spec.md`。
 
 ## 5. 設定
 

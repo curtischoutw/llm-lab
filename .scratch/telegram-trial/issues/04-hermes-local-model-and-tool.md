@@ -11,6 +11,6 @@
 - [ ] 凍結學習：`memory.memory_enabled: false`、`memory.user_profile_enabled: false`、`auxiliary.background_review.enabled: false`；確認 `memory`、`skill_manage` 不在工具清單（若仍在，記錄並回報）
 - [ ] 角色設定五條（只答台新卡片、查不到就說查不到、不清楚先追問、繁體中文、轉述保留答案內容與卡別）
 - [ ] 實際對話至少涵蓋：沒說卡別的問題（應追問）、明確的問題（應呼叫工具）、接續追問（「那它的年費呢？」）、無關問題（應拒絕）
-- [ ] 量測並記錄：hermes 送給模型的 prompt token 數；Gemma 4 是否在現有記憶體設定下跑完（有無 OOM）；每次知識庫查詢秒數（取自 JSONL）；session_search 是否存在
+- [ ] 量測並記錄：hermes 送給模型的 prompt token 數；Gemma 4 是否在現有記憶體設定下跑完（有無 OOM）；每次知識庫查詢秒數（取自 JSONL）；知識庫工具的啟動秒數（server 要等 `Session` 開好才回應 MCP 的 initialize；和 hermes 連線 MCP server 的逾時比較，若逾時較短就回報）；session_search 是否存在
 - [ ] 任一未知數不成立（跑不動、session_search 關不掉、仍讀 `~/.hermes`）就停下回報開發者，不自行繞過
 - [ ] 結果寫在本檔末尾的 Comments

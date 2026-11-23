@@ -73,6 +73,10 @@
 
 - 安裝在 `~/GitHub/hermes-sandbox/`（不建 git repo）。安裝指令用 `--hermes-home <sandbox>/home`、`--dir <sandbox>/home/hermes-agent`、`--non-interactive`、`--skip-browser`、`--skip-computer-use`。
 - 安裝腳本無法關閉的兩處：`~/.local/bin/hermes` 啟動檔與 `~/.zshrc`、`~/.zprofile` 的 PATH 行（`# Hermes Agent command`）。安裝後手動刪除，刪之前先看內容。
+- 執行安裝腳本時另設 `UV_CACHE_DIR`、`UV_PYTHON_INSTALL_DIR` 指向 sandbox 內的資料夾：安裝腳本沒有指定這兩個位置，uv 預設會把下載快取寫到 `~/.cache/uv`（目前這台電腦沒有這個資料夾）。腳本設的 `UV_NO_CONFIG=1` 只停用 uv 的設定檔，照理不影響環境變數，實機確認。
+- Python 版本：hermes 只支援 3.14（`pyproject.toml` 註解寫「we *only* support 3.14」，核心依賴都帶 `python_version >= '3.14'` 條件，在 3.12 上會被略過），執行期版本由 hermes 的 PM 鎖定（目前 3.14.9），不改用 pyenv 3.12.12。安裝腳本啟動 PM 時會先找現成的 3.14：這台電腦有 Homebrew 的 `/opt/homebrew/bin/python3.14`，預期借用它（只讀，不修改）。因此日後 `brew upgrade` 或移除 python3.14 可能讓 hermes 需要重裝，不影響其他環境。
+- 我們自己寫、放在 sandbox 的 Python 腳本（若有），用 pyenv 3.12.12 建 venv，與 llm-lab 相同。知識庫工具留在 llm-lab，由 llm-lab 的 `.venv`（pyenv 3.12.12）執行。
+- 安裝前後各拍一次快照比對：`~/.local`、`~/.cache`、`~/Library/Caches`、`~/Library/LaunchAgents`、`~/.zshrc`、`~/.zprofile`、`~/.claude`。sandbox 外新增或修改的項目全部列給開發者，再決定處理方式；不憑文件推定沒有。
 - sandbox 裡放 `run-hermes.sh`：設好 `HERMES_HOME` 再呼叫 hermes 的實際入口；之後一律用它，不直接打 `hermes`。要實機確認只靠 `HERMES_HOME` 就能運作、不會落回 `~/.hermes`。
 - 設定：`auth.adopt_external_logins: false`；不執行互動式 `hermes setup`；不執行 `hermes import-agent`；不安裝 gateway 為 launchd 服務（試用時段手動前景執行）。
 
@@ -126,5 +130,5 @@
 ## Further Notes
 
 - hermes-agent 的事實（安裝旗標、設定鍵、檔案位置）來自 2026-11-23 讀取的官方文件與 `scripts/install.sh`；部分頁面只讀了前段，實作時以實機行為為準。
-- 移除步驟：`hermes gateway stop`（若在跑）→ 刪除 `~/GitHub/hermes-sandbox/` → 確認 `~/.local/bin/hermes` 與 rc 檔的 PATH 行已不存在。llm-lab 裡的知識庫工具與紀錄保留。
+- 移除步驟：`hermes gateway stop`（若在跑）→ 刪除 `~/GitHub/hermes-sandbox/` → 確認 `~/.local/bin/hermes` 與 rc 檔的 PATH 行已不存在，ticket 03 快照比對列出的 sandbox 外項目也已處理。llm-lab 裡的知識庫工具與紀錄保留。
 - 依「一律先開 branch」的慣例，本 spec 與後續 tickets 的 commit 走 branch，不直接進 main。
