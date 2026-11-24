@@ -296,3 +296,86 @@ eval 由兩個沒參與撰寫的 agent 各自判讀（✓、△、✗），分�
 ```sh
 .venv/bin/python -m unittest scripts/test_fetch_papers.py scripts/test_fetch_documents.py scripts/test_fetch_taishin.py scripts/test_label_cards.py scripts/test_rename_documents.py
 ```
+
+## 10. 知識庫工具（MCP）
+
+`rag_lab/kb_tool.py` 把查詢主知識庫包成一個 MCP 工具，給客服 agent（目前是 hermes-agent）呼叫。agent 用自己的 LLM 主導對話（追問、理解上下文），需要卡片資料時呼叫這個工具。規格與試用紀錄在 `.scratch/telegram-trial/`。
+
+### 它做什麼
+
+- 只提供一個工具 `query_knowledge_base(question)`：用 mix 模式查詢主知識庫（不開 VLM 增強），回傳答案原文，含回答附加指示要求的段首卡別標記；LightRAG 的提示詞會要求模型在結尾列參考來源，但不保證每次都有。檢索模式不讓 agent 選。
+- 走 stdio，不開網路連接埠：由 agent 把它啟動成子程式，透過標準輸入輸出傳問題與答案；agent 結束時它也跟著結束。
+- 同一時間只跑一個查詢：查詢進行中時，新的呼叫不排隊，立刻回傳「目前有其他人在查詢，請稍候再問」。本機模型一題約 40–60 秒（2026-11-24 試用時的實測）。
+- 空白問題、模型端點連不上、查詢失敗時，回傳說明原因的工具錯誤（不含 API key），server 繼續服務下一個呼叫。
+- 每次呼叫附加一行紀錄到 `output/kb_tool_calls.jsonl`（開始時間、問題、答案、狀態、錯誤訊息、秒數、檢索模式），換掉 agent 之後也查得到知識庫被問了什麼、答了什麼。
+
+### 要不要另外啟用
+
+**不用手動啟動。** agent 依自己的設定在需要時啟動它。hermes 的設定在 `~/GitHub/hermes-sandbox/home/config.yaml`：
+
+```yaml
+mcp_servers:
+  rag_kb:
+    command: /bin/sh
+    args:
+      - -c
+      - cd /Users/curtis/GitHub/llm-lab && exec .venv/bin/python -m rag_lab.kb_tool
+    connect_timeout: 120
+```
+
+要準備的只有這些：
+
+1. 專案 venv 已安裝（第 3 節，只要做一次；`requirements.txt` 含 `mcp`）。在 repo 根目錄執行：
+
+   ```sh
+   pyenv install --skip-existing 3.12.12
+   "$(pyenv root)/versions/3.12.12/bin/python" -m venv .venv
+   .venv/bin/pip install -r requirements.txt
+   ```
+
+2. 本地模型 server 在 :8081 執行中（第 5 節，每次開機後都要做），**而且要在啟動 agent 之前開好**：工具啟動時就會檢查 LLM 與 embedding 端點，連不上時工具啟動失敗，agent 會回報連不到 MCP server。工具已經在跑之後 server 才停掉的話，查詢時回傳說明原因的工具錯誤，工具本身不會結束。
+
+   先設 GPU 記憶體上限（要 sudo，重開機會恢復預設）：
+
+   ```sh
+   sudo sysctl iogpu.wired_limit_mb=26000; sysctl iogpu.wired_limit_mb
+   ```
+
+   在 repo 根目錄另開一個終端機分頁啟動 server（這個分頁要一直開著，結束按 `Ctrl-C`）：
+
+   ```sh
+   ~/.local/share/pipx/venvs/mlx-vlm/bin/python scripts/vlm_server.py --mlx-cache-limit-gb 1 \
+     --host 127.0.0.1 --port 8081 \
+     --model mlx-community/gemma-4-26b-a4b-it-4bit \
+     --embedding-model mlx-community/Qwen3-Embedding-4B-4bit-DWQ \
+     --reranker-model BAAI/bge-reranker-v2-m3 \
+     --max-tokens 4096
+   ```
+
+   確認 server 已就緒（印出模型清單就可以用；載入模型要幾分鐘，沒回應就稍等再試）：
+
+   ```sh
+   curl -s http://127.0.0.1:8081/v1/models
+   ```
+
+3. `.env` 設好（第 3 節的 `cp .env.example .env`；工具與 CLI 讀同一份設定）。
+
+以上準備好之後，啟動 agent 即可，工具會被自動啟動。用 hermes 時：
+
+```sh
+~/GitHub/hermes-sandbox/run-hermes.sh chat          # 終端機對話
+~/GitHub/hermes-sandbox/run-hermes.sh gateway run   # Discord bot
+```
+
+- 工作目錄一定要是 repo 根目錄：`.env` 的 `WORKING_DIR=./rag_storage` 與紀錄檔 `output/kb_tool_calls.jsonl` 都是相對路徑，工作目錄不對就會讀寫到別的地方。llm-lab 資料夾搬家或改名時，agent 設定裡的路徑要一起改。
+- `connect_timeout` 設 120 秒：工具要先載入知識庫才回應 MCP 的初始化。
+- 要接到其他支援 MCP 的 agent，照它的格式設定同一行啟動指令即可。換紀錄檔位置用 `--log`：
+
+  ```sh
+  .venv/bin/python -m rag_lab.kb_tool --log output/kb_tool_calls.jsonl
+  ```
+
+### 已知限制
+
+- 讀的是工具啟動當下的知識庫。工具開著時另一個 process 匯入的內容看不到；重新匯入後要重啟 agent（hermes 的 gateway 或對話），工具才會重新載入。
+- 答案快取（`rag_storage/kv_store_llm_response_cache.json` 的 query 與 keywords 項目）以問題文字與查詢參數算出的雜湊值為 key，所有使用者共用：同一句問題第二次會在幾秒內回傳上一次的答案。要重新產生答案，先停掉 agent 再刪這兩類快取。
