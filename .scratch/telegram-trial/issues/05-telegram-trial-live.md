@@ -4,7 +4,7 @@
 
 **Blocked by:** 02, 04
 
-**Status:** ready-for-human
+**Status:** resolved
 
 - [ ] 開發者用 @BotFather 建 bot；`TELEGRAM_BOT_TOKEN`、`TELEGRAM_ALLOWED_USERS` 只寫在 sandbox 的 `.env`，不進任何 repo
 - [ ] 試用前檢查清單寫進本檔：設 iogpu 26000、啟動 MLX server、Mac 不睡眠、`run-hermes.sh gateway` 前景執行
@@ -45,3 +45,5 @@
 - 開發者用私訊錄影試用，每則約 70 秒～2 分鐘回覆，無錯誤。錄影中發現 Richart 年費問法不同就漏答各等級年費，原因是年費表只在一個圖表 chunk、隨問法掉出檢索結果（案例記在 `output/telegram_trial/知識庫案例_年費表措辭.html`）。
 - 試用者回饋回覆太長，處理見 ticket 06。
 - 試用結束要在 Developer Portal 按 Reset Token（token 出現在 Claude 對話紀錄）。
+
+2026-11-24 結案：開發者宣告試用結束。試用平台最後是 Discord（Telegram 因 429 限流沒有上線）。試用者回饋兩點：回覆太長（ticket 06，字數限制試過後撤回，只保留照原文轉述的兩條規則）；多卡比較容易出錯、建議拆成多次查詢（沒有處理，要先取得出錯的那段對話確認原因）。Telegram 兩個 bot 與 Discord bot 的 token 都出現在 Claude 對話紀錄中，要在 @BotFather 與 Discord Developer Portal 撤銷。
