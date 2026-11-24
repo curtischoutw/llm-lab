@@ -186,6 +186,7 @@ done'
   ```
 
   完整範例在 `examples/query_from_python.py`，`Session`、`ingest`、`evaluate` 的規則見 `docs/architecture.md` 第 4 節。
+- **知識庫工具（MCP）**：`python -m rag_lab.kb_tool` 以 MCP（stdio）提供查詢知識庫的工具給客服 agent（例如 hermes-agent），每次呼叫記一行到 `output/kb_tool_calls.jsonl`。由 agent 以子行程啟動，設定方式見 `docs/architecture.md` 第 4.3 節。
 
 ## 7. 實測數據
 

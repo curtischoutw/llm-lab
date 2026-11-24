@@ -21,7 +21,7 @@ ticket 的 CLI 測試都共用它。涵蓋 chat、vision、embeddings、rerank �
   共用詞彙的文字相似，檢索才找得回內容。
 - 綁定 127.0.0.1 的隨機埠，在背景 thread 啟停；用 context manager 使用。
 - 記錄收到的請求（requests）與 chat、embeddings 各自同時處理數的最大值
-  （max_inflight_chat、max_inflight_embed），並可注入故障（fail_chat、fail_vision）與延遲
+  （max_inflight_chat、max_inflight_embed；reset_max_inflight 歸零，只量之後的請求），並可注入故障（fail_chat、fail_vision）與延遲
   （chat_delay、embed_delay），讓測試從 HTTP 邊界觀察 CLI 的外部行為。
 - fail_chat_containing 只讓訊息文字含指定字串的 chat 請求失敗（模擬單一題目失敗）；
   fail_keywords 只讓關鍵字抽取請求（帶 response_format）失敗，naive 模式不做關鍵字抽取，
@@ -430,6 +430,12 @@ class FakeOpenAIServer:
         """目前收到的所有請求（每筆含 path、payload 與 authorization 標頭）。"""
         with self._server._lock:
             return list(self._server.requests)
+
+    def reset_max_inflight(self) -> None:
+        """把 chat、embeddings 同時處理數的最大值歸零，讓測試只量之後的請求（例如匯入之後的查詢）。"""
+        with self._server._lock:
+            for kind in self._server.max_inflight:
+                self._server.max_inflight[kind] = self._server._inflight[kind]
 
     @property
     def max_inflight_chat(self) -> int:
